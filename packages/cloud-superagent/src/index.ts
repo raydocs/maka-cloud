@@ -4,11 +4,13 @@ export {
   RecordingHandler,
   SilentHandler,
   Superagent,
+  coalesceInbox,
   type IngestResult,
   type SuperagentOptions,
 } from './runtime.js';
 export {
   admit,
+  admitSpawn,
   HeuristicJudge,
   ModelJudge,
   type JudgeClient,
@@ -209,7 +211,7 @@ export {
   type MetricsOptions,
   type MetricsReport,
 } from './metrics.js';
-export { evaluateWorker, runWatchdog } from './watchdog.js';
+export { evaluateWorker, reportsWaiting, runWatchdog } from './watchdog.js';
 export {
   createWorkspaceStore,
   GitCloneStore,

@@ -142,6 +142,8 @@ export interface WorkerRecord {
   lastHeartbeatAt: number;
   lastStepSignature: string | null;
   stepRepeats: number;
+  /** W2 nudges already delivered. One nudge, then escalate. JSON only; no schema bump. */
+  nudges?: number;
   usage: Usage;
   evidence: EvidenceBlock[];
   createdAt: number;
@@ -287,6 +289,10 @@ export interface AdmissionPolicy {
   selfLogins?: string[];
   denyUnownedBots?: boolean;
   allowSources?: EventSource[];
+  /** Live workers with a sandboxRef (or about to get one) allowed at once. */
+  maxBoxes?: number;
+  /** Tenant ledger cap in USD. Spawn is refused when usage already meets it. */
+  spendCapUsd?: number;
 }
 
 export interface WatchdogSettings {
@@ -301,7 +307,7 @@ export interface WatchdogFinding {
   rule: WatchdogRule;
   tenantId: string;
   workerId: string;
-  action: 'restart' | 'escalate' | 'retire' | 'stop';
+  action: 'restart' | 'escalate' | 'retire' | 'stop' | 'nudge';
   generation: number;
   detail: string;
 }

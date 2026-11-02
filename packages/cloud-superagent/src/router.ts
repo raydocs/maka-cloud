@@ -49,6 +49,27 @@ export function admit(
   return { ok: true, reason: 'admitted' };
 }
 
+/** Spawn-time cap: concurrent Instabox boxes and tenant spend. */
+export function admitSpawn(input: {
+  boxedLive: number;
+  wouldBox: boolean;
+  tenantUsdMicros: number;
+  policy: Pick<AdmissionPolicy, 'maxBoxes' | 'spendCapUsd'>;
+}): AdmissionResult {
+  if (input.policy.spendCapUsd !== undefined) {
+    const cap = Math.round(input.policy.spendCapUsd * 1_000_000);
+    if (input.tenantUsdMicros >= cap) return { ok: false, reason: 'spend_cap' };
+  }
+  if (
+    input.wouldBox &&
+    input.policy.maxBoxes !== undefined &&
+    input.boxedLive >= input.policy.maxBoxes
+  ) {
+    return { ok: false, reason: 'box_cap' };
+  }
+  return { ok: true, reason: 'admitted' };
+}
+
 export class HeuristicJudge implements RouterJudge {
   async decide(
     event: NormalizedEvent,

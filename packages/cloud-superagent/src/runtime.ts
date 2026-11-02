@@ -1,7 +1,7 @@
 import type { IngestInput } from './events.js';
 import { normalize } from './events.js';
 import { defaultIds } from './ids.js';
-import { admit, HeuristicJudge } from './router.js';
+import { admit, admitSpawn, HeuristicJudge } from './router.js';
 import { overBudget, Safety } from './safety.js';
 import type { SuperagentStore } from './store.js';
 import { MemorySuperagentStore } from './memory-store.js';
@@ -42,6 +42,26 @@ export type IngestResult =
   | { result: 'passthrough'; eventId: string; workerIds: string[]; judgeCalls: 0 }
   | { result: 'answered'; eventId: string; text: string; judgeCalls: number }
   | { result: 'spawned'; eventId: string; workerId: string; judgeCalls: number };
+
+/** Collapse a worker inbox into one event. Approval wins over the latest row. */
+export function coalesceInbox(events: NormalizedEvent[]): NormalizedEvent {
+  if (events.length === 0) throw new Error('coalesceInbox needs events');
+  const first = events[0];
+  if (events.length === 1 && first) return first;
+  const approval = [...events].reverse().find((row) => row.type === 'approval_granted');
+  const primary = approval ?? events[events.length - 1] ?? first;
+  if (!primary) throw new Error('coalesceInbox needs events');
+  return {
+    ...primary,
+    summary: `${events.length} events: ${events.map((row) => row.type).join(', ')}`,
+    fields: [
+      ...primary.fields,
+      ['coalesced', String(events.length)],
+      ['coalescedTypes', events.map((row) => row.type).join(',')],
+      ['coalescedIds', events.map((row) => row.eventId).join(',')],
+    ],
+  };
+}
 
 export class SilentHandler implements WorkerHandler {
   async handle(): Promise<HandlerResult> {
@@ -187,6 +207,25 @@ export class Superagent {
       };
     }
 
+    const boxedLive = this.store
+      .allWorkers()
+      .filter((row) => isLiveState(row.state) && row.sandboxRef).length;
+    const spawnGate = admitSpawn({
+      boxedLive,
+      wouldBox: Boolean(this.defaultSandboxRef),
+      tenantUsdMicros: this.store.tenantUsage(event.tenantId).usdMicros,
+      policy: this.admission,
+    });
+    if (!spawnGate.ok) {
+      this.audit(event.tenantId, null, 'filtered', at, { reason: spawnGate.reason });
+      return {
+        result: 'ignored',
+        reason: spawnGate.reason,
+        eventId: event.eventId,
+        judgeCalls: 1,
+      };
+    }
+
     const worker = this.spawn(event, decision.mandate, at);
     this.store.enqueue(worker.workerId, event.eventId, at);
     await this.drain(event.tenantId, worker.workerId);
@@ -228,6 +267,7 @@ export class Superagent {
         retire: async (worker, when, reason) => this.retire(worker, when, reason),
         stop: async (worker, when, reason) => this.stop(worker, when, reason),
         markStuck: (worker, when) => this.markStuck(worker, when),
+        nudge: async (worker, when, detail) => this.nudge(worker, when, detail),
       },
       at,
     );
@@ -361,40 +401,56 @@ export class Superagent {
 
     await this.wakeBox(worker);
     setState(worker, 'running');
+    const items: typeof pending = [];
+    const events: NormalizedEvent[] = [];
     for (const item of pending) {
       const event = this.store.event(tenantId, item.eventId);
       if (!event) {
         this.store.consume(workerId, item.seq, this.now());
         continue;
       }
-      const at = this.now();
-      worker.lastHeartbeatAt = at;
-      worker.lastEventId = event.eventId;
+      items.push(item);
+      events.push(event);
+    }
+    if (events.length === 0) {
+      if (worker.state === 'running') setState(worker, 'sleeping');
+      worker.updatedAt = this.now();
+      this.store.putWorker(worker);
+      if (worker.state === 'sleeping') await this.suspendBox(worker);
+      return;
+    }
+
+    const closer = events.find((event) => event.closesSubject);
+    const at = this.now();
+    worker.lastHeartbeatAt = at;
+    worker.updatedAt = at;
+    if (closer) {
+      worker.lastEventId = closer.eventId;
+      worker.subject = { ...worker.subject, closed: true };
+      this.store.putWorker(worker);
+      await this.finishClose(worker, closer, at);
+      for (const item of items) this.store.consume(workerId, item.seq, at);
+      return;
+    }
+
+    const event = coalesceInbox(events);
+    worker.lastEventId = event.eventId;
+    try {
+      const result = await this.handler.handle(this.context(worker, event), event);
+      const halt = this.applyResult(worker, result, at);
+      for (const item of items) this.store.consume(workerId, item.seq, at);
+      if (halt) {
+        this.store.putWorker(worker);
+        return;
+      }
+    } catch (error) {
+      worker.state = 'crashed';
       worker.updatedAt = at;
-      if (event.closesSubject) {
-        worker.subject = { ...worker.subject, closed: true };
-        this.store.putWorker(worker);
-        await this.finishClose(worker, event, at);
-        this.store.consume(workerId, item.seq, at);
-        return;
-      }
-      try {
-        const result = await this.handler.handle(this.context(worker, event), event);
-        const halt = this.applyResult(worker, result, at);
-        this.store.consume(workerId, item.seq, at);
-        if (halt) {
-          this.store.putWorker(worker);
-          return;
-        }
-      } catch (error) {
-        worker.state = 'crashed';
-        worker.updatedAt = at;
-        this.store.putWorker(worker);
-        this.audit(tenantId, workerId, 'crashed', at, {
-          message: error instanceof Error ? error.message : 'handler',
-        });
-        return;
-      }
+      this.store.putWorker(worker);
+      this.audit(tenantId, workerId, 'crashed', at, {
+        message: error instanceof Error ? error.message : 'handler',
+      });
+      return;
     }
     if (worker.state === 'running') setState(worker, 'sleeping');
     worker.updatedAt = this.now();
@@ -412,7 +468,10 @@ export class Superagent {
     if (result.transcriptPointer !== undefined) worker.transcriptPointer = result.transcriptPointer;
     if (result.workspaceRef !== undefined) worker.workspaceRef = result.workspaceRef;
     if (result.sandboxRef !== undefined) worker.sandboxRef = result.sandboxRef;
-    if (result.progress) worker.lastProgressAt = at;
+    if (result.progress) {
+      worker.lastProgressAt = at;
+      worker.nudges = 0;
+    }
     if (result.stepSignature) {
       if (result.stepSignature === worker.lastStepSignature) worker.stepRepeats += 1;
       else {
@@ -529,6 +588,34 @@ export class Superagent {
     current.updatedAt = at;
     this.store.putWorker(current);
     this.audit(current.tenantId, current.workerId, 'stopped', at, { reason });
+  }
+
+  private async nudge(worker: WorkerRecord, at: number, detail: string): Promise<void> {
+    const current = this.store.worker(worker.tenantId, worker.workerId);
+    if (!current || !isLiveState(current.state)) return;
+    current.nudges = (current.nudges ?? 0) + 1;
+    current.updatedAt = at;
+    this.store.putWorker(current);
+    const event: NormalizedEvent = {
+      eventId: this.ids.event(),
+      tenantId: current.tenantId,
+      source: 'internal',
+      type: 'watchdog_nudge',
+      subject: current.subject,
+      idempotencyKey: `nudge:${current.workerId}:${current.nudges}`,
+      actor: { login: 'watchdog', kind: 'system' },
+      occurredAt: at,
+      receivedAt: at,
+      summary: 'Watchdog nudged the worker.',
+      fields: [['detail', detail]],
+      closesSubject: false,
+    };
+    this.store.putEvent(event);
+    this.store.enqueue(current.workerId, event.eventId, at);
+    this.audit(current.tenantId, current.workerId, 'nudged', at, {
+      nudges: current.nudges,
+      detail,
+    });
   }
 
   private markStuck(worker: WorkerRecord, at: number): void {

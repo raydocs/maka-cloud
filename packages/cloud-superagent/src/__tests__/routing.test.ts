@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { actMandate } from '../types.js';
+import { admitSpawn, RecordingJudge } from '../router.js';
 import {
   commentPayload,
   github,
@@ -101,4 +102,84 @@ test('tenant pause refuses new unowned work', async () => {
   assert.equal(result.result, 'ignored');
   if (result.result !== 'ignored') return;
   assert.equal(result.reason, 'tenant_paused');
+});
+
+test('admitSpawn refuses a box cap and a spend cap', () => {
+  assert.equal(
+    admitSpawn({
+      boxedLive: 2,
+      wouldBox: true,
+      tenantUsdMicros: 0,
+      policy: { maxBoxes: 2 },
+    }).reason,
+    'box_cap',
+  );
+  assert.equal(
+    admitSpawn({
+      boxedLive: 1,
+      wouldBox: true,
+      tenantUsdMicros: 0,
+      policy: { maxBoxes: 2 },
+    }).ok,
+    true,
+  );
+  assert.equal(
+    admitSpawn({
+      boxedLive: 0,
+      wouldBox: false,
+      tenantUsdMicros: 5_000_000,
+      policy: { spendCapUsd: 5 },
+    }).reason,
+    'spend_cap',
+  );
+  assert.equal(
+    admitSpawn({
+      boxedLive: 9,
+      wouldBox: false,
+      tenantUsdMicros: 0,
+      policy: { maxBoxes: 1 },
+    }).ok,
+    true,
+  );
+});
+
+test('spawn admission caps concurrent Instabox boxes', async () => {
+  const judge = new RecordingJudge();
+  judge.inner = {
+    async decide() {
+      return { action: 'spawn', mandate: actMandate([REPO]), title: 'box' };
+    },
+  };
+  const { agent } = rig({
+    judge,
+    sandboxRef: 'box-1',
+    admission: { maxBoxes: 1 },
+  });
+  const first = await agent.ingest(github(TENANT, 'box-a', 'issues', issuePayload('opened', 30)));
+  assert.equal(first.result, 'spawned');
+  const second = await agent.ingest(github(TENANT, 'box-b', 'issues', issuePayload('opened', 31)));
+  assert.equal(second.result, 'ignored');
+  if (second.result !== 'ignored') return;
+  assert.equal(second.reason, 'box_cap');
+  assert.equal(second.judgeCalls, 1);
+});
+
+test('spawn admission refuses work after the tenant spend cap', async () => {
+  const judge = new RecordingJudge();
+  judge.inner = {
+    async decide() {
+      return { action: 'spawn', mandate: actMandate([REPO]), title: 'spend' };
+    },
+  };
+  const { agent, handler } = rig({
+    judge,
+    admission: { spendCapUsd: 0.001 },
+  });
+  handler.script = () => ({ usage: { usdMicros: 2_000 }, progress: true });
+  const first = await agent.ingest(github(TENANT, 'cap-a', 'issues', issuePayload('opened', 40)));
+  assert.equal(first.result, 'spawned');
+  const second = await agent.ingest(github(TENANT, 'cap-b', 'issues', issuePayload('opened', 41)));
+  assert.equal(second.result, 'ignored');
+  if (second.result !== 'ignored') return;
+  assert.equal(second.reason, 'spend_cap');
 });

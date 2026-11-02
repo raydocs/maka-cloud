@@ -290,6 +290,9 @@ export class CodingLoopHandler implements WorkerHandler {
     const worker = ctx.worker;
     const repo = worker.subject.repo ?? 'local/scratch';
     const boxId = worker.sandboxRef ?? 'loop';
+    if (event.type === 'watchdog_nudge') {
+      return { progress: false, plan: worker.plan };
+    }
     if (event.type === 'approval_granted') {
       return this.onApproval(ctx, event, repo);
     }

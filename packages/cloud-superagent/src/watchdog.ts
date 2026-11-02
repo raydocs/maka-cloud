@@ -8,6 +8,7 @@ export interface WatchdogActions {
   retire(worker: WorkerRecord, at: number, reason: string): Promise<void>;
   stop(worker: WorkerRecord, at: number, reason: string): Promise<void>;
   markStuck(worker: WorkerRecord, at: number): void;
+  nudge(worker: WorkerRecord, at: number, detail: string): Promise<void>;
 }
 
 export function evaluateWorker(
@@ -39,6 +40,10 @@ export function evaluateWorker(
     (worker.state === 'running' || worker.state === 'waking') &&
     at - worker.lastProgressAt > settings.stallAfterMs
   ) {
+    if (reportsWaiting(worker)) return undefined;
+    if ((worker.nudges ?? 0) < 1) {
+      return finding(worker, 'stuck', 'nudge', 'No progress; nudge once before escalate.');
+    }
     return finding(worker, 'stuck', 'escalate', 'No progress inside the stall window.');
   }
   if (
@@ -49,6 +54,11 @@ export function evaluateWorker(
     return finding(worker, 'crashed', action, 'Heartbeat lost or the handler crashed.');
   }
   return undefined;
+}
+
+/** Memory or plan that self-reports waiting is not a W2 stall. */
+export function reportsWaiting(worker: WorkerRecord): boolean {
+  return /\bwaiting\b/i.test(`${worker.memory}\n${worker.plan}`);
 }
 
 function finding(
@@ -84,6 +94,7 @@ export async function runWatchdog(
     if (found.action === 'restart') await actions.restart(worker, at);
     else if (found.action === 'retire') await actions.retire(worker, at, found.detail);
     else if (found.action === 'stop') await actions.stop(worker, at, found.detail);
+    else if (found.action === 'nudge') await actions.nudge(worker, at, found.detail);
     else actions.markStuck(worker, at);
     if (expired) {
       for (const row of store.pendingApprovals(worker.tenantId, worker.workerId)) {

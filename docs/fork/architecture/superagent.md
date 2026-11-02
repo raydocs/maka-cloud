@@ -272,6 +272,7 @@ Intake drops a payload it cannot parse. It does not invent a subject.
 | `lastHeartbeatAt` | ms | Watchdog W1. |
 | `lastStepSignature` | string \| null | Watchdog W3. |
 | `stepRepeats` | int | |
+| `nudges` | int? | W2: one nudge already delivered. JSON only; no schema bump. |
 | `usage` | `{ tokens, usdMicros, wallMs }` | |
 | `createdAt` / `updatedAt` / `retiredAt` | ms | |
 
@@ -519,6 +520,7 @@ Deterministic, no model. Drops:
 - source not in the tenant's allow-list
 - actor in `selfLogins` or `bot` **when the event is unowned**
 - tenant paused / over its daily cap (metering hook returns `stop`)
+- before spawn: live Instabox workers at `maxBoxes`, or tenant ledger at `spendCapUsd`
 - subject already closed and unowned
 - unowned `ci_*` (noise; owned CI pass-through already happened)
 - inferred strength when the Policy says "explicit only"
@@ -552,10 +554,11 @@ starts a sandbox from the Router turn).
 
 ### 7.3 Batching
 
-The article batches Triggers that arrive during one Router turn. P1
-processes unowned events one by one. The store can list `pending_eval` on a
-thread; P2 may batch them. Pass-through already removes the burst that made
-batching necessary in the article.
+The article batches Triggers that arrive during one Router turn. Unowned
+events are still judged one by one. A worker drain coalesces that worker's
+pending inbox into **one** `handler.handle` call (approval_granted wins
+over the latest row; a close event still retires). Pass-through already
+removes the Router burst that made batching necessary in the article.
 
 ## 8. Watchdog
 
@@ -565,7 +568,7 @@ Supervisor principle: **rules decide, models describe**.
 | Id | Finding | Condition | Action |
 |---|---|---|---|
 | W1 | `crashed` | `state=running` and `now - lastHeartbeatAt > heartbeatAfterMs`, or handler threw | Restart if `generation < maxRestarts` (3), else escalate |
-| W2 | `stuck` | `running`/`waking` and `now - lastProgressAt > stallAfterMs` | Escalate (T33 `stuck` shape). Do not grind. |
+| W2 | `stuck` | `running`/`waking` and `now - lastProgressAt > stallAfterMs` | Nudge once (enqueue `watchdog_nudge`, do not mark stuck). Escalate on the next stall. A worker whose memory or plan self-reports `waiting` is exempt. |
 | W3 | `looping` | `lastStepSignature` repeated `loopRepeat` (3) times without progress | Escalate; optional restart once |
 | W4 | `over_budget` | usage ≥ any Mandate budget | Stop handler, escalate, no restart |
 | W5 | `subject_closed` | close event not yet retiring | Force `retiring` |
@@ -817,7 +820,9 @@ Filled in by the implementation PR; kept accurate here:
 | Worker state machine, inbox, sleep/wake/retire | implemented |
 | Durable memory / plan / transcript pointer | implemented |
 | Sqlite restore | implemented |
-| Watchdog W1–W6 | implemented |
+| Watchdog W1–W6 | implemented. W2 nudges once before escalate; `waiting` in memory/plan is exempt |
+| Drain coalesce | implemented: one handler call per backlog; `approval_granted` wins |
+| Spawn admission | `maxBoxes` (live sandboxRef workers) and `spendCapUsd` (tenant ledger) before spawn |
 | Mandate + approval gate + audit | implemented |
 | Tenant scoping | implemented |
 | Metering hooks | implemented; P4 append-only tenant ledger in `superagent.db` (`usage_events`, schema 2). **No cloud-server migration** |
