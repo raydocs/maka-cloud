@@ -16,6 +16,13 @@ export {
   RecordingJudge,
 } from './router.js';
 export {
+  createJudgeClientFromEnv,
+  createJudgeFromEnv,
+  DEFAULT_ANTHROPIC_BASE_URL,
+  DEFAULT_JUDGE_MODEL,
+  FetchJudgeClient,
+} from './judge-client.js';
+export {
   DEFAULT_STUCK_OPTIONS,
   formatStuckAsk,
   STUCK_REASON,
@@ -24,8 +31,34 @@ export {
   type StuckOption,
 } from './stuck.js';
 export { clipEvidence, formatEvidence, mergeEvidence } from './evidence.js';
-export { UnconfiguredOrgSecrets } from './secrets.js';
-export { FakeSandbox, type SandboxPort } from './sandbox.js';
+export { EnvOrgSecrets, UnconfiguredOrgSecrets } from './secrets.js';
+export {
+  createInstaboxSandboxFromEnv,
+  createSandboxFromEnv,
+  DEFAULT_INSTABOX_BASE_URL,
+  FakeSandbox,
+  HttpSandbox,
+  InstaboxCredentialsError,
+  instaboxCredentialsFromEnv,
+  type InstaboxCredentials,
+  type SandboxPort,
+} from './sandbox.js';
+export { INLINE_MEMORY_CHARS, MAX_SPILLS, recallMemory, spillMemory } from './spill.js';
+export { OffHiDevice, type HiDevicePort, type HiDeviceResult } from './hi-device.js';
+export {
+  formatLocalLoopReport,
+  listenLoop,
+  LOCAL_LOOP_REPO,
+  LOCAL_LOOP_TENANT,
+  LocalLoopHandler,
+  LocalLoopJudge,
+  localLoopFixtures,
+  MERGE_BOUND_TEXT,
+  runLocalLoop,
+  runLocalLoopCli,
+  type LocalLoopOptions,
+  type LocalLoopReport,
+} from './local-loop.js';
 export { overBudget, RISKY_ACTIONS, Safety } from './safety.js';
 export { MemorySuperagentStore } from './memory-store.js';
 export {
@@ -56,6 +89,7 @@ export {
   WORKER_STATES,
 } from './types.js';
 export type {
+  MemorySpill,
   AdmissionPolicy,
   ApprovalKind,
   ApprovalRecord,

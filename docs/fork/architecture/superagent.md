@@ -541,10 +541,13 @@ P1 ships `HeuristicJudge`:
   marked as `act` (P1: spawn at `observe`).
 - Everything else → `ignore`.
 
-A `ModelJudge` stub exists and throws if called without a provider. P2 may
-wire a cheap gateway model. The conductor is a candidate, but only with the
-Router tool set (no `delegate_task` that starts a sandbox from the Router
-turn).
+`ModelJudge` takes an injectable `JudgeClient`. `FetchJudgeClient` speaks
+the same Anthropic Messages API as the host gateway (`/v1/messages`,
+`x-api-key`, `anthropic-version`). HeuristicJudge stays the default;
+`MAKA_CLOUD_SUPERAGENT_JUDGE=model` opts in. A missing client throws. A
+bad or failed completion falls back to the heuristic. The conductor is a
+candidate, but only with the Router tool set (no `delegate_task` that
+starts a sandbox from the Router turn).
 
 ### 7.3 Batching
 
@@ -781,14 +784,19 @@ is `packages/cloud-runners/scripts/layerfs-gates.mjs` (`--local` in CI,
 
 Per-tenant usage ledger is package-local SQLite (`usage_events` in
 `superagent.db`, schema 2). Additive; **does not need a cloud-server
-migration**. Org Secrets stay an interface (`UnconfiguredOrgSecrets`).
-Workers can emit evidence blocks in their output. Inline & Spill and
-pricing stay unimplemented unless the owner picks a provider.
+migration**. Org Secrets: `OrgSecretPort` plus `EnvOrgSecrets` (env / JSON
+file; never returns a raw secret). `UnconfiguredOrgSecrets` remains the
+default inside the core until the host or local loop passes the env
+implementation. Workers emit evidence blocks. Inline & Spill keeps
+`worker.memory` under 4k and stores older chunks on `WorkerRecord.spills`
+(json column, no schema bump). Pricing stays unimplemented unless the
+owner picks a provider.
 
 ### P5 — optional hi evaluation
 
-Out of this repo. Default off. No remote unlock. Cloud-originated payment
-stays `approval_unavailable`.
+Out of this repo. Interface only (`HiDevicePort` / `OffHiDevice`). Default
+off. No remote unlock. Cloud-originated payment stays
+`approval_unavailable`. See `docs/superagent/p5-hi-device.md`.
 
 ## 15. What is implemented vs stubbed
 
@@ -800,7 +808,7 @@ Filled in by the implementation PR; kept accurate here:
 | Event log + idempotency | implemented |
 | Subscription table + pass-through | implemented |
 | Router admission + `HeuristicJudge` | implemented |
-| `ModelJudge` | injectable `JudgeClient`; HeuristicJudge stays default; no API keys in tests |
+| `ModelJudge` | injectable `JudgeClient` + `FetchJudgeClient` (Anthropic Messages `/v1/messages`, same path as the host gateway). HeuristicJudge stays default (`MAKA_CLOUD_SUPERAGENT_JUDGE=model` to opt in). No API keys in tests |
 | Worker state machine, inbox, sleep/wake/retire | implemented |
 | Durable memory / plan / transcript pointer | implemented |
 | Sqlite restore | implemented |
@@ -808,16 +816,18 @@ Filled in by the implementation PR; kept accurate here:
 | Mandate + approval gate + audit | implemented |
 | Tenant scoping | implemented |
 | Metering hooks | implemented; P4 append-only tenant ledger in `superagent.db` (`usage_events`, schema 2). **No cloud-server migration** |
-| Org Secrets | interface only (`UnconfiguredOrgSecrets`); never returns a raw secret |
+| Org Secrets | `OrgSecretPort`; `UnconfiguredOrgSecrets` default; `EnvOrgSecrets` for local/env. Never returns a raw secret |
 | Evidence blocks | `HandlerResult.evidence` → worker output / stuck card |
 | `WorkspaceStore` + `GitCloneStore` | implemented; runners default; coding playbook `prepareHostWorkspace` |
 | `LayerFsStore` | metadata adapter; live mount throws; gate 3 harness `--local` |
-| `SandboxPort` | interface + fake; no live Instabox |
-| Host / duties / conductor wiring | P2: `startStack` creates one in-process Superagent; duties `readDelivery` is the GitHub Source; watchdog escalations are T33 stuck cards |
+| `SandboxPort` | interface + `FakeSandbox` + `HttpSandbox` (Instabox HTTP). `createSandboxFromEnv`: fake when no key; throws if key without `INSTABOX_MACHINE_ID`; live when both set. Contract-tested against a mocked HTTP server |
+| Host / duties / conductor wiring | P2: `startStack` creates one in-process Superagent; duties `readDelivery` is the GitHub Source; watchdog escalations are T33 stuck cards. Host passes `instaboxSandboxPort`, `EnvOrgSecrets`, `createJudgeFromEnv` |
+| Local loop | `npm run local-loop -w @maka-cloud/superagent` and `docs/superagent/quickstart.md`. CI smoke: `local-loop.test.ts` with fakes |
 | `#460` follow-up engine | not copied; `FollowUpBridge` only |
 | `#452` InstaboxClient adapter | structural; used when host passes a client |
-| Pricing | not implemented |
-| Inline & Spill / Chain of Recall | not implemented (P4) |
+| Pricing | not implemented (owner must pick a provider) |
+| Inline & Spill / Chain of Recall | implemented (`spillMemory` / `recallMemory`; spills on worker json, no schema bump) |
+| P5 hi device | interface + `OffHiDevice` only; not wired |
 | Speculative silent fix | not implemented (explicit non-goal) |
 
 ## 16. Open questions — decisions recorded (revisit with the owner)
@@ -831,8 +841,8 @@ overrides them.
    not added in P2.
 3. **Stop then later comment.** A later human comment starts a **new** Mandate
    (this doc), not DSH resume of the withdrawn one.
-4. **Instabox Org Secrets.** Interface only in P4. Not assumed on the current
-   plan.
+4. **Instabox Org Secrets.** Not assumed. Local/env `EnvOrgSecrets` is
+   available; a real Instabox org-secret injector still needs the owner.
 5. **Unowned `issue_opened`.** Spawn at `observe` (P1 heuristic). A standing
    duty is not required.
 6. **Host wiring.** Same stack process, exclusive sqlite next to the server

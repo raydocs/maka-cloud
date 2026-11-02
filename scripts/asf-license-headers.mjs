@@ -261,6 +261,7 @@ export const exclusionRules = [
         '.dockerignore',
       )(path) ||
       startsWith('docs/fork')(path) ||
+      startsWith('docs/superagent')(path) ||
       startsWith('deploy')(path) ||
       path.startsWith('packages/cloud-'),
   },

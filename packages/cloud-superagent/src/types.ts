@@ -1,3 +1,5 @@
+import type { SandboxPort } from './sandbox.js';
+
 /**
  * Super-agent domain types. Terms align with the DeepSeek Harness article and
  * dsh-superagent-prototype (MIT, ideas only): Trigger → NormalizedEvent,
@@ -106,6 +108,12 @@ export interface Usage {
   wallMs: number;
 }
 
+export interface MemorySpill {
+  id: string;
+  at: number;
+  text: string;
+}
+
 export interface WorkerRecord {
   workerId: string;
   tenantId: string;
@@ -114,6 +122,8 @@ export interface WorkerRecord {
   generation: number;
   mandate: Mandate;
   memory: string;
+  /** Older memory chunks spilled off the inline window. Stored in worker json (no schema bump). */
+  spills: MemorySpill[];
   plan: string;
   transcriptPointer: string | null;
   sandboxRef: string | null;
@@ -200,7 +210,9 @@ export interface OrgSecretRef {
   name: string;
 }
 
-export type OrgSecretDestination = { kind: 'header'; name: string } | { kind: 'env'; name: string };
+export type OrgSecretDestination =
+  | { kind: 'header'; name: string; headers?: Record<string, string> }
+  | { kind: 'env'; name: string; env?: Record<string, string | undefined> };
 
 export type OrgSecretResult =
   | { ok: true }
@@ -231,6 +243,10 @@ export interface HandlerResult {
 export interface WorkerContext {
   worker: WorkerRecord;
   event: NormalizedEvent;
+  sandbox: SandboxPort;
+  orgSecrets: OrgSecretPort;
+  /** Chain of Recall: spilled chunks plus the inline window. */
+  recall: () => string;
 }
 
 export interface WorkerHandler {
