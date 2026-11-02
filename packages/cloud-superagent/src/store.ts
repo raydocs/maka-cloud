@@ -68,6 +68,7 @@ export function cloneWorker(worker: WorkerRecord): WorkerRecord {
     evidence: (worker.evidence ?? []).map((block) => ({ ...block })),
     spills: (worker.spills ?? []).map((row) => ({ ...row })),
     reviewReceipts: (worker.reviewReceipts ?? []).map((row) => ({ ...row })),
+    lessonRefs: worker.lessonRefs?.slice(),
     doneClaim: worker.doneClaim
       ? { ...worker.doneClaim, signals: worker.doneClaim.signals.map((row) => ({ ...row })) }
       : undefined,

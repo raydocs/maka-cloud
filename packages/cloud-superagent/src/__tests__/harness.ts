@@ -83,6 +83,16 @@ export function commentPayload(number: number, body: string, onPr = true, commen
   };
 }
 
+export function reviewPayload(state: string, number = 12, body = 'please change this'): unknown {
+  return {
+    action: 'submitted',
+    pull_request: { number, title: `PR ${number}` },
+    review: { state, body },
+    repository: { full_name: REPO },
+    sender: { login: 'bob', type: 'User' },
+  };
+}
+
 export function workflowPayload(
   conclusion: 'success' | 'failure' | 'timed_out',
   pr?: number,

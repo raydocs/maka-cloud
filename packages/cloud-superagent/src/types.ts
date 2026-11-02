@@ -157,6 +157,19 @@ export interface WorkerRecord {
   lastLive?: { sha?: string; ci?: string; prMerged?: boolean; at: number };
   /** Named step plan + heartbeat. JSON only; no schema bump. */
   progress?: import('./progress.js').WorkerProgress;
+  /**
+   * Stable lesson prefix (refs + summaries, or refs only when over budget).
+   * JSON only; no schema bump. Recall prepends this and never rewrites it.
+   */
+  lessonPrefix?: string;
+  /** Accepted lesson ids injected at spawn. Append-only. JSON only. */
+  lessonRefs?: string[];
+  /** Last `ci_failed` after this worker pushed. JSON only. */
+  ciFailedEventId?: string | null;
+  /** Last pushed SHA parsed from handler memory. JSON only. */
+  lastPushSha?: string;
+  /** Completed blocking peer-review rounds. JSON only. */
+  peerReviewRounds?: number;
   usage: Usage;
   evidence: EvidenceBlock[];
   createdAt: number;
@@ -280,8 +293,18 @@ export interface WorkerContext {
   event: NormalizedEvent;
   sandbox: SandboxPort;
   orgSecrets: OrgSecretPort;
-  /** Chain of Recall: spilled chunks plus the inline window. */
+  /** Chain of Recall: optional lesson prefix, spilled chunks, then the inline window. */
   recall: () => string;
+  /** Read one accepted/recorded lesson by id when the prefix kept only a ref. */
+  recallLesson?: (lessonId: string) => string | undefined;
+  /**
+   * Cross-model review of a diff before push / open-PR. Absent when the
+   * host left peer review off (the default).
+   */
+  peerReview?: (input: {
+    diff: string;
+    repo?: string;
+  }) => Promise<import('./peer-review.js').PeerReviewOutcome>;
   /**
    * Persist a phase / activity / waiting heartbeat. Not a user channel —
    * Superagent may speak through `LeadPort` after it writes the store.

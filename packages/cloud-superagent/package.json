@@ -21,6 +21,7 @@
     "status": "node ./scripts/status.mjs"
   },
   "dependencies": {
+    "@maka-cloud/orchestrator": "0.1.0",
     "zod": "^4.6.5"
   }
 }
