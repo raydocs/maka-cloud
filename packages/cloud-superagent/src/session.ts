@@ -14,12 +14,7 @@ import {
   type CacheUsage,
   type WorkerRequest,
 } from './prompt-cache.js';
-import type {
-  AutonomyIncident,
-  AutonomySettings,
-  AutonomyState,
-  WorkerRecord,
-} from './types.js';
+import type { AutonomyIncident, AutonomySettings, AutonomyState, WorkerRecord } from './types.js';
 import { DEFAULT_AUTONOMY } from './types.js';
 
 export type ProviderEvent =
@@ -64,9 +59,7 @@ export class FakeProvider implements SessionProvider {
   constructor(readonly endpoint = 'https://api.anthropic.com/v1/messages') {}
 
   script(...events: Array<ProviderEvent | FakeScript>): this {
-    this.scripts.push(
-      ...events.map((row) => (isFakeScript(row) ? row : { event: row })),
-    );
+    this.scripts.push(...events.map((row) => (isFakeScript(row) ? row : { event: row })));
     return this;
   }
 
@@ -161,7 +154,12 @@ export async function runWorkerTurn(input: {
         detail: 'Partial response discarded before retry.',
         at: input.now(),
       };
-      state = { ...state, lastIncident: incident, pending: incident, streamRetries: state.streamRetries + 1 };
+      state = {
+        ...state,
+        lastIncident: incident,
+        pending: incident,
+        streamRetries: state.streamRetries + 1,
+      };
       incidents.push(incident);
       continue;
     }
@@ -172,9 +170,20 @@ export async function runWorkerTurn(input: {
         detail: `Provider error on ${input.provider.endpoint}; retrying the same endpoint.`,
         at: input.now(),
       };
-      state = { ...state, lastIncident: incident, pending: incident, streamRetries: state.streamRetries + 1 };
+      state = {
+        ...state,
+        lastIncident: incident,
+        pending: incident,
+        streamRetries: state.streamRetries + 1,
+      };
       incidents.push(incident);
-      if (attempts >= 3) return finish('stop', { ...incident, action: 'stop', detail: result.message, at: input.now() });
+      if (attempts >= 3)
+        return finish('stop', {
+          ...incident,
+          action: 'stop',
+          detail: result.message,
+          at: input.now(),
+        });
       continue;
     }
     if (result.kind === 'tool') {

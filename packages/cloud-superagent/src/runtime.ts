@@ -367,7 +367,10 @@ export class Superagent {
         found.rule === 'repeat_tools'
       ) {
         const worker = this.store.worker(found.tenantId, found.workerId);
-        if (worker && (found.action === 'retry' || found.action === 'nudge' || found.action === 'stop')) {
+        if (
+          worker &&
+          (found.action === 'retry' || found.action === 'nudge' || found.action === 'stop')
+        ) {
           await this.surfaceAutonomy(
             worker,
             {

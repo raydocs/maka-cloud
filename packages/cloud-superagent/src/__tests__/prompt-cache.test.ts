@@ -30,7 +30,10 @@ test('newly loaded tools are appended; the tools prefix is not rewritten', () =>
   });
   const second = loadTool(first, WRITE);
   assert.deepEqual(second.tools, first.tools);
-  assert.equal(second.appendedTools.some((row) => row.name === 'Write'), true);
+  assert.equal(
+    second.appendedTools.some((row) => row.name === 'Write'),
+    true,
+  );
   const left = serializeSegments(first);
   const right = serializeSegments(second);
   assert.equal(right.system, left.system);
@@ -102,7 +105,11 @@ test('a failed request retries on the same provider endpoint and discards a part
   const time = clock();
   const provider = new FakeProvider('https://api.anthropic.com/v1/messages').script(
     { kind: 'broken', text: 'half-answer' },
-    { kind: 'ok', text: 'complete', usage: { inputTokens: 5, cacheReadTokens: 40, cacheWriteTokens: 0 } },
+    {
+      kind: 'ok',
+      text: 'complete',
+      usage: { inputTokens: 5, cacheReadTokens: 40, cacheWriteTokens: 0 },
+    },
   );
   const request = buildRequest({
     system: 'stable',
@@ -135,10 +142,13 @@ test('a failed request retries on the same provider endpoint and discards a part
 
 test('stream silence of 4 minutes retries; the model does not see the partial', async () => {
   const time = clock();
-  const provider = new FakeProvider().script({ event: { kind: 'ok', text: 'partial' }, hang: true }, {
-    kind: 'ok',
-    text: 'full',
-  });
+  const provider = new FakeProvider().script(
+    { event: { kind: 'ok', text: 'partial' }, hang: true },
+    {
+      kind: 'ok',
+      text: 'full',
+    },
+  );
   const turn = await runWorkerTurn({
     worker: { autonomy: emptyAutonomy() },
     request: appendMessage(
@@ -152,7 +162,10 @@ test('stream silence of 4 minutes retries; the model does not see the partial', 
     },
     settings: { ...DEFAULT_AUTONOMY, streamSilenceMs: 4 * 60_000 },
   });
-  assert.equal(turn.incidents.some((row) => row.rule === 'stream_silence' && row.action === 'retry'), true);
+  assert.equal(
+    turn.incidents.some((row) => row.rule === 'stream_silence' && row.action === 'retry'),
+    true,
+  );
   assert.equal(turn.text, 'full');
   assert.equal(turn.attempts, 2);
   assert.equal(provider.calls.length, 2);

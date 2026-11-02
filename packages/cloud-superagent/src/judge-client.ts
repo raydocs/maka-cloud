@@ -42,14 +42,16 @@ export function parseMessagesUsage(
 ): ModelCompletion['usage'] {
   const usage =
     typeof body === 'object' && body !== null && 'usage' in body
-      ? (body as {
-          usage?: {
-            input_tokens?: unknown;
-            output_tokens?: unknown;
-            cache_read_input_tokens?: unknown;
-            cache_creation_input_tokens?: unknown;
-          };
-        }).usage
+      ? (
+          body as {
+            usage?: {
+              input_tokens?: unknown;
+              output_tokens?: unknown;
+              cache_read_input_tokens?: unknown;
+              cache_creation_input_tokens?: unknown;
+            };
+          }
+        ).usage
       : undefined;
   const inputTokens = Number(usage?.input_tokens ?? 0);
   const outputTokens = Number(usage?.output_tokens ?? 0);

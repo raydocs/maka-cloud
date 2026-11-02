@@ -26,7 +26,10 @@ test('a hard time limit gets at most two attempts then stops', () => {
   const second = observeTimeLimit(first.state, 2);
   assert.equal(second.incident.action, 'stop');
   assert.equal(second.state.timeLimitAttempts, DEFAULT_AUTONOMY.timeLimitAttempts);
-  const custom = observeTimeLimit(emptyAutonomy(), 1, { ...DEFAULT_AUTONOMY, timeLimitAttempts: 1 });
+  const custom = observeTimeLimit(emptyAutonomy(), 1, {
+    ...DEFAULT_AUTONOMY,
+    timeLimitAttempts: 1,
+  });
   assert.equal(custom.incident.action, 'stop');
 });
 
@@ -111,7 +114,9 @@ test('Superagent stop/nudge incidents hit the ledger, watchdog, progress, and le
   assert.equal(worker?.state, 'stuck');
   assert.equal(worker?.progress?.lastReason, worker?.autonomy?.lastIncident?.detail);
   assert.equal(
-    store.usageEvents(TENANT).some((row) => row.kind === 'autonomy_stop' && row.workerId === opened.workerId),
+    store
+      .usageEvents(TENANT)
+      .some((row) => row.kind === 'autonomy_stop' && row.workerId === opened.workerId),
     true,
   );
   assert.equal(
@@ -182,7 +187,12 @@ test('comment follow-up still pass-through after an autonomy nudge', async () =>
     calls += 1;
     const state = emptyAutonomy();
     const nudged = observeToolCall(
-      { ...state, lastToolKey: 'bash:{"cmd":"ls"}', lastToolResultHash: 'h:4:1', identicalToolRuns: 2 },
+      {
+        ...state,
+        lastToolKey: 'bash:{"cmd":"ls"}',
+        lastToolResultHash: 'h:4:1',
+        identicalToolRuns: 2,
+      },
       { name: 'bash', args: { cmd: 'ls' }, result: 'same' },
       1,
     );

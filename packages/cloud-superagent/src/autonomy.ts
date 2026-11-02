@@ -199,10 +199,7 @@ export function markApplied(state: AutonomyState): AutonomyState {
   return { ...state, pending: { ...state.pending, applied: true } };
 }
 
-export function evaluateAutonomy(
-  worker: WorkerRecord,
-  at: number,
-): WatchdogFinding | undefined {
+export function evaluateAutonomy(worker: WorkerRecord, at: number): WatchdogFinding | undefined {
   const pending = worker.autonomy?.pending;
   if (!pending || pending.applied) return undefined;
   return {
