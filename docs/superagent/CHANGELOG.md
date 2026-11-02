@@ -8,7 +8,7 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
-## 2026-11-02 02:45 MST — cursor/superagent-real-loop-51be
+## 2026-11-02 02:47 MST — cursor/superagent-real-loop-51be — 8766e7a14
 
 - **PR:** none ([compare](https://github.com/raydocs/maka-cloud/compare/main...cursor/superagent-real-loop-51be))
 - **What:** Derive each CHANGELOG heading time from the first listed SHA's committer date in America/Denver. Corrected the backfill (e9680184a, 749221aa8, 001094a1a, and the rest). Test: heading vs `git show -s --format=%cI` within 5 minutes.
