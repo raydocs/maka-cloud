@@ -8,6 +8,15 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
+## 2026-11-02 13:26 MST — cursor/superagent-intake-merge-51be
+
+- **PR:** none (this branch)
+- **What:** Cross-source live event graph (programmatic path/commit/fingerprint/ref merge, fuzzy Slow Path only for survivors, observe/auto/split, recall `mergeId`) and graded escalation (value/urgency/risk → archive / worker / waiting-human card + feedback). Scheduler footprint conflicts record a graph hint. JSON `graph` / `escalate` documents. No `user_version` bump.
+- **Why:** User-approved P1 (2 Nov 2026) aligned with DSH same-ticket intake and cheap-model triage.
+- **Tests:** new event-graph / escalate suites. FakeJudgeClient proves programmatic hits do not grow router prompts. Existing 154 tests kept.
+- **Live:** n/a
+- **Migrations / risk:** none. Documents are `CREATE TABLE IF NOT EXISTS`. Schema version stays 2.
+
 ## 2026-11-02 12:19 MST — cursor/superagent-scheduler-router-51be — 3f12cbe39
 
 - **PR:** [#474](https://github.com/raydocs/maka-cloud/pull/474)

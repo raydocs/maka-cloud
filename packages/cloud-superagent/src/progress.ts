@@ -1,3 +1,5 @@
+import type { DecisionCard } from './escalate.js';
+import { formatDecisionLine } from './escalate.js';
 import type { IntakeMetrics } from './intake.js';
 import { formatQueueLine, type QueueView } from './scheduler.js';
 import type { SuperagentStore } from './store.js';
@@ -101,6 +103,7 @@ export interface StatusSnapshot {
   workers: ProgressView[];
   queue?: QueueView[];
   intake?: IntakeMetrics;
+  decisions?: DecisionCard[];
 }
 
 export function isProgressPhase(value: string): value is ProgressPhase {
@@ -434,7 +437,10 @@ export function formatProgressLine(view: ProgressView): string {
 export function formatStatusText(snapshot: StatusSnapshot): string {
   const workers = snapshot.workers.map(formatProgressLine);
   const queue = (snapshot.queue ?? []).map(formatQueueLine);
-  const lines = [...workers, ...queue];
+  const decisions = (snapshot.decisions ?? [])
+    .filter((row) => row.state === 'pending')
+    .map(formatDecisionLine);
+  const lines = [...workers, ...queue, ...decisions];
   if (lines.length === 0) return 'no live workers';
   return lines.join('\n');
 }

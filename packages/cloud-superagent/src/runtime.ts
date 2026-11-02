@@ -2,6 +2,47 @@ import type { IngestInput } from './events.js';
 import { normalize } from './events.js';
 import { defaultIds } from './ids.js';
 import {
+  addCard,
+  bandOf,
+  emptyEscalateState,
+  heuristicScore,
+  loadEscalate,
+  parseEscalateState,
+  parseScore,
+  patchEscalate,
+  pendingCards,
+  recordBand,
+  resolveCard,
+  saveEscalate,
+  scorePrompt,
+  type CardOption,
+  type DecisionCard,
+  type EscalateState,
+  type Thresholds,
+  ESCALATE_DOCUMENT,
+} from './escalate.js';
+import {
+  applyMerge,
+  extractSignals,
+  findFuzzy,
+  findProgrammatic,
+  liveTickets,
+  loadGraph,
+  mergePrompt,
+  noteCollision,
+  parseGraphState,
+  parseMergeJudgement,
+  saveGraph,
+  setGraphMode,
+  splitMerge,
+  unionSignals,
+  upsertTicket,
+  type GraphState,
+  type GraphTicket,
+  DEFAULT_MERGE_MODE,
+  GRAPH_DOCUMENT,
+} from './event-graph.js';
+import {
   belowSensitivity,
   bumpIntake,
   classifyDecision,
@@ -24,7 +65,7 @@ import {
   ROUTER_DOCUMENT,
 } from './intake.js';
 import { appendRecall, followRecallInStore, type RecallQuery } from './recall-chain.js';
-import { HeuristicJudge, isStatusAsk } from './router.js';
+import { HeuristicJudge, isStatusAsk, type JudgeClient } from './router.js';
 import {
   estimateFootprint,
   estimatePriority,
@@ -47,6 +88,7 @@ import { MemorySuperagentStore } from './memory-store.js';
 import {
   emptyUsage,
   isLiveState,
+  observeMandate,
   type NormalizedEvent,
   type WorkerContext,
   type WorkerRecord,
@@ -122,6 +164,32 @@ export type IngestResult =
       classification: RouterClass;
       reason: string;
       confidence: number;
+      judgeCalls: number;
+    }
+  | {
+      result: 'merged';
+      eventId: string;
+      workerIds: string[];
+      ticketId: string;
+      mergeId: string;
+      reason: string;
+      judgeCalls: 0;
+    }
+  | {
+      result: 'would_merge';
+      eventId: string;
+      ticketId: string;
+      mergeId: string;
+      reason: string;
+      judgeCalls: number;
+    }
+  | { result: 'archived'; eventId: string; reason: string; band: 'low'; judgeCalls: number }
+  | {
+      result: 'escalated';
+      eventId: string;
+      cardId: string;
+      band: 'high';
+      reason: string;
       judgeCalls: number;
     };
 
@@ -203,6 +271,12 @@ export interface SuperagentOptions {
   router?: { mode?: RouterMode; sensitivity?: number };
   scheduler?: Partial<SchedulerSettings>;
   intake?: { maxUnownedPerMinute?: number };
+  /** Merge default is observe: record a suggestion, do not attach. */
+  merge?: { mode?: RouterMode };
+  /** Scoring is off unless enabled. Thresholds stay configurable. */
+  escalate?: { enabled?: boolean; thresholds?: Partial<Thresholds> };
+  mergeClient?: JudgeClient;
+  scoreClient?: JudgeClient;
 }
 
 export class Superagent {
@@ -223,6 +297,10 @@ export class Superagent {
   readonly scheduler: Scheduler;
   readonly routerDefaults: { mode: RouterMode; sensitivity?: number };
   readonly intakeLimits: { maxUnownedPerMinute?: number };
+  readonly mergeDefaults: { mode: RouterMode };
+  readonly escalateDefaults: { enabled: boolean; thresholds?: Partial<Thresholds> };
+  readonly mergeClient: JudgeClient | undefined;
+  readonly scoreClient: JudgeClient | undefined;
   private readonly liveFacts?: (worker: WorkerRecord) => Promise<Partial<LiveFacts>>;
   readonly escalations: StuckCard[] = [];
   judgeCalls = 0;
@@ -249,8 +327,18 @@ export class Superagent {
     this.doneWorld = defaultDoneWorld(options.doneWorld ?? {});
     this.progressSettings = { ...DEFAULT_PROGRESS, ...options.progress };
     this.liveFacts = options.liveFacts;
-    this.routerDefaults = { mode: options.router?.mode ?? 'auto', sensitivity: options.router?.sensitivity };
+    this.routerDefaults = {
+      mode: options.router?.mode ?? 'auto',
+      sensitivity: options.router?.sensitivity,
+    };
     this.intakeLimits = { ...options.intake };
+    this.mergeDefaults = { mode: options.merge?.mode ?? DEFAULT_MERGE_MODE };
+    this.escalateDefaults = {
+      enabled: options.escalate?.enabled === true,
+      ...(options.escalate?.thresholds ? { thresholds: options.escalate.thresholds } : {}),
+    };
+    this.mergeClient = options.mergeClient;
+    this.scoreClient = options.scoreClient;
     this.scheduler = new Scheduler(
       this.store,
       this.ids,
@@ -278,18 +366,31 @@ export class Superagent {
     const stored = this.store.putEvent(event);
     if (stored === 'duplicate') {
       const existing = this.store.eventByIdempotency(event.tenantId, event.idempotencyKey);
-      this.recordIntake(event.tenantId, {
+      this.recordIntake(
+        event.tenantId,
+        {
+          layer: 'fast',
+          reason: 'duplicate',
+          kind: 'drop',
+        },
+        [event.idempotencyKey],
+        at,
+      );
+      this.audit(event.tenantId, null, 'duplicate', at, {
+        key: event.idempotencyKey,
         layer: 'fast',
-        reason: 'duplicate',
-        kind: 'drop',
-      }, [event.idempotencyKey], at);
-      this.audit(event.tenantId, null, 'duplicate', at, { key: event.idempotencyKey, layer: 'fast' });
+      });
       return { result: 'duplicate', eventId: existing?.eventId ?? event.eventId, judgeCalls: 0 };
     }
     this.scheduler.noteEvent(event);
     if (event.type === 'ping' || event.subject === null) {
       const reason = event.type === 'ping' ? 'ping' : 'no_subject';
-      this.recordIntake(event.tenantId, { layer: 'fast', reason, kind: 'drop' }, handledIdsOf(event), at);
+      this.recordIntake(
+        event.tenantId,
+        { layer: 'fast', reason, kind: 'drop' },
+        handledIdsOf(event),
+        at,
+      );
       this.audit(event.tenantId, null, 'ignored', at, { reason, layer: 'fast' });
       return { result: 'ignored', reason, eventId: event.eventId, judgeCalls: 0 };
     }
@@ -349,6 +450,9 @@ export class Superagent {
       return { result: 'passthrough', eventId: event.eventId, workerIds, judgeCalls: 0 };
     }
 
+    const merged = await this.tryMerge(event, at);
+    if (merged) return merged;
+
     const intake = this.intakeState(event.tenantId);
     const routerCfg = this.routerConfig(event.tenantId);
     const meter = this.metering.admit?.(event.tenantId) === 'stop';
@@ -374,6 +478,9 @@ export class Superagent {
       await this.admitTenant(event.tenantId);
       return { result: 'ignored', reason: fast.reason, eventId: event.eventId, judgeCalls: 0 };
     }
+
+    const scored = await this.tryEscalate(event, at);
+    if (scored) return scored;
 
     this.judgeCalls += 1;
     this.recordIntake(event.tenantId, { layer: 'slow', reason: 'call', kind: 'call' }, [], at);
@@ -426,7 +533,12 @@ export class Superagent {
         layer: 'slow',
         decisionId,
       });
-      return { result: 'ignored', reason: classified.reason, eventId: event.eventId, judgeCalls: 1 };
+      return {
+        result: 'ignored',
+        reason: classified.reason,
+        eventId: event.eventId,
+        judgeCalls: 1,
+      };
     }
     if (decision.action === 'answer') {
       this.rememberDecision(event.tenantId, {
@@ -468,7 +580,12 @@ export class Superagent {
         layer: 'slow',
         decisionId,
       });
-      return { result: 'ignored', reason: 'below_sensitivity', eventId: event.eventId, judgeCalls: 1 };
+      return {
+        result: 'ignored',
+        reason: 'below_sensitivity',
+        eventId: event.eventId,
+        judgeCalls: 1,
+      };
     }
 
     if (this.effectiveRouterMode(event.tenantId) === 'observe') {
@@ -528,6 +645,7 @@ export class Superagent {
       reserved,
       source: event.source,
     });
+    this.registerTicket(event, { taskId: task.taskId, workerId: task.workerId });
     this.rememberDecision(event.tenantId, {
       decisionId,
       at,
@@ -550,6 +668,7 @@ export class Superagent {
     });
     await this.admitTenant(event.tenantId);
     const live = this.scheduler.task(event.tenantId, task.taskId);
+    if (live) this.noteTaskCollision(event.tenantId, live);
     if (live?.workerId && (live.state === 'running' || live.state === 'done')) {
       this.recordIntake(
         event.tenantId,
@@ -600,7 +719,13 @@ export class Superagent {
     const queue =
       tenantId === undefined ? this.scheduler.allViews(this.now()) : this.scheduler.views(tenantId);
     const intake = tenantId ? this.intakeMetrics(tenantId) : undefined;
-    return { ...snap, queue, ...(intake ? { intake } : {}) };
+    const decisions = tenantId ? pendingCards(this.escalateState(tenantId)) : undefined;
+    return {
+      ...snap,
+      queue,
+      ...(intake ? { intake } : {}),
+      ...(decisions && decisions.length > 0 ? { decisions } : {}),
+    };
   }
 
   routerConfig(tenantId: string): TenantRouterConfig {
@@ -680,6 +805,125 @@ export class Superagent {
     };
   }
 
+  graphOf(tenantId: string): GraphState {
+    return this.syncGraph(tenantId);
+  }
+
+  mergeMode(tenantId: string): RouterMode {
+    const stored = this.store.getDocument(tenantId, GRAPH_DOCUMENT);
+    if (stored) {
+      const parsed = parseGraphState(stored);
+      if (parsed.modePinned) return parsed.mode;
+    }
+    return this.mergeDefaults.mode;
+  }
+
+  ensureMergeConfig(tenantId: string): GraphState {
+    const existing = this.store.getDocument(tenantId, GRAPH_DOCUMENT);
+    if (existing) return parseGraphState(existing);
+    const created = { ...this.syncGraph(tenantId), mode: DEFAULT_MERGE_MODE, modePinned: true };
+    saveGraph(this.store, tenantId, created, this.now());
+    return created;
+  }
+
+  setMergeConfig(tenantId: string, patch: { mode: RouterMode }): GraphState {
+    const next = setGraphMode(this.syncGraph(tenantId), patch.mode);
+    saveGraph(this.store, tenantId, next, this.now());
+    return next;
+  }
+
+  splitMerge(tenantId: string, mergeId: string): GraphState {
+    const at = this.now();
+    const before = this.syncGraph(tenantId);
+    const edge = before.edges.find((row) => row.mergeId === mergeId);
+    const next = splitMerge(before, mergeId, at);
+    if (edge?.subscriptionId) {
+      this.store.retireSubscription(tenantId, edge.subscriptionId, at);
+    }
+    saveGraph(this.store, tenantId, next, at);
+    this.linkRecall(tenantId, {
+      triggerId: edge?.fromTriggerId ?? mergeId,
+      threadId: edge?.fromThreadId ?? mergeId,
+      workerId: null,
+      mergeId,
+      fromThreadId: edge?.toThreadId,
+      cause: 'split',
+      layer: 'fast',
+      at,
+    });
+    this.audit(tenantId, null, 'merge_split', at, { mergeId });
+    return next;
+  }
+
+  collisions(tenantId: string) {
+    return this.syncGraph(tenantId).collisions;
+  }
+
+  ensureEscalateConfig(tenantId: string): EscalateState {
+    const existing = this.store.getDocument(tenantId, ESCALATE_DOCUMENT);
+    if (existing) return parseEscalateState(existing);
+    const created = patchEscalate(emptyEscalateState(), {
+      enabled: true,
+      ...(this.escalateDefaults.thresholds
+        ? {
+            thresholds: { ...emptyEscalateState().thresholds, ...this.escalateDefaults.thresholds },
+          }
+        : {}),
+    });
+    saveEscalate(this.store, tenantId, created, this.now());
+    return created;
+  }
+
+  setEscalateConfig(
+    tenantId: string,
+    patch: Partial<Pick<EscalateState, 'enabled' | 'thresholds'>>,
+  ): EscalateState {
+    const next = patchEscalate(this.escalateState(tenantId), patch);
+    saveEscalate(this.store, tenantId, next, this.now());
+    return next;
+  }
+
+  escalateMetrics(tenantId: string) {
+    return this.escalateState(tenantId).metrics;
+  }
+
+  decisionCards(tenantId: string): DecisionCard[] {
+    return this.escalateState(tenantId).cards;
+  }
+
+  async resolveDecisionCard(
+    tenantId: string,
+    cardId: string,
+    option: CardOption,
+  ): Promise<{ ok: true; card?: DecisionCard } | { ok: false; reason: string }> {
+    const at = this.now();
+    const state = this.escalateState(tenantId);
+    const card = state.cards.find((row) => row.cardId === cardId);
+    if (!card || card.state !== 'pending') return { ok: false, reason: 'unknown_card' };
+    const next = resolveCard(state, cardId, option, at);
+    saveEscalate(this.store, tenantId, next, at);
+    this.audit(tenantId, null, 'escalate_feedback', at, {
+      cardId,
+      option,
+      value: card.score.value,
+    });
+    if (option === 'accept') {
+      const event = this.store.event(tenantId, card.eventId);
+      if (event?.subject) {
+        const task = this.scheduler.enqueue({
+          tenantId,
+          eventId: event.eventId,
+          subject: event.subject,
+          title: card.title,
+          mandate: observeMandate(event.subject.repo ? [event.subject.repo] : []),
+        });
+        this.registerTicket(event, { taskId: task.taskId, workerId: task.workerId });
+        await this.admitTenant(tenantId);
+      }
+    }
+    return { ok: true, card: next.cards.find((row) => row.cardId === cardId) };
+  }
+
   async enqueueTask(input: {
     tenantId: string;
     eventId?: string;
@@ -715,6 +959,10 @@ export class Superagent {
       eventId = event.eventId;
     }
     const task = this.scheduler.enqueue({ ...input, eventId });
+    const storedEvent = this.store.event(input.tenantId, eventId);
+    if (storedEvent)
+      this.registerTicket(storedEvent, { taskId: task.taskId, workerId: task.workerId });
+    this.noteTaskCollision(input.tenantId, task);
     this.linkRecall(input.tenantId, {
       triggerId: eventId,
       threadId: input.subject.key,
@@ -724,7 +972,11 @@ export class Superagent {
       at: this.now(),
     });
     await this.admitTenant(input.tenantId);
-    return this.scheduler.task(input.tenantId, task.taskId) ?? task;
+    const live = this.scheduler.task(input.tenantId, task.taskId) ?? task;
+    if (storedEvent)
+      this.registerTicket(storedEvent, { taskId: live.taskId, workerId: live.workerId });
+    this.noteTaskCollision(input.tenantId, live);
+    return live;
   }
 
   async admitQueued(tenantId?: string): Promise<string[]> {
@@ -971,6 +1223,7 @@ export class Superagent {
       }
       const at = this.now();
       const worker = this.spawn(event, task.mandate, at);
+      this.registerTicket(event, { taskId: task.taskId, workerId: worker.workerId });
       this.scheduler.markRunning(tenantId, task.taskId, worker.workerId);
       this.linkRecall(tenantId, {
         triggerId: event.eventId,
@@ -993,9 +1246,8 @@ export class Superagent {
 
   private admitContext(tenantId: string) {
     return {
-      boxedLive: this.store
-        .allWorkers()
-        .filter((row) => isLiveState(row.state) && row.sandboxRef).length,
+      boxedLive: this.store.allWorkers().filter((row) => isLiveState(row.state) && row.sandboxRef)
+        .length,
       wouldBox: Boolean(this.defaultSandboxRef),
       tenantUsage: this.store.tenantUsage(tenantId),
       usageEvents: this.store.usageEvents(tenantId),
@@ -1005,6 +1257,306 @@ export class Superagent {
 
   private intakeState(tenantId: string): IntakeState {
     return parseIntakeState(this.store.getDocument(tenantId, INTAKE_DOCUMENT));
+  }
+
+  private async tryMerge(event: NormalizedEvent, at: number): Promise<IngestResult | undefined> {
+    if (!event.subject) return undefined;
+    if (this.mergeMode(event.tenantId) === 'off') return undefined;
+    this.syncGraph(event.tenantId);
+    const graph = loadGraph(this.store, event.tenantId);
+    const tickets = liveTickets(graph);
+    const hard = findProgrammatic(event, tickets);
+    let hit = hard;
+    let judgeCalls = 0;
+    if (!hit && this.mergeClient) {
+      const fuzzy = findFuzzy(event, tickets);
+      if (fuzzy.length > 0) {
+        const raw = await this.mergeClient.complete(mergePrompt(event, fuzzy));
+        const judged = parseMergeJudgement(raw, fuzzy);
+        if (judged) {
+          const ticket = fuzzy.find((row) => row.ticketId === judged.ticketId);
+          if (ticket) hit = { ticket, reason: judged.reason, layer: 'slow' };
+        }
+        judgeCalls = 1;
+      }
+    }
+    if (!hit) return undefined;
+    const mode = this.mergeMode(event.tenantId);
+    const worker = this.liveTicketWorker(event.tenantId, hit.ticket);
+    const apply = mode === 'auto' && worker !== undefined;
+    let subscriptionId: string | undefined;
+    if (apply && worker) {
+      subscriptionId = this.ids.subscription();
+      this.store.putSubscription({
+        subscriptionId,
+        tenantId: event.tenantId,
+        subjectKey: event.subject.key,
+        workerId: worker.workerId,
+        createdAt: at,
+        retiredAt: null,
+      });
+      this.store.enqueue(worker.workerId, event.eventId, at);
+      await this.drain(event.tenantId, worker.workerId);
+    }
+    const mergeId = this.ids.merge();
+    const next = applyMerge(loadGraph(this.store, event.tenantId), {
+      mergeId,
+      tenantId: event.tenantId,
+      event,
+      ticket: {
+        ...hit.ticket,
+        workerId: worker?.workerId ?? hit.ticket.workerId,
+      },
+      reason: hit.reason,
+      layer: hit.layer,
+      mode,
+      applied: apply,
+      ...(subscriptionId ? { subscriptionId } : {}),
+      at,
+    });
+    saveGraph(this.store, event.tenantId, next, at);
+    this.linkRecall(event.tenantId, {
+      triggerId: event.eventId,
+      threadId: hit.ticket.subjectKey,
+      workerId: worker?.workerId ?? null,
+      mergeId,
+      fromThreadId: event.subject.key,
+      cause: hit.reason,
+      layer: hit.layer === 'programmatic' ? 'passthrough' : 'slow',
+      at,
+    });
+    this.audit(event.tenantId, worker?.workerId ?? null, apply ? 'merged' : 'would_merge', at, {
+      mergeId,
+      reason: hit.reason,
+      layer: hit.layer,
+    });
+    if (apply && worker) {
+      return {
+        result: 'merged',
+        eventId: event.eventId,
+        workerIds: [worker.workerId],
+        ticketId: hit.ticket.ticketId,
+        mergeId,
+        reason: hit.reason,
+        judgeCalls: 0,
+      };
+    }
+    return {
+      result: 'would_merge',
+      eventId: event.eventId,
+      ticketId: hit.ticket.ticketId,
+      mergeId,
+      reason: hit.reason,
+      judgeCalls,
+    };
+  }
+
+  private async tryEscalate(event: NormalizedEvent, at: number): Promise<IngestResult | undefined> {
+    const state = this.escalateState(event.tenantId);
+    if (!state.enabled && !this.escalateDefaults.enabled) return undefined;
+    const enabled = state.enabled || this.escalateDefaults.enabled;
+    if (!enabled) return undefined;
+    let score = heuristicScore(event);
+    let scoreCalls = 0;
+    let tokens = 0;
+    let usdMicros = 0;
+    if (this.scoreClient) {
+      const detailed = this.scoreClient.completeDetailed
+        ? await this.scoreClient.completeDetailed(scorePrompt(event))
+        : { text: await this.scoreClient.complete(scorePrompt(event)) };
+      const parsed = parseScore(detailed.text);
+      if (parsed) score = parsed;
+      scoreCalls = 1;
+      const usage = 'usage' in detailed ? detailed.usage : undefined;
+      tokens = usage?.tokens ?? 0;
+      usdMicros = usage?.usdMicros ?? 0;
+    }
+    const band = bandOf(score, state.thresholds);
+    if (band === 'medium') {
+      saveEscalate(
+        this.store,
+        event.tenantId,
+        recordBand(state, { band, kind: 'assign', scoreCalls, tokens, usdMicros }),
+        at,
+      );
+      return undefined;
+    }
+    if (band === 'low') {
+      saveEscalate(
+        this.store,
+        event.tenantId,
+        recordBand(state, { band, kind: 'archive', scoreCalls, tokens, usdMicros }),
+        at,
+      );
+      this.audit(event.tenantId, null, 'archived', at, { reason: score.reason, band });
+      return {
+        result: 'archived',
+        eventId: event.eventId,
+        reason: score.reason,
+        band: 'low',
+        judgeCalls: 0,
+      };
+    }
+    const card: DecisionCard = {
+      cardId: this.ids.card(),
+      tenantId: event.tenantId,
+      eventId: event.eventId,
+      threadId: event.subject?.key ?? event.eventId,
+      title: event.summary,
+      reason: score.reason,
+      band: 'high',
+      score,
+      state: 'pending',
+      at,
+    };
+    saveEscalate(
+      this.store,
+      event.tenantId,
+      addCard(recordBand(state, { band, kind: 'escalate', scoreCalls, tokens, usdMicros }), card),
+      at,
+    );
+    this.audit(event.tenantId, null, 'escalated', at, {
+      cardId: card.cardId,
+      reason: score.reason,
+    });
+    return {
+      result: 'escalated',
+      eventId: event.eventId,
+      cardId: card.cardId,
+      band: 'high',
+      reason: score.reason,
+      judgeCalls: 0,
+    };
+  }
+
+  private syncGraph(tenantId: string): GraphState {
+    let state = loadGraph(this.store, tenantId);
+    const at = this.now();
+    let dirty = false;
+    for (const worker of this.store.workers(tenantId)) {
+      if (!isLiveState(worker.state)) continue;
+      const existing = state.tickets.find((row) => row.subjectKey === worker.subject.key);
+      if (existing) {
+        if (existing.workerId !== worker.workerId) {
+          state = upsertTicket(state, { ...existing, workerId: worker.workerId });
+          dirty = true;
+        }
+        continue;
+      }
+      dirty = true;
+      state = upsertTicket(state, {
+        ticketId: worker.subject.key,
+        tenantId,
+        subjectKey: worker.subject.key,
+        workerId: worker.workerId,
+        signals: extractSignals({
+          eventId: worker.lastEventId ?? worker.workerId,
+          tenantId,
+          source: 'internal',
+          type: 'ticket',
+          subject: worker.subject,
+          idempotencyKey: worker.workerId,
+          actor: { login: 'system', kind: 'system' },
+          occurredAt: at,
+          receivedAt: at,
+          summary: worker.plan,
+          fields: [
+            ...(worker.subject.repo
+              ? ([['repo', worker.subject.repo]] as Array<[string, string]>)
+              : []),
+          ],
+          closesSubject: false,
+        }),
+        members: [worker.subject.key],
+        blocked: [],
+        at,
+      });
+    }
+    if (dirty) saveGraph(this.store, tenantId, state, at);
+    return state;
+  }
+
+  private registerTicket(
+    event: NormalizedEvent,
+    ids: { taskId?: string; workerId?: string },
+  ): void {
+    if (!event.subject) return;
+    const at = this.now();
+    const state = loadGraph(this.store, event.tenantId);
+    const existing = state.tickets.find((row) => row.subjectKey === event.subject?.key);
+    const incoming = extractSignals(event);
+    const ticket: GraphTicket = {
+      ticketId: existing?.ticketId ?? event.subject.key,
+      tenantId: event.tenantId,
+      subjectKey: event.subject.key,
+      workerId: ids.workerId ?? existing?.workerId ?? null,
+      ...(ids.taskId
+        ? { taskId: ids.taskId }
+        : existing?.taskId
+          ? { taskId: existing.taskId }
+          : {}),
+      signals: existing ? unionSignals(existing.signals, incoming) : incoming,
+      members: existing?.members ?? [event.subject.key],
+      blocked: existing?.blocked ?? [],
+      at: existing?.at ?? at,
+    };
+    saveGraph(this.store, event.tenantId, upsertTicket(state, ticket), at);
+  }
+
+  private noteTaskCollision(
+    tenantId: string,
+    task: {
+      taskId: string;
+      state: string;
+      reason?: string;
+      subjectKey: string;
+      repo?: string;
+      footprint: string[];
+    },
+  ): void {
+    if (task.reason !== 'footprint' && task.state !== 'blocked') return;
+    if (task.reason !== 'footprint') return;
+    const at = this.now();
+    const others = this.scheduler
+      .tasks(tenantId)
+      .filter(
+        (row) =>
+          row.taskId !== task.taskId && (row.state === 'running' || row.state === 'admitted'),
+      );
+    const other = others.find(
+      (row) => (row.repo ?? '') === (task.repo ?? '') || row.subjectKey === task.subjectKey,
+    );
+    const left = other?.taskId ?? task.subjectKey;
+    const state = noteCollision(loadGraph(this.store, tenantId), {
+      id: this.ids.decision(),
+      tenantId,
+      leftId: left,
+      rightId: task.taskId,
+      kind: other?.subjectKey === task.subjectKey ? 'subject' : 'footprint',
+      detail: `scheduler serialized ${task.taskId} (${task.reason})`,
+      at,
+    });
+    saveGraph(this.store, tenantId, state, at);
+  }
+
+  private liveTicketWorker(tenantId: string, ticket: GraphTicket): WorkerRecord | undefined {
+    if (ticket.workerId) {
+      const worker = this.store.worker(tenantId, ticket.workerId);
+      if (worker && isLiveState(worker.state)) return worker;
+    }
+    return this.store.liveWorkerBySubject(tenantId, ticket.subjectKey);
+  }
+
+  private escalateState(tenantId: string): EscalateState {
+    const stored = loadEscalate(this.store, tenantId);
+    if (this.store.getDocument(tenantId, ESCALATE_DOCUMENT)) return stored;
+    if (!this.escalateDefaults.enabled && !this.escalateDefaults.thresholds) return stored;
+    return patchEscalate(stored, {
+      enabled: this.escalateDefaults.enabled,
+      ...(this.escalateDefaults.thresholds
+        ? { thresholds: { ...stored.thresholds, ...this.escalateDefaults.thresholds } }
+        : {}),
+    });
   }
 
   private recordIntake(
@@ -1017,10 +1569,7 @@ export class Superagent {
     this.store.putDocument(tenantId, INTAKE_DOCUMENT, JSON.stringify(next), at);
   }
 
-  private rememberDecision(
-    tenantId: string,
-    row: Parameters<typeof recordDecision>[1],
-  ): void {
+  private rememberDecision(tenantId: string, row: Parameters<typeof recordDecision>[1]): void {
     const stored = this.store.getDocument(tenantId, ROUTER_DOCUMENT);
     const base = stored
       ? parseRouterConfig(stored, tenantId)

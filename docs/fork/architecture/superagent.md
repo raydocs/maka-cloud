@@ -870,6 +870,7 @@ Filled in by the implementation PR; kept accurate here:
 | First-class progress | implemented. Named phases on worker JSON; ETA from phase samples / usage ledger / defaults; lead speaks on phase change, every 5 min on a long phase, and once when past ETA+margin (W1/W2); waiting on CI/review/human ≠ stuck. CLI `npm run status`; JSON/SSE `GET /v1/superagent/progress` |
 | Scheduler / admission queue | implemented. Task queue between Router spawn and worker. Priority + aging, size, deps, footprint conflict, reserved human slot, async start. States on ledger + `queue` in the progress snapshot. JSON document, no schema bump. See `docs/superagent/scheduler-router.md` |
 | Two-layer tunable Router | implemented. Fast Path (deterministic, zero model) then Slow Path (cheap router model) for new threads only. Modes off/observe/auto; observe is the new-tenant config default. Feedback few-shots. Per-layer drop metrics. Subscribed threads pass through with no Slow Path. `triggerId → threadId → workerId` recall query |
+| Cross-source merge + graded escalation | implemented. Programmatic same-ticket merge (path / fingerprint / ref / commit) then optional fuzzy Slow Path; observe suggests, auto attaches, split undoes. Cheap value/urgency/risk score; low archives, medium assigns, high is a waiting-human card on the progress snapshot. See `docs/superagent/intake-merge.md` |
 
 ## 16. Open questions — decisions recorded (revisit with the owner)
 
