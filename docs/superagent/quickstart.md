@@ -82,6 +82,26 @@ size: 2 vCPU / 4096 MiB
 This repository's agents and CI do **not** run the live smoke against Instabox.
 Tests mock HTTP only.
 
+## 3. Real loop (fake by default)
+
+A worker clones a scratch repo, applies `FakeCoder`, runs `node add.test.js`,
+pushes `maka/sa-<workerId>`, opens a fake PR, resumes on CI/review, and holds
+merge for approval.
+
+```bash
+npm run build -w @maka-cloud/superagent
+npm run real-loop -w @maka-cloud/superagent
+```
+
+Live Instabox (owner only): `MAKA_CLOUD_LOOP_LIVE=1` plus `INSTABOX_API_KEY`.
+See [real-loop.md](real-loop.md). Never put keys on argv.
+
+## 4. Metrics harness (fakes)
+
+```bash
+npm run metrics -w @maka-cloud/superagent -- --n 3 --parallel 2 --out /tmp/sa-metrics
+```
+
 See [p0-checklist.md](p0-checklist.md) for the rest of the first real run.
 
 ## Receive a live GitHub webhook (optional)

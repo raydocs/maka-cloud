@@ -1,8 +1,10 @@
 import { z } from 'zod';
+import { inspectNotes, type RouterInspect } from './router-inspect.js';
 import { actMandate, observeMandate } from './types.js';
 import type {
   AdmissionPolicy,
   EventSource,
+  JudgeLogEntry,
   NormalizedEvent,
   RouterDecision,
   RouterJudge,
@@ -98,28 +100,70 @@ const ModelDecision = z.object({
   text: z.string().optional(),
   title: z.string().optional(),
   intensity: z.enum(['observe', 'act']).optional(),
+  confidence: z.number().min(0).max(1).optional(),
 });
 
+export interface ModelJudgeOptions {
+  /** Heuristic ignore/empty skips the model (saves a wasted Router wakeup). */
+  prefilter?: boolean;
+  inspect?: RouterInspect;
+  now?: () => number;
+}
+
 /**
- * Optional Router judge behind the same interface as `HeuristicJudge`.
- * Heuristic stays the default. A missing client throws. A bad or failed
- * completion falls back to the heuristic so a cheap model cannot wedge intake.
+ * Optional Router judge. Heuristic is the constructor default on Superagent.
+ * `createJudgeFromEnv` uses this with `prefilter` when a key is present.
+ * A missing client throws. A bad or failed completion falls back.
  */
 export class ModelJudge implements RouterJudge {
+  readonly log: JudgeLogEntry[] = [];
+
   constructor(
     private readonly client?: JudgeClient,
     private readonly fallback: RouterJudge = new HeuristicJudge(),
+    private readonly options: ModelJudgeOptions = {},
   ) {}
 
   async decide(event: NormalizedEvent, ctx: { workers: WorkerRecord[] }): Promise<RouterDecision> {
+    const at = this.options.now?.() ?? Date.now();
+    const heuristic = await this.fallback.decide(event, ctx);
+    if (this.options.prefilter && heuristic.action === 'ignore') {
+      const decision = { ...heuristic, confidence: heuristic.confidence ?? 0.9 };
+      this.log.push({
+        at,
+        eventType: event.type,
+        action: 'ignore',
+        source: 'prefilter',
+        confidence: decision.confidence,
+        reason: heuristic.reason,
+      });
+      return decision;
+    }
     if (!this.client) throw new Error('ModelJudge has no provider.');
+    const notes = await inspectNotes(this.options.inspect, event);
     let raw: string;
     try {
-      raw = await this.client.complete(promptOf(event));
+      raw = await this.client.complete(promptOf(event, notes));
     } catch {
-      return this.fallback.decide(event, ctx);
+      this.log.push({
+        at,
+        eventType: event.type,
+        action: heuristic.action,
+        source: 'heuristic',
+        reason: 'model_failed',
+      });
+      return heuristic;
     }
-    return parseModelDecision(raw, event) ?? this.fallback.decide(event, ctx);
+    const parsed = parseModelDecision(raw, event) ?? heuristic;
+    this.log.push({
+      at,
+      eventType: event.type,
+      action: parsed.action,
+      source: parsed === heuristic ? 'heuristic' : 'model',
+      confidence: parsed.confidence,
+      reason: parsed.action === 'ignore' ? parsed.reason : parsed.action,
+    });
+    return parsed;
   }
 }
 
@@ -138,24 +182,39 @@ export function parseModelDecision(
   const decision = ModelDecision.safeParse(parsed);
   if (!decision.success) return undefined;
   const data = decision.data;
-  if (data.action === 'ignore') return { action: 'ignore', reason: data.reason ?? 'model_ignore' };
+  const confidence = data.confidence;
+  if (data.action === 'ignore') {
+    return {
+      action: 'ignore',
+      reason: data.reason ?? 'model_ignore',
+      ...(confidence !== undefined ? { confidence } : {}),
+    };
+  }
   if (data.action === 'answer') {
     const text = data.text?.trim();
     if (!text) return undefined;
-    return { action: 'answer', text };
+    return { action: 'answer', text, ...(confidence !== undefined ? { confidence } : {}) };
   }
   const repos = event.subject?.repo ? [event.subject.repo] : [];
   const mandate = data.intensity === 'act' ? actMandate(repos, 'inferred') : observeMandate(repos);
-  return { action: 'spawn', mandate, title: data.title?.trim() || 'Model spawn' };
+  return {
+    action: 'spawn',
+    mandate,
+    title: data.title?.trim() || 'Model spawn',
+    ...(confidence !== undefined ? { confidence } : {}),
+  };
 }
 
-function promptOf(event: NormalizedEvent): string {
+function promptOf(event: NormalizedEvent, inspect = ''): string {
   return [
     'Decide ignore, answer, or spawn for this unowned event.',
-    'Reply with JSON only: {"action":"ignore"|"answer"|"spawn","reason":"...","text":"...","title":"...","intensity":"observe"|"act"}.',
+    'Reply with JSON only: {"action":"ignore"|"answer"|"spawn","reason":"...","text":"...","title":"...","intensity":"observe"|"act","confidence":0.0}.',
     `type=${event.type} source=${event.source} actor=${event.actor.login} subject=${event.subject?.key ?? ''}`,
     `summary=${event.summary}`,
-  ].join('\n');
+    inspect,
+  ]
+    .filter(Boolean)
+    .join('\n');
 }
 
 function extractJson(raw: string): string | undefined {

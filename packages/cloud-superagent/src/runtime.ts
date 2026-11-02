@@ -410,6 +410,8 @@ export class Superagent {
     }
     if (result.plan !== undefined) worker.plan = result.plan;
     if (result.transcriptPointer !== undefined) worker.transcriptPointer = result.transcriptPointer;
+    if (result.workspaceRef !== undefined) worker.workspaceRef = result.workspaceRef;
+    if (result.sandboxRef !== undefined) worker.sandboxRef = result.sandboxRef;
     if (result.progress) worker.lastProgressAt = at;
     if (result.stepSignature) {
       if (result.stepSignature === worker.lastStepSignature) worker.stepRepeats += 1;

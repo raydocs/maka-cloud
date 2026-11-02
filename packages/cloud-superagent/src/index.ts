@@ -12,9 +12,16 @@ export {
   HeuristicJudge,
   ModelJudge,
   type JudgeClient,
+  type ModelJudgeOptions,
   parseModelDecision,
   RecordingJudge,
 } from './router.js';
+export {
+  FakeRouterInspect,
+  LocalRouterInspect,
+  inspectNotes,
+  type RouterInspect,
+} from './router-inspect.js';
 export {
   createJudgeClientFromEnv,
   createJudgeFromEnv,
@@ -121,6 +128,7 @@ export type {
   OrgSecretPort,
   OrgSecretRef,
   OrgSecretResult,
+  JudgeLogEntry,
   TenantUsage,
   ProposedAction,
   RouterDecision,
@@ -132,6 +140,39 @@ export type {
   WorkerRecord,
   WorkerState,
 } from './types.js';
+export {
+  ADD_BROKEN,
+  ADD_FIXED,
+  ADD_TEST,
+  scratchFiles,
+  CodingLoopHandler,
+  FakeCoder,
+  FakeGitHost,
+  NodeFileTestPort,
+  mayPush,
+  mergeAction,
+  workerBranch,
+  type CoderPort,
+  type GitHostPort,
+  type LoopPorts,
+  type TestPort,
+} from './loop.js';
+export {
+  formatRealLoopReport,
+  runRealLoop,
+  runRealLoopCli,
+  scratchAddRepo,
+  type RealLoopOptions,
+  type RealLoopReport,
+} from './real-loop.js';
+export {
+  formatMetricsMarkdown,
+  runMetrics,
+  runMetricsCli,
+  type MetricsCase,
+  type MetricsOptions,
+  type MetricsReport,
+} from './metrics.js';
 export { evaluateWorker, runWatchdog } from './watchdog.js';
 export {
   createWorkspaceStore,

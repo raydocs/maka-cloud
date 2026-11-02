@@ -5,11 +5,12 @@ import { test } from 'node:test';
 import { createJudgeClientFromEnv, createJudgeFromEnv, FetchJudgeClient } from '../judge-client.js';
 import { HeuristicJudge, ModelJudge } from '../router.js';
 
-test('createJudgeFromEnv stays heuristic unless model is requested', () => {
+test('createJudgeFromEnv stays heuristic unless a key or model is requested', () => {
   assert.ok(createJudgeFromEnv({}) instanceof HeuristicJudge);
   assert.ok(
     createJudgeFromEnv({ MAKA_CLOUD_SUPERAGENT_JUDGE: 'heuristic' }) instanceof HeuristicJudge,
   );
+  assert.ok(createJudgeFromEnv({ ANTHROPIC_API_KEY: 'sk-pre' }) instanceof ModelJudge);
   assert.throws(
     () => createJudgeFromEnv({ MAKA_CLOUD_SUPERAGENT_JUDGE: 'model' }),
     /ANTHROPIC_API_KEY|MAKA_CLOUD_JUDGE_API_KEY/,

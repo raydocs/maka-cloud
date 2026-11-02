@@ -78,15 +78,28 @@ export function createJudgeClientFromEnv(
   return new FetchJudgeClient({ apiKey, baseUrl, model, fetch: fetchImpl });
 }
 
-/** Heuristic stays the default. `MAKA_CLOUD_SUPERAGENT_JUDGE=model` wires FetchJudgeClient. */
+/**
+ * Default is heuristic when no key is set. With a key (and no override)
+ * ModelJudge runs with the heuristic as a prefilter. `=heuristic` / `=model`
+ * force one or the other.
+ */
 export function createJudgeFromEnv(
   env: NodeJS.ProcessEnv = process.env,
   fetchImpl: typeof fetch = fetch,
 ): RouterJudge {
-  const kind = (env.MAKA_CLOUD_SUPERAGENT_JUDGE ?? 'heuristic').trim().toLowerCase();
-  if (kind === '' || kind === 'heuristic') return new HeuristicJudge();
+  const kind = (env.MAKA_CLOUD_SUPERAGENT_JUDGE ?? '').trim().toLowerCase();
+  const hasKey = Boolean(env.MAKA_CLOUD_JUDGE_API_KEY?.trim() || env.ANTHROPIC_API_KEY?.trim());
+  if (kind === 'heuristic' || (kind === '' && !hasKey)) return new HeuristicJudge();
   if (kind === 'model') return new ModelJudge(createJudgeClientFromEnv(env, fetchImpl));
-  throw new Error(`MAKA_CLOUD_SUPERAGENT_JUDGE must be heuristic or model, not ${kind}.`);
+  if (kind === '' || kind === 'prefilter') {
+    if (!hasKey) return new HeuristicJudge();
+    return new ModelJudge(createJudgeClientFromEnv(env, fetchImpl), new HeuristicJudge(), {
+      prefilter: true,
+    });
+  }
+  throw new Error(
+    `MAKA_CLOUD_SUPERAGENT_JUDGE must be heuristic, prefilter or model, not ${kind}.`,
+  );
 }
 
 function textOf(raw: string): string {

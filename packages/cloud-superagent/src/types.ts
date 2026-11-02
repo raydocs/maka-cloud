@@ -233,6 +233,8 @@ export interface HandlerResult {
   memory?: string;
   plan?: string;
   transcriptPointer?: string;
+  workspaceRef?: string | null;
+  sandboxRef?: string | null;
   progress?: boolean;
   stepSignature?: string;
   usage?: Partial<Usage>;
@@ -254,9 +256,18 @@ export interface WorkerHandler {
 }
 
 export type RouterDecision =
-  | { action: 'ignore'; reason: string }
-  | { action: 'answer'; text: string }
-  | { action: 'spawn'; mandate: Mandate; title: string };
+  | { action: 'ignore'; reason: string; confidence?: number }
+  | { action: 'answer'; text: string; confidence?: number }
+  | { action: 'spawn'; mandate: Mandate; title: string; confidence?: number };
+
+export interface JudgeLogEntry {
+  at: number;
+  eventType: string;
+  action: 'ignore' | 'answer' | 'spawn';
+  source: 'heuristic' | 'model' | 'prefilter';
+  confidence?: number;
+  reason?: string;
+}
 
 export interface RouterJudge {
   decide(event: NormalizedEvent, ctx: { workers: WorkerRecord[] }): Promise<RouterDecision>;
