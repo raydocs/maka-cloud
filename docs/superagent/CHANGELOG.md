@@ -6,7 +6,7 @@ in the same commit. `changelog.test.ts` fails the package suite when this
 file is missing from the branch diff, when a later Super-agent commit
 omits it, or when uncommitted Super-agent edits leave it unchanged.
 
-## 2026-11-02 02:42 MST — cursor/superagent-real-loop-51be — 0bb4dae55
+## 2026-11-02 02:42 MST — cursor/superagent-real-loop-51be — e5d421ae1
 
 - **PR:** none ([compare](https://github.com/raydocs/maka-cloud/compare/main...cursor/superagent-real-loop-51be))
 - **What:** Same-commit changelog check (after this file exists, every `packages/cloud-superagent` commit and dirty tree must also touch CHANGELOG). Filled SHAs on the backfill. Standing user requirement.
