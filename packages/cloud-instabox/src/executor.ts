@@ -2,31 +2,33 @@ import { randomUUID } from 'node:crypto';
 import { posix } from 'node:path';
 import {
   ATTACHMENT_MIME_SNIFF_BYTES,
+  GrepSearchError,
+  ImageFileError,
   MAX_READ_IMAGE_BYTES,
   READ_IMAGE_TOO_LARGE_MESSAGE,
+  isSupportedImagePath,
+  readTextLineWindow,
+  searchFiles,
   sniffAttachmentMimeType,
-} from '@maka/core/attachments';
-import { GrepSearchError, searchFiles, type GrepRunner } from '@maka/runtime/grep-search';
-import { ImageFileError, isSupportedImagePath, validateImageBytes } from '@maka/runtime/image-file';
-import { readTextLineWindow } from '@maka/runtime/text-line-window';
-import type {
-  WorkspaceExecInput,
-  WorkspaceExecResult,
-  WorkspaceExecutor,
-  WorkspaceExecutorFacts,
-  WorkspaceGlobInput,
-  WorkspaceGlobResult,
-  WorkspaceGrepInput,
-  WorkspaceGrepResult,
-  WorkspaceReadFileInput,
-  WorkspaceReadFileResult,
-  WorkspaceResolvePathInput,
-  WorkspaceResolvePathResult,
-  WorkspaceWriteFileInput,
-  WorkspaceWriteFileResult,
-  WorkspaceWriteLockKeyInput,
-  WorkspaceWriteLockKeyResult,
-} from '@maka/runtime/workspace-executor';
+  validateImageBytes,
+  type GrepRunner,
+  type WorkspaceExecInput,
+  type WorkspaceExecResult,
+  type WorkspaceExecutor,
+  type WorkspaceExecutorFacts,
+  type WorkspaceGlobInput,
+  type WorkspaceGlobResult,
+  type WorkspaceGrepInput,
+  type WorkspaceGrepResult,
+  type WorkspaceReadFileInput,
+  type WorkspaceReadFileResult,
+  type WorkspaceResolvePathInput,
+  type WorkspaceResolvePathResult,
+  type WorkspaceWriteFileInput,
+  type WorkspaceWriteFileResult,
+  type WorkspaceWriteLockKeyInput,
+  type WorkspaceWriteLockKeyResult,
+} from '@maka-cloud/maka-engine';
 import { Minimatch } from 'minimatch';
 import type { InstaboxClient, InstaboxExecRequest, InstaboxExecResult } from './client.js';
 import { InstaboxApiError } from './errors.js';

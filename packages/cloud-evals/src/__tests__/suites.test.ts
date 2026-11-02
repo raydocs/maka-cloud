@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { parseExperimentSpec } from '@maka/eval';
+import { parseExperimentSpec } from '@maka-cloud/maka-engine/eval';
 import { makeSpec } from '../spec-gen.js';
 import {
   SweBenchDataset,
