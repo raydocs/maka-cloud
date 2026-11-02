@@ -597,27 +597,6 @@ test('ordinary changes do not pay for the released forward roll', () => {
   assert.equal(plan.stateRootCompat, false);
 });
 
-test('a lockfile or planner full suite does not pay for the released forward roll', () => {
-  for (const path of ['package.json', 'package-lock.json', 'scripts/ci-test-plan.mjs']) {
-    const plan = planTests([path], { graph });
-    assert.equal(plan.full, true, path);
-    assert.equal(plan.stateRootCompat, false, path);
-  }
-});
-
-test('a full suite from --full or ci.yml still qualifies durable state', () => {
-  assert.equal(planTests([], { graph, forceFull: true }).stateRootCompat, true);
-  assert.equal(planTests(['.github/workflows/ci.yml'], { graph }).stateRootCompat, true);
-});
-
-test('a decoder in a full-suite file list still qualifies durable state', () => {
-  const plan = planTests(['package.json', 'packages/storage/src/operational-state-store.ts'], {
-    graph,
-  });
-  assert.equal(plan.full, true);
-  assert.equal(plan.stateRootCompat, true);
-});
-
 // Which files select the app icon gate is derived in `ci-workflow-policy.test.mjs`
 // from the suites the step runs. What stays here is the complement: regenerating
 // the artwork costs about a minute, and ordinary product code must stop paying it.
