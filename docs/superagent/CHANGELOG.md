@@ -8,7 +8,7 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
-## 2026-11-02 12:26 MST — cursor/superagent-watchdog-duplex-51be
+## 2026-11-02 12:26 MST — cursor/superagent-watchdog-duplex-51be — 656e7d7cc
 
 - **PR:** none ([compare](https://github.com/raydocs/maka-cloud/compare/cursor/superagent-real-loop-51be...cursor/superagent-watchdog-duplex-51be))
 - **What:** Conversational watchdog (ask/instruct on the existing progress API + `status` CLI; ledger / incidents / worker state / trigger→thread→worker citations; cheap model optional, deterministic fallback default; nudge/pause/resume/cancel/stuck-check only on explicit instruct). Full-duplex workers (`DuplexLoop`: mid-run inbox at the next step, `start()` → `started`, cancel/correct preempt, `seenEventIds` idempotency, progress ack `received, will apply at next step`). Design: `docs/superagent/watchdog-duplex.md`.
