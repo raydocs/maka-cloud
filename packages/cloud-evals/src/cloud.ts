@@ -7,7 +7,7 @@ import type {
   JsonObject,
   SubjectAdapter,
   SubjectExecutionResult,
-} from '@maka/eval';
+} from '@maka-cloud/maka-engine';
 import type { BudgetLedger, Reservation } from './ledger.js';
 import { proofArtifact } from './proof.js';
 import {

@@ -28,9 +28,13 @@
  * install-free steps run.
  */
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
+import { findForbiddenCloudMakaImports } from './cloud-maka-engine-boundary.mjs';
 import { changedFilesBetween, formatGitHubOutputs, planTests } from './ci-test-plan.mjs';
 
 /**
@@ -608,4 +612,28 @@ test('ordinary product code does not pay for app icon drift', () => {
   ]) {
     assert.equal(planTests([path], { graph }).appIcons, false, path);
   }
+});
+
+test('cloud packages outside maka-engine do not import in-process @maka/* packages', () => {
+  const repoRoot = new URL('..', import.meta.url);
+  const hits = findForbiddenCloudMakaImports(fileURLToPath(repoRoot));
+  assert.deepEqual(hits, [], hits.map((hit) => `${hit.file}: ${hit.specifier}`).join('\n'));
+});
+
+test('the maka-engine import scanner reports a source import and a package.json dependency', () => {
+  const root = mkdtempSync(join(tmpdir(), 'maka-engine-boundary-plan-'));
+  const pkg = join(root, 'packages', 'cloud-probe');
+  mkdirSync(join(pkg, 'src'), { recursive: true });
+  writeFileSync(
+    join(pkg, 'package.json'),
+    JSON.stringify({ name: '@maka-cloud/probe', dependencies: { '@maka/core': '0.1.0' } }),
+  );
+  writeFileSync(
+    join(pkg, 'src', 'use.ts'),
+    "import type { SessionEvent } from '@maka/core/events';\nexport type { SessionEvent };\n",
+  );
+  const hits = findForbiddenCloudMakaImports(root);
+  assert.equal(hits.length, 2, JSON.stringify(hits, null, 2));
+  assert.ok(hits.some((hit) => hit.kind === 'import'));
+  assert.ok(hits.some((hit) => hit.kind === 'dependency' && hit.specifier === '@maka/core'));
 });

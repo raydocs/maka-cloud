@@ -1,7 +1,7 @@
 import { mkdir, open, readFile, rename } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { UnrecordedSpend } from '@maka-cloud/gateway';
-import { type ExperimentSpec, expandExperiment, FileAttemptStore } from '@maka/eval';
+import { type ExperimentSpec, expandExperiment, FileAttemptStore } from '@maka-cloud/maka-engine';
 import { budgetOf } from './cloud.js';
 
 /**

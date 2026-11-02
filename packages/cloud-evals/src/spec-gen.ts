@@ -1,4 +1,4 @@
-import { type ExperimentSpec, parseExperimentSpec } from '@maka/eval';
+import { type ExperimentSpec, parseExperimentSpec } from '@maka-cloud/maka-engine';
 import { SUBJECT_IDS, type PublicTask, type SubjectId, type SuiteId } from './types.js';
 
 export interface MakeSpecInput {

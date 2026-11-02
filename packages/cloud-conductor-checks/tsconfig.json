@@ -8,5 +8,5 @@
     "composite": true
   },
   "include": ["src"],
-  "references": [{ "path": "../core" }, { "path": "../storage" }, { "path": "../runtime" }]
+  "references": [{ "path": "../cloud-maka-engine" }]
 }

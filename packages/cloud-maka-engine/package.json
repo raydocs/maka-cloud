@@ -1,0 +1,27 @@
+{
+  "name": "@maka-cloud/maka-engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The MakaEngine seam: everything cloud packages use from in-process @maka/*, plus a rust-preview Host stub.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "clean": "node ../../scripts/clean-paths.mjs dist tsconfig.tsbuildinfo",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test:dist": "node --test --test-concurrency=1 \"dist/**/*.test.js\""
+  },
+  "dependencies": {
+    "@maka/core": "0.1.0",
+    "@maka/eval": "0.1.0",
+    "@maka/runtime": "0.1.0",
+    "@maka/storage": "0.1.0"
+  }
+}
