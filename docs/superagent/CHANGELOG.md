@@ -8,7 +8,7 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
-## 2026-11-02 13:38 MST — cursor/superagent-ledger-51be
+## 2026-11-02 13:38 MST — cursor/superagent-ledger-51be — d12b53238
 
 - **PR:** [#466](https://github.com/raydocs/maka-cloud/pull/466)
 - **What:** Merge `origin/main` `6682cdc34` (PR #469 MakaEngine) into Super-agent ledger. Kept MakaEngine and T34 P3 (`superagent` before `runners`). `AGENTS.md` and `package.json` conflicted; both sides kept. `docs/superagent` joins the ASF header exclusion.
