@@ -133,12 +133,19 @@ test('a task tree: the reducer agrees with the server on state, steps and cost',
   expect(state.tasks[root]?.costUsd).toBe(0.14);
   expect(state.tasks[child]?.costUsd).toBeUndefined();
   expect(totalCost(Object.values(state.tasks))).toEqual({ usd: 0.14, complete: true });
-  await rootRun.complete();
+  // A parent that ends cancels children still running, so the leaf finishes first.
   await childRun.complete();
-  await view.until((s) => s.tasks[root]?.state === 'succeeded', 'the root to finish');
+  await rootRun.complete();
+  await view.until(
+    (s) => s.tasks[root]?.state === 'succeeded' && s.tasks[child]?.state === 'succeeded',
+    'the tree to finish',
+  );
   // A view opened later replays the conversation and ends up in the same place.
   const late = watch(client, conversationId);
-  const replayed = await late.until((s) => s.tasks[root]?.state === 'succeeded', 'the replay');
+  const replayed = await late.until(
+    (s) => s.tasks[root]?.state === 'succeeded' && s.tasks[child]?.state === 'succeeded',
+    'the replay',
+  );
   expect(replayed.tasks).toEqual(view.state.tasks);
   await late.stop();
   await view.stop();
