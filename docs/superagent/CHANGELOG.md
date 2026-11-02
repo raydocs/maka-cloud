@@ -8,6 +8,15 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
+## 2026-11-02 16:53 MST — cursor/superagent-real-loop-51be — b64fda3f6
+
+- **PR:** [#471](https://github.com/raydocs/maka-cloud/pull/471)
+- **What:** Merge `origin/main` `e83340599` (PR #465 Super-agent workspaces) into Super-agent real-loop. CHANGELOG conflicted; both sides kept, newest first.
+- **Why:** #465 landed on main; remaining stack PRs needed main forwarded. Linux-only gates.
+- **Tests:** conflict resolution only; prior head `393fc9b74`
+- **Live:** n/a
+- **Migrations / risk:** none
+
 ## 2026-11-02 16:02 MST — cursor/superagent-real-loop-51be — f94757948
 
 - **PR:** [#471](https://github.com/raydocs/maka-cloud/pull/471)
