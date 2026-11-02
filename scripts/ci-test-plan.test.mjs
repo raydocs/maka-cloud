@@ -600,6 +600,24 @@ test('ordinary changes do not pay for the released forward roll', () => {
 // Which files select the app icon gate is derived in `ci-workflow-policy.test.mjs`
 // from the suites the step runs. What stays here is the complement: regenerating
 // the artwork costs about a minute, and ordinary product code must stop paying it.
+test('GitHub outputs include a matrix-ready workspace shard list', () => {
+  const empty = formatGitHubOutputs(planTests(['docs/ci.md'], { graph }));
+  assert.match(empty, /^workspace_shards=\[\]$/mu);
+
+  const one = formatGitHubOutputs(planTests(['apps/desktop/src/main.ts'], { graph }));
+  const oneShards = JSON.parse(/^workspace_shards=(.*)$/mu.exec(one)?.[1] ?? '');
+  assert.equal(oneShards.length, 1);
+  assert.equal(oneShards[0].shard, '1');
+  assert.match(oneShards[0].workspaces, /apps\/desktop/u);
+
+  const full = formatGitHubOutputs(planTests([], { forceFull: true }));
+  const fullShards = JSON.parse(/^workspace_shards=(.*)$/mu.exec(full)?.[1] ?? '');
+  assert.ok(fullShards.length >= 2, 'a full suite must fan out across shards');
+  const packed = fullShards.flatMap((row) => row.workspaces.split(','));
+  assert.ok(packed.includes('apps/desktop'));
+  assert.ok(!packed.includes('packages/runtime-host'));
+});
+
 test('ordinary product code does not pay for app icon drift', () => {
   for (const path of [
     'apps/desktop/src/renderer/app-shell.tsx',

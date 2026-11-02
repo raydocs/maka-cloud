@@ -23,6 +23,8 @@ import { readFileSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { shardWorkspaces, testSourceWeight } from './run-workspace-tests-parallel.mjs';
+
 const scriptPath = fileURLToPath(import.meta.url);
 const defaultRepoRoot = dirname(dirname(scriptPath));
 
@@ -591,7 +593,11 @@ export function planTests(changedFiles, options = {}) {
   };
 }
 
-export function formatGitHubOutputs(plan) {
+export function formatGitHubOutputs(plan, options = {}) {
+  const repoRoot = options.repoRoot ?? defaultRepoRoot;
+  const shards = shardWorkspaces(plan.standardWorkspaces, {
+    weigh: (dir) => testSourceWeight(repoRoot, dir),
+  });
   return [
     `app_icons=${plan.appIcons}`,
     `asf_source=${plan.asfSource}`,
@@ -607,6 +613,7 @@ export function formatGitHubOutputs(plan) {
     `storage_stress=${plan.storageStress}`,
     `storybook=${plan.storybook}`,
     `standard_workspaces=${plan.standardWorkspaces.join(',')}`,
+    `workspace_shards=${JSON.stringify(shards)}`,
   ].join('\n');
 }
 

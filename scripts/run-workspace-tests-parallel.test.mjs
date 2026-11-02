@@ -27,6 +27,7 @@ import {
   orderByDescendingWeight,
   parseCliArgs,
   runWorkspaceTests,
+  shardWorkspaces,
   testSourceWeight,
 } from './run-workspace-tests-parallel.mjs';
 
@@ -82,6 +83,31 @@ test('equally weighted workspaces keep their declared order', () => {
   assert.deepEqual(
     orderByDescendingWeight(['b', 'a', 'c'], () => 7),
     ['b', 'a', 'c'],
+  );
+});
+
+test('a short workspace list stays in one shard', () => {
+  assert.deepEqual(shardWorkspaces(['apps/desktop', 'packages/ui']), [
+    { shard: '1', workspaces: 'apps/desktop,packages/ui' },
+  ]);
+});
+
+test('an empty workspace list produces no matrix rows', () => {
+  assert.deepEqual(shardWorkspaces([]), []);
+});
+
+test('a long workspace list is packed heaviest-first across shards', () => {
+  const weights = { heavy: 100, middle: 50, light: 10, tiny: 1 };
+  assert.deepEqual(
+    shardWorkspaces(['light', 'heavy', 'tiny', 'middle'], {
+      shardCount: 3,
+      weigh: (dir) => weights[dir],
+    }),
+    [
+      { shard: '1', workspaces: 'heavy' },
+      { shard: '2', workspaces: 'middle' },
+      { shard: '3', workspaces: 'light,tiny' },
+    ],
   );
 });
 

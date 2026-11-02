@@ -101,6 +101,49 @@ export function orderByDescendingWeight(dirs, weigh) {
   return [...dirs].sort((left, right) => weights.get(right) - weights.get(left));
 }
 
+/** Full-suite CI fans the standard workspaces out this many ways. */
+export const DEFAULT_WORKSPACE_TEST_SHARD_COUNT = 3;
+
+/**
+ * Fewer selected workspaces than this stay in one job, so an affected-only
+ * pull request does not pay three checkouts and three installs.
+ */
+export const WORKSPACE_TEST_SHARD_THRESHOLD = 4;
+
+/**
+ * Pack workspaces into GitHub Actions matrix rows, heaviest first, so a full
+ * suite's long packages do not sit behind each other in one job.
+ */
+export function shardWorkspaces(
+  dirs,
+  { shardCount = DEFAULT_WORKSPACE_TEST_SHARD_COUNT, weigh } = {},
+) {
+  if (dirs.length === 0) return [];
+  const count =
+    dirs.length < WORKSPACE_TEST_SHARD_THRESHOLD ? 1 : Math.min(shardCount, dirs.length);
+  if (count === 1) return [{ shard: '1', workspaces: dirs.join(',') }];
+  if (typeof weigh !== 'function') {
+    throw new Error('weigh is required when splitting workspaces across shards');
+  }
+  const ordered = orderByDescendingWeight(dirs, weigh);
+  const bins = Array.from({ length: count }, (_, index) => ({
+    shard: String(index + 1),
+    weight: 0,
+    dirs: [],
+  }));
+  for (const dir of ordered) {
+    let lightest = bins[0];
+    for (const bin of bins) {
+      if (bin.weight < lightest.weight) lightest = bin;
+    }
+    lightest.dirs.push(dir);
+    lightest.weight += weigh(dir);
+  }
+  return bins
+    .filter((bin) => bin.dirs.length > 0)
+    .map((bin) => ({ shard: bin.shard, workspaces: bin.dirs.join(',') }));
+}
+
 /**
  * Reads the test count `node --test` prints at the end of a run (`# tests N`,
  * or `ℹ tests N` in the spec reporter), from chunks of the run's output. A
