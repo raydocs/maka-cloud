@@ -46,11 +46,7 @@ export interface BoxPoolOptions {
   stuckAfterMs?: number;
   templateId?: string;
   recordUsage?: (entry: UsageEntry) => void;
-  reportProgress?: (
-    tenantId: string,
-    workerId: string,
-    patch: ProgressPatch,
-  ) => Promise<void>;
+  reportProgress?: (tenantId: string, workerId: string, patch: ProgressPatch) => Promise<void>;
 }
 
 export interface BoxAcquire {
@@ -195,9 +191,7 @@ export class BoxPool {
     const refused = refuseCrossWorker(workerId, request);
     if (refused) return refused;
     const workDir = workerWorkDir(workerId);
-    const cwd = request.cwd
-      ? resolveWorkerCwd(workerId, request.cwd)
-      : workDir;
+    const cwd = request.cwd ? resolveWorkerCwd(workerId, request.cwd) : workDir;
     return this.sandbox.exec(box.boxId, {
       ...request,
       cwd,

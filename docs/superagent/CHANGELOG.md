@@ -8,6 +8,15 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
+## 2026-11-02 12:15 MST — cursor/superagent-shared-box-51be
+
+- **PR:** [#472](https://github.com/raydocs/maka-cloud/pull/472)
+- **What:** `biome format` on `box-pool.ts` and `box-pool.test.ts`. Merged #471 W2 two-tick host test and #466 `.setup-*` cleanup.
+- **Why:** CI `test` on #472 runs 41502228088 and 41506056381 failed `format:check` (`Found 2 errors`) before workspace tests ran. Same assertions.
+- **Tests:** format check of those two files; host stuck-card and cancel-install come from the merge
+- **Live:** n/a
+- **Migrations / risk:** none. Format only.
+
 ## 2026-11-02 12:13 MST — cursor/superagent-real-loop-51be — b87e48b09
 
 - **PR:** [#471](https://github.com/raydocs/maka-cloud/pull/471)

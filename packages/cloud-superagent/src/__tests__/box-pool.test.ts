@@ -115,7 +115,9 @@ test('idle drop of the lease suspends; the next event wakes and records the time
   assert.equal(woke.woke, true);
   assert.equal((await sandbox.getMachine(slot.boxId)).state, 'running');
   assert.equal(
-    store.usageEvents(TENANT).some((row) => row.workerId === BOX_TIMING_WORKERS.wake && row.wallMs >= 0),
+    store
+      .usageEvents(TENANT)
+      .some((row) => row.workerId === BOX_TIMING_WORKERS.wake && row.wallMs >= 0),
     true,
   );
   assert.ok(spoken.some((row) => row.phase === 'waking' && /woke in/.test(row.activity ?? '')));
@@ -212,7 +214,8 @@ test('tenant box JSON survives a sqlite reopen with no schema bump', async () =>
   first.close();
 
   const db = openSuperagentDatabase(path);
-  const version = (db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
+  const version = (db.prepare('PRAGMA user_version').get() as { user_version: number })
+    .user_version;
   assert.equal(version, 2);
   db.close();
   const second = SqliteSuperagentStore.open(path);
@@ -247,9 +250,7 @@ test('Superagent sharedBox: two workers one box; idle suspend; wake on the next 
   assert.equal(left.sandboxRef, right?.sandboxRef);
   assert.equal(store.allTenantBoxes().length, 1);
 
-  const third = await agent.ingest(
-    github(TENANT_B, 's3', 'issues', issuePayload('opened', 42)),
-  );
+  const third = await agent.ingest(github(TENANT_B, 's3', 'issues', issuePayload('opened', 42)));
   assert.equal(third.result, 'spawned');
 
   time.advance(1_001);
@@ -260,7 +261,10 @@ test('Superagent sharedBox: two workers one box; idle suspend; wake on the next 
   await agent.ingest(github(TENANT, 's1c', 'issue_comment', commentPayload(40, 'go on', false, 8)));
   assert.equal((await sandbox.getMachine(boxId)).state, 'running');
   const after = agent.worker(TENANT, first.workerId);
-  assert.equal(after?.progress?.phase === 'waking' || /woke|waking/.test(after?.progress?.lastActivity ?? ''), true);
+  assert.equal(
+    after?.progress?.phase === 'waking' || /woke|waking/.test(after?.progress?.lastActivity ?? ''),
+    true,
+  );
 });
 
 test('sharedBox spawn admission caps workers on the tenant box, not a 30-minute kill', async () => {
