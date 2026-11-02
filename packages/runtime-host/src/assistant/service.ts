@@ -17,6 +17,7 @@
  * under the License.
  */
 
+import type { createAssistantPetPacks } from '../server/assistant-pet-packs.js';
 import type { RuntimeEvent } from '@maka/core/runtime-event';
 import type { TurnOrigin } from '@maka/core/turn-origin';
 import type { MessageContent } from '@maka/core/events';
@@ -42,6 +43,7 @@ import type {
 } from '@maka/runtime/plugin-turn-finish-service';
 import type { HostPluginDataRuntime } from '../server/plugin-data-runtime.js';
 import type { MakaCompositionEntryInspection } from '@maka/runtime/plugin-runtime';
+import { RunCostLedger, type ReadSessionUsage } from './run-cost.js';
 
 export const ASSISTANT_LEGACY_PACKAGES = [
   'dev.maka.memory-network',
@@ -54,8 +56,17 @@ type Dispose = () => void | Promise<void>;
 
 /** Shared Host capabilities retain invocation identity and source permissions. No plugin Fiber owns this service. */
 export interface AssistantDependencies {
+  petPacks?: ReturnType<typeof createAssistantPetPacks>;
   allocateWorkspace?(): Promise<{ projectId: string }>;
   readRuntimeEvents?(sessionId: string, runId?: string): Promise<readonly RuntimeEvent[]>;
+  /** Cheap durable checkpoint identity; used only to refresh the Bot's optional sticker shelf. */
+  readCompactionRevision?(sessionId: string): Promise<string | undefined>;
+  publishCharacterImage?(
+    sessionId: string,
+    assetId: string,
+    image: { bytes: Uint8Array; mimeType: string },
+    kind: 'image' | 'avatar' | 'sticker',
+  ): Promise<string>;
   agents: PluginAgentService;
   llm: PluginLlmService;
   sessionQuery: PluginSessionQueryService;
@@ -71,11 +82,19 @@ export interface AssistantDependencies {
   stopSessions(): Promise<void>;
   markBackgroundSessions(sessionIds: readonly string[]): Promise<void>;
   resolveTools(sessionId: string, core: readonly MakaTool[]): { tools: readonly MakaTool[] };
+  /**
+   * Model usage a Session accrued in a time window, read from the Usage ledger.
+   * Observability only (#6309): without it runs are still counted, but their
+   * cost is recorded as unknown.
+   */
+  readSessionUsage?: ReadSessionUsage;
 }
 
 export interface AssistantModuleServices
-  extends Omit<AssistantDependencies, 'resolveTools' | 'stopSessions'> {
+  extends Omit<AssistantDependencies, 'resolveTools' | 'stopSessions' | 'readSessionUsage'> {
   bot: AssistantBotBridge;
+  /** Cost and outcome of discovery runs and Matter activations; never limits them (#6309). */
+  runCost: RunCostLedger;
   backgroundSessions: { register(read: () => readonly string[]): void };
   onClose(dispose: Dispose): void;
   onStart(start: () => Dispose): void;
@@ -142,8 +161,11 @@ class AssistantRuntime {
   async recover(legacy: HostPluginDataRuntime, entries: readonly MakaCompositionEntryInspection[]) {
     if (this.initialized) throw Error('Personal assistant already initialized');
     const settings = await this.loadSettings(legacy, entries);
+    const runCost = new RunCostLedger(this.directory, this.dependencies.readSessionUsage);
+    this.disposers.push(() => runCost.close());
     const services: AssistantModuleServices = {
       bot: this.bot,
+      runCost,
       backgroundSessions: { register: (read) => this.backgroundSessions.push(read) },
       ...this.dependencies,
       onClose: (dispose: Dispose) => this.disposers.push(dispose),

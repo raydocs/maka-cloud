@@ -365,14 +365,6 @@ function isDocumentation(path) {
   );
 }
 
-function selectsStateRootCompat(files) {
-  return files.some(
-    (path) =>
-      DURABLE_STATE_DECODER_FILES.has(path) ||
-      /^packages\/storage\/src\/sqlite-[^/]*schema[^/]*\.ts$/u.test(path),
-  );
-}
-
 export function loadWorkspaceGraph(repoRoot = defaultRepoRoot, readFile = readFileSync) {
   const rootPackage = JSON.parse(readFile(join(repoRoot, 'package.json'), 'utf8'));
   const dirs = rootPackage.workspaces ?? [];
@@ -457,13 +449,7 @@ export function planTests(changedFiles, options = {}) {
       // Stress multipliers and native child-process lock probes run only when
       // their owning storage seam changes; making --full imply stress turned
       // every unrelated merge into a 10K-chunk pressure run.
-      //
-      // maka-cloud fork: the published apache/maka nightly writes an
-      // operational schema newer than this fork. A package.json / lockfile /
-      // planner change that does not touch decoders must not pay that
-      // forward-roll (it fails closed: "upgrade Maka"). `--full` and a
-      // ci.yml edit still run it; decoder and sqlite-schema files still do.
-      stateRootCompat: forceFull || workflow || selectsStateRootCompat(files),
+      stateRootCompat: true,
       storageStress: false,
       storybook: true,
       workspaces,
@@ -590,7 +576,11 @@ export function planTests(changedFiles, options = {}) {
     // The released forward roll: a build under test reads durable state a
     // published predecessor wrote. Selected by the decoders and the operation
     // vocabulary they decode against, plus the SQLite schemas.
-    stateRootCompat: selectsStateRootCompat(files),
+    stateRootCompat: files.some(
+      (path) =>
+        DURABLE_STATE_DECODER_FILES.has(path) ||
+        /^packages\/storage\/src\/sqlite-[^/]*schema[^/]*\.ts$/u.test(path),
+    ),
     storageStress,
     // Storybook build + smoke: catalog/harness only. Not every desktop/ui/core
     // PR — product ship gates are typecheck, unit, and Electron e2e. See
