@@ -36,6 +36,16 @@ export interface StackConfig {
   gatewaySpendPath: string;
   /** The standing duties' database: projects, duties, webhook deliveries and the run ledger. */
   dutiesDbPath: string;
+  /**
+   * Super-agent's package-local sqlite (not a cloud-server migration). Exclusive
+   * to this process, next to the other stack databases.
+   */
+  superagentDbPath: string;
+  /**
+   * GitHub logins that may spawn an unowned Super-agent worker. Empty: any
+   * non-bot login is admitted (P1 heuristic).
+   */
+  superagentActors: string[];
   /** The conversations of Claude tasks, kept off the sandboxes. Made only with `agentChannel`. */
   transcriptsDbPath: string;
   /**
@@ -190,6 +200,7 @@ export function dataPathsOf(
   | 'supervisorDbPath'
   | 'gatewaySpendPath'
   | 'dutiesDbPath'
+  | 'superagentDbPath'
   | 'transcriptsDbPath'
 > {
   return {
@@ -202,6 +213,7 @@ export function dataPathsOf(
     supervisorDbPath: join(dataDir, 'supervisor.db'),
     gatewaySpendPath: join(dataDir, 'gateway-spend.db'),
     dutiesDbPath: join(dataDir, 'duties.db'),
+    superagentDbPath: join(dataDir, 'superagent.db'),
     transcriptsDbPath: join(dataDir, 'transcripts.db'),
   };
 }
@@ -218,6 +230,7 @@ export function backupLayoutOf(dataDir: string): BackupLayout {
       rel(paths.supervisorDbPath),
       rel(paths.gatewaySpendPath),
       rel(paths.dutiesDbPath),
+      rel(paths.superagentDbPath),
       rel(paths.transcriptsDbPath),
     ],
     files: [rel(paths.runnerSessionsPath), rel(paths.codingDeliveriesPath)],
@@ -561,6 +574,10 @@ export const ENV_VARIABLES = [
     'the GitHub App’s webhook secret (16 characters or more), kept in memory only. Set: signed deliveries are accepted at /github/webhook and standing duties run. Unset: no standing duties',
   ],
   [
+    'MAKA_CLOUD_SUPERAGENT_ACTORS',
+    'comma separated GitHub logins that may spawn an unowned Super-agent worker. Unset: any non-bot login is admitted',
+  ],
+  [
     'MAKA_CLOUD_DEEP_MODE',
     '1 turns on deep mode. Off at launch: deep research has a provenance gap that is parked until after launch, so a request for deep runs in standard mode with a notice and the conductor is not told about deep. Unset or 0: off',
   ],
@@ -722,6 +739,7 @@ export function readStackConfig(
     dutiesSet: false,
     cardsSet: false,
     dutyLinks: [],
+    superagentActors: [],
     signIn: { appleClientIds: [], googleClientIds: [], trustedProxies: [...DEFAULT_PROXIES] },
   };
   const modes = readModes(value('MAKA_CLOUD_MODES'), config.gateway.models, problems);
@@ -763,6 +781,12 @@ export function readStackConfig(
     } else {
       config.dutyLinks = links;
     }
+  }
+  const superagentActors = value('MAKA_CLOUD_SUPERAGENT_ACTORS');
+  if (superagentActors !== undefined) {
+    const actors = parseLogins(superagentActors);
+    if (typeof actors === 'string') problems.push(`MAKA_CLOUD_SUPERAGENT_ACTORS ${actors}`);
+    else config.superagentActors = actors;
   }
   config.signIn = readSignIn(value, problems);
   const github = githubTokenProblem(env.MAKA_GITHUB_TOKEN);
@@ -891,6 +915,16 @@ const DUTY_LINK =
  * and one installation: the operator is the one who knows who owns what, so a repository named
  * twice is a mistake, not a choice. The problem as text, or the links.
  */
+function parseLogins(text: string): string[] | string {
+  const logins = text
+    .split(',')
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+  if (logins.length === 0) return 'must name at least one login';
+  if (logins.some((login) => /\s/u.test(login))) return 'logins cannot contain spaces';
+  return logins;
+}
+
 function parseDutyLinks(text: string): DutyLink[] | string {
   const links: DutyLink[] = [];
   for (const entry of text.split(',').map((part) => part.trim())) {
@@ -1071,6 +1105,7 @@ export function describeConfig(config: StackConfig): string[] {
     `Web Push:            ${config.pushSet ? 'on' : 'off (set the CLOUD_PUSH_* variables to turn it on)'}`,
     `GitHub token:        ${config.githubTokenProblem ?? 'set (fine-grained)'}`,
     `standing duties:     ${config.dutiesSet ? `on, projects may be registered for ${config.dutyLinks.length === 0 ? 'no repository yet' : config.dutyLinks.map((link) => link.repo).join(', ')}` : 'off (set MAKA_GITHUB_WEBHOOK_SECRET to turn them on)'}`,
+    `super-agent:         in-process (${config.superagentDbPath}${config.superagentActors.length === 0 ? '' : `; spawn limited to ${config.superagentActors.join(', ')}`})`,
     `sign-in:             ${describeSignIn(config.signIn)}`,
     `deep mode:           ${config.deepMode ? 'on' : 'off (set MAKA_CLOUD_DEEP_MODE=1 to turn it on)'}`,
     `proposed cards:      ${config.cardsSet ? 'on, each project is scanned read-only once a day' : 'off (set MAKA_CLOUD_CARDS=1 to turn them on)'}`,

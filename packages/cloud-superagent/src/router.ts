@@ -1,4 +1,5 @@
-import { observeMandate } from './types.js';
+import { z } from 'zod';
+import { actMandate, observeMandate } from './types.js';
 import type {
   AdmissionPolicy,
   EventSource,
@@ -86,14 +87,82 @@ export class RecordingJudge implements RouterJudge {
   }
 }
 
-/** Stub: a later PR may wire a cheap gateway model. Throws if called. */
+/** Injectable cheap Router model. Tests pass a fake client; no API keys live here. */
+export interface JudgeClient {
+  complete(prompt: string): Promise<string>;
+}
+
+const ModelDecision = z.object({
+  action: z.enum(['ignore', 'answer', 'spawn']),
+  reason: z.string().optional(),
+  text: z.string().optional(),
+  title: z.string().optional(),
+  intensity: z.enum(['observe', 'act']).optional(),
+});
+
+/**
+ * Optional Router judge behind the same interface as `HeuristicJudge`.
+ * Heuristic stays the default. A missing client throws. A bad or failed
+ * completion falls back to the heuristic so a cheap model cannot wedge intake.
+ */
 export class ModelJudge implements RouterJudge {
-  constructor(private readonly provider?: { complete(prompt: string): Promise<string> }) {}
-  async decide(
-    _event: NormalizedEvent,
-    _ctx: { workers: WorkerRecord[] },
-  ): Promise<RouterDecision> {
-    if (!this.provider) throw new Error('ModelJudge has no provider.');
-    throw new Error('ModelJudge is not wired in this slice.');
+  constructor(
+    private readonly client?: JudgeClient,
+    private readonly fallback: RouterJudge = new HeuristicJudge(),
+  ) {}
+
+  async decide(event: NormalizedEvent, ctx: { workers: WorkerRecord[] }): Promise<RouterDecision> {
+    if (!this.client) throw new Error('ModelJudge has no provider.');
+    let raw: string;
+    try {
+      raw = await this.client.complete(promptOf(event));
+    } catch {
+      return this.fallback.decide(event, ctx);
+    }
+    return parseModelDecision(raw, event) ?? this.fallback.decide(event, ctx);
   }
+}
+
+export function parseModelDecision(
+  raw: string,
+  event: NormalizedEvent,
+): RouterDecision | undefined {
+  const json = extractJson(raw);
+  if (json === undefined) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    return undefined;
+  }
+  const decision = ModelDecision.safeParse(parsed);
+  if (!decision.success) return undefined;
+  const data = decision.data;
+  if (data.action === 'ignore') return { action: 'ignore', reason: data.reason ?? 'model_ignore' };
+  if (data.action === 'answer') {
+    const text = data.text?.trim();
+    if (!text) return undefined;
+    return { action: 'answer', text };
+  }
+  const repos = event.subject?.repo ? [event.subject.repo] : [];
+  const mandate = data.intensity === 'act' ? actMandate(repos, 'inferred') : observeMandate(repos);
+  return { action: 'spawn', mandate, title: data.title?.trim() || 'Model spawn' };
+}
+
+function promptOf(event: NormalizedEvent): string {
+  return [
+    'Decide ignore, answer, or spawn for this unowned event.',
+    'Reply with JSON only: {"action":"ignore"|"answer"|"spawn","reason":"...","text":"...","title":"...","intensity":"observe"|"act"}.',
+    `type=${event.type} source=${event.source} actor=${event.actor.login} subject=${event.subject?.key ?? ''}`,
+    `summary=${event.summary}`,
+  ].join('\n');
+}
+
+function extractJson(raw: string): string | undefined {
+  const trimmed = raw.trim();
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) return trimmed;
+  const start = trimmed.indexOf('{');
+  const end = trimmed.lastIndexOf('}');
+  if (start >= 0 && end > start) return trimmed.slice(start, end + 1);
+  return undefined;
 }

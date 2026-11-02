@@ -37,7 +37,14 @@ import {
   type TaskDirectory,
   TenantMachineProvider,
 } from '@maka-cloud/runners';
+import type { SuperagentOptions, SuperagentStore } from '@maka-cloud/superagent';
 import type { Supervisor } from '@maka-cloud/supervisor';
+import {
+  attachDutySource,
+  type HostSuperagent,
+  openHostSuperagent,
+  startHostSuperagent,
+} from './superagent.js';
 import { createHttpMailer } from './mail.js';
 import {
   type CloudServerOptions,
@@ -114,6 +121,15 @@ export interface StackDependencies {
    * for tests. Unset in the product: the pool uses the account's `INSTABOX_API_KEY` and the real guard.
    */
   boxes?: Pick<BoxServiceOptions, 'guard' | 'timers'> & { client?: InstaboxClient };
+  /**
+   * Super-agent runs in this process (recommended). Tests replace the store,
+   * handler, judge, clock or tick timer. HeuristicJudge stays the default.
+   */
+  superagent?: Omit<SuperagentOptions, 'store' | 'onEscalate'> & {
+    store?: SuperagentStore;
+    tickMs?: number;
+    every?: (fn: () => void, ms: number) => () => void;
+  };
   onWarning?: (message: string, detail?: unknown) => void;
   /** Routine events worth a log line, such as a finished backup. */
   onInfo?: (event: string, fields: Record<string, string | number>) => void;
@@ -131,6 +147,8 @@ export interface Stack {
   duties?: DutiesRuntime;
   /** Proposed cards; absent while `MAKA_CLOUD_CARDS` is not set. */
   cards?: CardsRuntime;
+  /** In-process Super-agent: event intake, workers, watchdog. Always present. */
+  superagent: HostSuperagent;
   /** Writes a backup now, as the daily one does. Throws when `MAKA_CLOUD_BACKUP_DIR` is not set. */
   backup(): Promise<BackupResult>;
   /** Looks at the day's spend now and sends the alert if it is due. A no-op without an alert set. */
@@ -171,6 +189,7 @@ export async function startStack(
     | {
         backupTo(destination: string): Promise<void>;
         raiseProposal(input: Parameters<Supervisor['raiseProposal']>[0]): boolean;
+        raiseStuck(input: Parameters<Supervisor['raiseStuck']>[0]): boolean;
         raiseSuggestion(input: Parameters<Supervisor['raiseSuggestion']>[0]): boolean;
         raiseSuggestionOffer(input: Parameters<Supervisor['raiseSuggestionOffer']>[0]): boolean;
         closeSuggestion(lineage: string): boolean;
@@ -257,6 +276,8 @@ export async function startStack(
   // The conversations of Claude tasks, kept off the sandboxes. Made only when Claude runs through
   // the Agent SDK, which needs the agent's account.
   let transcripts: SqliteTranscriptStore | undefined;
+  let superagentRt: HostSuperagent | undefined;
+  let releaseSuperagentTick: (() => void) | undefined;
   try {
     if (config.agentChannel !== undefined) {
       await mkdir(dirname(config.transcriptsDbPath), { recursive: true });
@@ -360,6 +381,39 @@ export async function startStack(
     runners = (
       dependencies.createRunners ?? ((options) => createCloudRunnersFromEnv(env, options))
     )(runnerOptions);
+
+    const superagentOptions = dependencies.superagent ?? {};
+    const {
+      store: superagentStore,
+      tickMs: superagentTickMs,
+      every: superagentEvery,
+      ...agentOpts
+    } = superagentOptions;
+    superagentRt =
+      superagentStore === undefined
+        ? await openHostSuperagent(config.superagentDbPath, {
+            ...agentOpts,
+            admission: {
+              ...agentOpts.admission,
+              ...(config.superagentActors.length > 0 &&
+              agentOpts.admission?.allowActors === undefined
+                ? { allowActors: config.superagentActors }
+                : {}),
+            },
+          })
+        : startHostSuperagent(superagentStore, {
+            ...agentOpts,
+            admission: {
+              ...agentOpts.admission,
+              ...(config.superagentActors.length > 0 &&
+              agentOpts.admission?.allowActors === undefined
+                ? { allowActors: config.superagentActors }
+                : {}),
+            },
+          });
+    if (duties !== undefined && webhookSecret !== undefined) {
+      attachDutySource(duties.service, webhookSecret, config.dutyLinks, superagentRt);
+    }
 
     const deliveries = new JsonFileCodingDeliveries(config.codingDeliveriesPath);
     coding = createCodingRunner(runners, {
@@ -510,7 +564,25 @@ export async function startStack(
       raiseOffer: (input) => supervisorRef?.raiseSuggestionOffer(input) ?? false,
       closeSuggestion: (lineage) => supervisorRef?.closeSuggestion(lineage) ?? false,
     });
+    if (superagentRt === undefined) throw new Error('Super-agent did not start');
+    superagentRt.bindInbox({
+      createConversation: (input) => cloud.server.createConversation(input),
+      raiseStuck: (input) => supervisorRef?.raiseStuck(input) ?? false,
+      postNotice: (conversationId, text) => cloud.conductor.postNotice({ conversationId, text }),
+    });
+    await superagentRt.agent.restore();
+    const tickEvery = superagentEvery ?? defaultEvery;
+    const tickMs = superagentTickMs ?? 60_000;
+    if (tickMs > 0) {
+      releaseSuperagentTick = tickEvery(() => {
+        void superagentRt
+          ?.tick()
+          .catch((error: unknown) => warn('A Super-agent tick failed', error));
+      }, tickMs);
+    }
   } catch (error) {
+    releaseSuperagentTick?.();
+    superagentRt?.close();
     await cards?.stop();
     await duties?.stop();
     duties?.close();
@@ -550,6 +622,12 @@ export async function startStack(
         ...(duties === undefined
           ? {}
           : { [relative(config.dataDir, config.dutiesDbPath)]: (to) => duties.backupTo(to) }),
+        ...(superagentRt === undefined
+          ? {}
+          : {
+              [relative(config.dataDir, config.superagentDbPath)]: (to) =>
+                superagentRt.backupTo(to),
+            }),
         ...(transcripts === undefined
           ? {}
           : {
@@ -636,6 +714,7 @@ export async function startStack(
     pause,
     ...(duties === undefined ? {} : { duties }),
     ...(cards === undefined ? {} : { cards }),
+    superagent: superagentRt as HostSuperagent,
     backup,
     checkSpendAlert: () => alerts?.tick() ?? Promise.resolve(),
     // The watcher stops first, then the runs, then the gateway cuts whatever is still in flight.
@@ -652,9 +731,12 @@ export async function startStack(
             // longer answers webhook requests.
             await cards?.stop();
             await duties?.stop();
+            releaseSuperagentTick?.();
+            releaseSuperagentTick = undefined;
             await cloud.close();
           } finally {
             duties?.close();
+            superagentRt?.close();
             await boxService?.close();
             transcripts?.close();
             await gateway.close();
@@ -666,4 +748,10 @@ export async function startStack(
       return closing;
     },
   };
+}
+
+function defaultEvery(fn: () => void, ms: number): () => void {
+  const timer = setInterval(fn, ms);
+  timer.unref();
+  return () => clearInterval(timer);
 }

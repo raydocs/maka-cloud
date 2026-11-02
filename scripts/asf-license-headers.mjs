@@ -263,6 +263,7 @@ export const exclusionRules = [
         'scripts/cloud-maka-engine-boundary.test.mjs',
       )(path) ||
       startsWith('docs/fork')(path) ||
+      startsWith('docs/superagent')(path) ||
       startsWith('deploy')(path) ||
       path.startsWith('packages/cloud-'),
   },

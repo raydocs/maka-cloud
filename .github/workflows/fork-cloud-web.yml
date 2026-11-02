@@ -64,6 +64,7 @@ jobs:
           npm --workspace @maka-cloud/memory run build
           npm --workspace @maka-cloud/server run build
           npm --workspace @maka-cloud/instabox run build
+          npm --workspace @maka-cloud/superagent run build
           npm --workspace @maka-cloud/runners run build
           npm --workspace @maka-cloud/conductor-checks run build
           npm --workspace @maka-cloud/conductor run build

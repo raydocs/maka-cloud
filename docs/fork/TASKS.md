@@ -1049,10 +1049,13 @@ approvals, tenant isolation, metering hooks) is the differentiator
 against the DSH prototype's full-access operator user.
 
 - Package: `packages/cloud-superagent` (`@maka-cloud/superagent`).
-- New package only: do not import host/server/conductor/duties/runners.
-  Those compose it through ports in a later wiring PR.
-- Persistence: package-local SQLite (`superagent.sqlite`), not a
-  `cloud-server` migration.
+- P1: new package only; do not import host/server/conductor/duties/runners.
+- P2: the host composes it in-process (`startStack`); duties export
+  `readDelivery` so HMAC-verified GitHub deliveries are a Source; the
+  watchdog emits T33 stuck cards; `ModelJudge` takes an injectable client
+  (`HeuristicJudge` stays default).
+- Persistence: package-local SQLite (`superagent.db` next to the server
+  dir), not a `cloud-server` migration.
 - `WorkspaceStore`: git clone default; LayerFS adapter compiled, off,
   no FUSE/Docker/server. Spike gates stay in
   `docs/fork/design/layerfs.md` and §10 of the architecture.

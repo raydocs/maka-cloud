@@ -11,8 +11,18 @@ export {
   admit,
   HeuristicJudge,
   ModelJudge,
+  type JudgeClient,
+  parseModelDecision,
   RecordingJudge,
 } from './router.js';
+export {
+  DEFAULT_STUCK_OPTIONS,
+  formatStuckAsk,
+  STUCK_REASON,
+  stuckCardOf,
+  type StuckCard,
+  type StuckOption,
+} from './stuck.js';
 export { FakeSandbox, type SandboxPort } from './sandbox.js';
 export { overBudget, RISKY_ACTIONS, Safety } from './safety.js';
 export { MemorySuperagentStore } from './memory-store.js';

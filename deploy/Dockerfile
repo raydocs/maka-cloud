@@ -25,7 +25,7 @@ RUN set -eu; \
       @maka/core @maka/storage @maka/runtime \
       @maka-cloud/maka-engine \
       @maka-cloud/orchestrator @maka-cloud/modes @maka-cloud/memory @maka-cloud/server \
-      @maka-cloud/instabox @maka-cloud/runners @maka-cloud/boxes @maka-cloud/conductor-checks \
+      @maka-cloud/instabox @maka-cloud/superagent @maka-cloud/runners @maka-cloud/boxes @maka-cloud/conductor-checks \
       @maka-cloud/conductor @maka-cloud/playbooks @maka-cloud/supervisor \
       @maka-cloud/gateway @maka-cloud/duties @maka-cloud/host; do \
       npm --workspace "$workspace" run build; \
