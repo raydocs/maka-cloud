@@ -8,6 +8,15 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
+## 2026-11-02 12:20 MST — cursor/superagent-scheduler-router-51be
+
+- **PR:** none (this branch)
+- **What:** Scheduler / admission queue (priority, size, deps, footprint, reserved human slot, aging, async start) and a two-layer tunable Router (Fast Path drops, Slow Path classify + observe/auto/off + feedback). Subscribed threads skip the router model. Recall chain `triggerId → threadId → workerId`. Queue + intake metrics on the progress snapshot. JSON `documents` table, no `user_version` bump.
+- **Why:** User-approved P1 (2 Nov 2026) plus DSH Fast/Slow Path alignment.
+- **Tests:** new scheduler / intake / recall suites; existing routing box/spend caps now expect `queued`. FakeSandbox + FakeJudgeClient.
+- **Live:** n/a
+- **Migrations / risk:** none. `documents` is `CREATE TABLE IF NOT EXISTS`. Schema version stays 2.
+
 ## 2026-11-02 11:06 MST — cursor/superagent-real-loop-51be — 4b2c813e3
 
 - **PR:** [#471](https://github.com/raydocs/maka-cloud/pull/471)

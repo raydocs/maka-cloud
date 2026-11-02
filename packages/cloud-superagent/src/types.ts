@@ -311,8 +311,17 @@ export interface JudgeLogEntry {
   reason?: string;
 }
 
+export interface RouterJudgeContext {
+  workers: WorkerRecord[];
+  /** Feedback few-shots and rule suggestions for a model Router. */
+  fewShot?: string;
+  suggestions?: string;
+  /** Queued / running task titles for cross-task coordination. */
+  queue?: string;
+}
+
 export interface RouterJudge {
-  decide(event: NormalizedEvent, ctx: { workers: WorkerRecord[] }): Promise<RouterDecision>;
+  decide(event: NormalizedEvent, ctx: RouterJudgeContext): Promise<RouterDecision>;
 }
 
 export interface AdmissionPolicy {
@@ -355,6 +364,8 @@ export interface IdFactory {
   subscription(): string;
   approval(): string;
   audit(): string;
+  task(): string;
+  decision(): string;
 }
 
 export const DEFAULT_WATCHDOG: WatchdogSettings = {

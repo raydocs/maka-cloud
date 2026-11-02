@@ -11,6 +11,16 @@ import type {
 } from './types.js';
 import { emptyUsage, isLiveState } from './types.js';
 
+function documentKey(kind: string, tenantId: string): string {
+  return `${kind}::${tenantId}`;
+}
+
+function parseDocumentKey(key: string): { kind: string; tenantId: string } | undefined {
+  const split = key.indexOf('::');
+  if (split < 0) return undefined;
+  return { kind: key.slice(0, split), tenantId: key.slice(split + 2) };
+}
+
 function sameTenant<T extends { tenantId: string }>(
   row: T | undefined,
   tenantId: string,
@@ -28,6 +38,7 @@ export class MemorySuperagentStore implements SuperagentStore {
   private readonly audits: AuditRecord[] = [];
   private readonly usageRows = new Map<string, Usage>();
   private readonly usageEventRows: UsageEntry[] = [];
+  private readonly documents = new Map<string, string>();
 
   putEvent(event: NormalizedEvent): 'stored' | 'duplicate' {
     const idem = `${event.tenantId}:${event.idempotencyKey}`;
@@ -182,8 +193,28 @@ export class MemorySuperagentStore implements SuperagentStore {
     };
   }
 
+  putDocument(tenantId: string, kind: string, json: string, _at: number): void {
+    this.documents.set(documentKey(kind, tenantId), json);
+  }
+
+  getDocument(tenantId: string, kind: string): string | undefined {
+    return this.documents.get(documentKey(kind, tenantId));
+  }
+
+  listDocumentTenants(kind?: string): string[] {
+    const ids = new Set<string>();
+    for (const key of this.documents.keys()) {
+      const parsed = parseDocumentKey(key);
+      if (!parsed) continue;
+      if (kind !== undefined && parsed.kind !== kind) continue;
+      ids.add(parsed.tenantId);
+    }
+    return [...ids];
+  }
+
   close(): void {
     this.events.clear();
     this.workerRows.clear();
+    this.documents.clear();
   }
 }
