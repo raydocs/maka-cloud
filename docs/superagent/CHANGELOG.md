@@ -8,6 +8,15 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
+## 2026-11-02 12:13 MST — cursor/superagent-real-loop-51be — b87e48b09
+
+- **PR:** [#471](https://github.com/raydocs/maka-cloud/pull/471)
+- **What:** Host stack test ticks twice for W2 (nudge, then escalate → stuck card), matching `stuck.test.ts` / `watchdog.test.ts`. Forwarded from #466: harness cleanup kills `.setup-*` install dirs and retries `fs.rm` on ENOTEMPTY.
+- **Why:** CI `test` on #471 run 41497463473: `the stack always starts Super-agent in process and a stalled worker is a stuck card` expected a card after one tick (`0 !== 1`). Real, deterministic — 3fd50604e made first stall a nudge. CI `test` on #466 run 41415227391: `cancel while the CLI is being installed releases everything` after-hook `ENOTEMPTY` on `work/.setup-claude`. Flake in a test we own; assertions unchanged. #464 run 41415226108 `drains a retraction started before /new re-keys` is an upstream `packages/cli` TUI flake (1453/1457 passed; prior host SHA green). iOS on #464–#466 cancelled at 45m after `simctl install` printed `Authorization is required to install the packages` — self-hosted Mac, no Maestro assertion, needs a human.
+- **Tests:** cloud-host stack stuck-card; cloud-runners cancel-while-install
+- **Live:** n/a
+- **Migrations / risk:** none. Test-only.
+
 ## 2026-11-02 11:58 MST — cursor/superagent-bounded-autonomy-51be — 85ef3d4f0
 
 - **PR:** [#473](https://github.com/raydocs/maka-cloud/pull/473)
