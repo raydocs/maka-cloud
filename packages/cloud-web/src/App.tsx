@@ -26,6 +26,7 @@ import {
   conversationSummary,
   displayText,
   dollars,
+  failedParts,
   type ErrorText,
   errorText,
   type InboxItem,
@@ -42,6 +43,7 @@ import {
   openCookieWorkspace,
   openWorkspace,
   questionCardModel,
+  type SendFailure,
   sendFailureText,
   visibleInbox,
   Unsupported,
@@ -51,9 +53,10 @@ import { DevicesPanel } from './Devices';
 import { GrantsPanel } from './Grants';
 import { QuotaNotice, Usage } from './Quota';
 import { Home } from './Home';
-import { InboxPanel } from './Inbox';
+import { HeldArgs, InboxPanel } from './Inbox';
 import { Computer } from './Computer';
 import { TaskDelivery } from './Delivery';
+import { WorkStagePortal } from './WorkStage';
 import { MemoryPanel } from './Memory';
 import { ModePicker } from './ModePicker';
 import { outboxFor } from './pending';
@@ -65,6 +68,7 @@ import { disablePush, enablePush, postPushContext, restorePush } from './push';
 import { submitOnEnter } from './keys';
 import {
   clearSteerReceipts,
+  PanelChips,
   RunningClock,
   SteerComposer,
   WaitingJump,
@@ -109,7 +113,7 @@ export function QuestionCard({
       {card.note && <p className="muted">{card.note}</p>}
       {card.held && (
         <p className="muted held-action">
-          {t('Held until you answer:')} {card.held.tool} <code>{card.held.args}</code>
+          {t('Held until you answer:')} {card.held.tool} <HeldArgs args={card.held.args} />
         </p>
       )}
       {answered ? (
@@ -162,6 +166,29 @@ export function QuestionCard({
   );
 }
 
+/** What the task is doing right now, in one present-tense line that a light passes over. */
+// What scrolls the conversation: its own column on a wide screen, else the page.
+function chatScroller(node: HTMLElement | null): HTMLElement | null {
+  // A conversation kept mounted behind Home or Projects never moves the page under them.
+  if (!node || node.getClientRects().length === 0) return null;
+  const dock = node?.closest<HTMLElement>('.chat-dock');
+  if (dock && getComputedStyle(dock).overflowY === 'auto') return dock;
+  return document.scrollingElement as HTMLElement | null;
+}
+
+// Lost connection or a server error: the server may have the message, and a retry runs it once.
+function mayHaveArrived(reason: SendFailure): boolean {
+  return reason === 'offline' || reason === 'server' || reason === 'interrupted';
+}
+
+function NarrationLine({ line }: { line: string }) {
+  return (
+    <p className="current-step narration" aria-live="polite">
+      <span className="step-now">{displayText(line)}</span>
+    </p>
+  );
+}
+
 /** The one updating line of a running task, and the steps behind it when it is opened. */
 function StepLine({ notes }: { notes: readonly string[] }) {
   const { t } = useT();
@@ -171,7 +198,7 @@ function StepLine({ notes }: { notes: readonly string[] }) {
     <details className="current-step">
       <summary>
         <span>{t('Current step')}</span>
-        {displayText(current)}
+        <span className="step-now">{displayText(current)}</span>
       </summary>
       {steps.length > 1 && (
         <ol className="steps">
@@ -193,6 +220,7 @@ function TaskBranch({
   act,
   control,
   ancestors = [],
+  explained,
 }: {
   task: TaskView;
   client: CloudClient;
@@ -202,6 +230,8 @@ function TaskBranch({
   act: (key: string, work: () => Promise<unknown>) => Promise<boolean>;
   control: (task: string, action: 'cancel' | 'pause' | 'resume') => Promise<void>;
   ancestors?: string[];
+  /** Tasks whose failure already has its own card in this conversation. */
+  explained?: ReadonlySet<string>;
 }) {
   const { t, shared } = useT();
   // A bad parent reference cannot make rendering loop forever.
@@ -216,8 +246,10 @@ function TaskBranch({
           <span className={`status-mark ${task.state}`} />
           <h3>{displayText(task.title ?? t('Task'))}</h3>
         </div>
+        {/* One line of state: what it is and how long it has been at it. */}
         <div className="task-meta">
           <span>{shared(taskLabel(task))}</span>
+          <RunningClock task={task} />
           {task.parentTaskId === undefined &&
             (task.costUsd !== undefined || task.budgetUsd !== undefined) && (
               <span>
@@ -240,9 +272,18 @@ function TaskBranch({
           <p className="muted">{t('Still stopping. The cost may change until it has stopped.')}</p>
         )}
         {/* A finished task has no "current step", and a top-level result is on its own card. */}
-        <RunningClock task={task} />
-        {task.progress.length > 0 && live && <StepLine notes={task.progress} />}
-        {task.failureReason && <FailureNote reason={task.failureReason} />}
+        {live && task.narration ? (
+          <NarrationLine line={task.narration} />
+        ) : (
+          task.progress.length > 0 && live && <StepLine notes={task.progress} />
+        )}
+        {/* A finished top-level task shows its checks on its result card instead. */}
+        {task.panels && task.panels.length > 0 && (live || task.parentTaskId !== undefined) && (
+          <PanelChips panels={task.panels} />
+        )}
+        {task.failureReason && !explained?.has(task.taskId) && (
+          <FailureNote reason={task.failureReason} />
+        )}
         {task.manifest && task.parentTaskId !== undefined && (
           <p>{displayText(task.manifest.summary)}</p>
         )}
@@ -295,7 +336,7 @@ function TaskBranch({
           {children.map((child) => (
             <TaskBranch
               key={child.taskId}
-              {...{ task: child, client, tasks, noPause, busy, act, control }}
+              {...{ task: child, client, tasks, noPause, busy, act, control, explained }}
               ancestors={[...ancestors, task.taskId]}
             />
           ))}
@@ -435,6 +476,15 @@ export function ConversationView({
   }, [feed]);
   const snapshot = useSyncExternalStore(feed.subscribe, feed.getSnapshot);
   const { state, status, connection, outgoing, error, busy, artifacts, noPause } = snapshot;
+  // Your words are the last thing said and the reply has not come: it is thinking. A message that
+  // could not be sent is not waiting on anyone, and a long silence is not shown as thinking.
+  const last = state.messages[state.messages.length - 1];
+  const thinking =
+    outgoing.some((message) => message.status.state !== 'failed') ||
+    (outgoing.length === 0 &&
+      last?.role === 'user' &&
+      last.at !== undefined &&
+      Date.now() - last.at < 120_000);
   const [draft, updateDraft] = useState(
     () => conversationDrafts.get(conversation.conversationId) ?? '',
   );
@@ -491,6 +541,27 @@ export function ConversationView({
     return () => clearTimeout(timer);
   }, [decision, state, status]);
   const { tasks, questions, running, withResults, openQuestions } = conversationSummary(snapshot);
+  // Like a chat app, the view follows what is new while the person is at the latest; once they
+  // scroll up to read, it stays where they put it. A decision being brought into view wins.
+  const following = useRef(true);
+  useEffect(() => {
+    const track = () => {
+      const scroller = chatScroller(conversationNode.current);
+      if (scroller)
+        following.current =
+          scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 160;
+    };
+    // The column scrolls on a wide screen and the window on a phone; capture hears both.
+    document.addEventListener('scroll', track, { capture: true, passive: true });
+    return () => document.removeEventListener('scroll', track, { capture: true });
+  }, []);
+  const latest = `${state.messages.length}:${outgoing.length}:${tasks.length}:${Object.keys(state.inbox).length}:${thinking}`;
+  useEffect(() => {
+    if (!following.current) return;
+    if (decision !== undefined && focusedDecision.current !== decision) return;
+    const scroller = chatScroller(conversationNode.current);
+    if (scroller) scroller.scrollTop = scroller.scrollHeight;
+  }, [latest, decision]);
   const decisions = useRef<HTMLDivElement>(null);
   const total = totalCost(tasks);
   const topLevel = tasks.filter((task) => !task.parentTaskId || !state.tasks[task.parentTaskId]);
@@ -505,6 +576,9 @@ export function ConversationView({
     (item) =>
       item.kind !== 'suggestion' &&
       !(item.kind === 'finished' && item.taskId !== null && shown.has(item.taskId)),
+  );
+  const explained = new Set(
+    inboxItems.flatMap((item) => (failedParts(item) && item.taskId ? [item.taskId] : [])),
   );
   const waiting =
     questions.filter((q) => !state.answers[q.questionId]).length +
@@ -524,12 +598,16 @@ export function ConversationView({
         </div>
         <div className="messages" role="log" aria-label={t('Messages')}>
           {state.messages.length === 0 && outgoing.length === 0 && (
+            // A first conversation opens the way a new colleague would: who it is, how it works.
             <div className="empty">
-              <h2>{t('What would you like to get done?')}</h2>
-              <p>
-                {t('Bring a question, a project, or a plan. {name} keeps the work here.', {
-                  name: BRAND.name,
-                })}
+              <p className="message assistant">{t('Hi, I am {name}.', { name: BRAND.name })}</p>
+              <p className="message assistant">
+                {t(
+                  'Tell me the result you want. I work on my own computer in the cloud: I write the code, run the tests, have it reviewed and hand you a pull request.',
+                )}
+              </p>
+              <p className="message assistant">
+                {t('Close your laptop if you like. I keep going and tell you when it is done.')}
               </p>
             </div>
           )}
@@ -554,15 +632,28 @@ export function ConversationView({
                 {message.status.state === 'failed' ? (
                   <>
                     <span className="status-mark attention" />
-                    {t('Not sent')}{' '}
-                    {/* A limit says which one, when it resets and what to do, in this language. */}
-                    <span className="message-reason">
-                      {shared(
-                        message.status.quota
-                          ? { quota: message.status.quota }
-                          : sendFailureText(message.status.reason),
-                      )}
-                    </span>
+                    {/* A dropped connection or a server error leaves the outcome unknown, and the
+                        same id makes another try run once, so it says so instead of "Not sent". */}
+                    {mayHaveArrived(message.status.reason) ? (
+                      <>
+                        {t('Not confirmed')}{' '}
+                        <span className="message-reason">
+                          {t('It may have arrived. Sending again is safe: it runs only once.')}
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        {t('Not sent')}{' '}
+                        {/* A limit says which one, when it resets and what to do, in this language. */}
+                        <span className="message-reason">
+                          {shared(
+                            message.status.quota
+                              ? { quota: message.status.quota }
+                              : sendFailureText(message.status.reason),
+                          )}
+                        </span>
+                      </>
+                    )}
                     {message.status.retryable && (
                       <button
                         type="button"
@@ -589,6 +680,11 @@ export function ConversationView({
               </span>
             </article>
           ))}
+          {thinking && (
+            <div className="thinking" role="status" aria-label={t('Thinking…')}>
+              <span className="thinking-orb" aria-hidden="true" />
+            </div>
+          )}
         </div>
         {topLevel.map((task) => (
           <TaskDelivery
@@ -624,8 +720,10 @@ export function ConversationView({
             {shared(error)}
           </p>
         )}
+        <WorkStagePortal tasks={tasks} />
         <aside className="work-panel" aria-label={t('Work and results')}>
-          {(running > 0 || total.usd !== undefined) && (
+          {/* A count alone repeats the task list below; the card is for what it has cost. */}
+          {total.usd !== undefined && (
             <section className="card section-card work-summary" aria-label={t('Running')}>
               <div className="section-heading">
                 <h2>{t('Running')}</h2>
@@ -653,6 +751,7 @@ export function ConversationView({
                     key={task.taskId}
                     {...{ task, client, tasks, noPause, act, control }}
                     busy={Boolean(busy)}
+                    explained={explained}
                   />
                 ))}
               </ul>
@@ -789,7 +888,7 @@ export function NotificationsPanel({ client }: { client: CloudClient }) {
       {!client.unsupported.has('push') && !on && (
         <Button
           label={t('Enable notifications')}
-          variant="secondary"
+          variant="primary"
           isDisabled={busy}
           onClick={() =>
             void act(async () => {
@@ -843,6 +942,7 @@ export function NotificationsPanel({ client }: { client: CloudClient }) {
 
 const MODE_CHOICES: ReadonlyArray<{ value: ModeChoice; label: Key }> = [
   { value: 'system', label: 'System' },
+  { value: 'sky', label: 'Sunrise to sunset' },
   { value: 'light', label: 'Light' },
   { value: 'dark', label: 'Dark' },
 ];
@@ -1374,6 +1474,8 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
       {(view === 'home' || (wide && view === 'chat')) && (
         // Kept while a task page is open, so coming back is not a new visit.
         <div className="content-pane" hidden={taskPage !== undefined}>
+          {/* Beside a conversation whose task is running, its computer takes this pane. */}
+          {wide && view === 'chat' && <div id="work-stage" />}
           <Home
             onSetup={(action) => {
               if (action === 'chat') {
@@ -1480,18 +1582,42 @@ export function App({ initialToken = '' }: { initialToken?: string }) {
     </Shell>
   ) : (
     <main className="welcome">
-      <span className="brand">{BRAND.wordmark}</span>
-      <h1>
-        {t('Your next big thing,')}
-        <br />
-        {t('one conversation away.')}
-      </h1>
-      <p>{t('A place to plan, follow the work, and bring it home.')}</p>
-      {restoring ? (
-        <p className="muted">{t('Connecting…')}</p>
-      ) : (
-        <SignIn open={open} openInvite={connect} busy={busy} notice={error ? shared(error) : ''} />
-      )}
+      {/* What it is like, played once: a request, the work on its computer, the proof. */}
+      <div className="welcome-stage" aria-hidden="true">
+        <p className="stage-bubble stage-user">{t('Fix the login loop on Safari')}</p>
+        <p className="stage-bubble">
+          {t('Reproduced it with a failing test. Fixing the redirect now.')}
+        </p>
+        <div className="stage-computer">
+          <span className="stage-line">$ npm test -- login</span>
+          <span className="stage-line stage-ok">✓ redirects once</span>
+          <span className="stage-line stage-ok">✓ keeps the session</span>
+          <span className="stage-line">41 passed</span>
+        </div>
+        <p className="stage-bubble">
+          {t('Done. 41 tests pass, and an independent review found nothing.')}
+        </p>
+        <span className="stage-chip">{t('Pull request ready')}</span>
+      </div>
+      <div className="welcome-panel">
+        <span className="brand welcome-wordmark">{BRAND.wordmark}</span>
+        <h1>
+          {t('Your next big thing,')}
+          <br />
+          {t('one conversation away.')}
+        </h1>
+        <p>{t('A place to plan, follow the work, and bring it home.')}</p>
+        {restoring ? (
+          <p className="muted">{t('Connecting…')}</p>
+        ) : (
+          <SignIn
+            open={open}
+            openInvite={connect}
+            busy={busy}
+            notice={error ? shared(error) : ''}
+          />
+        )}
+      </div>
     </main>
   );
 }

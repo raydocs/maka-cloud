@@ -12,6 +12,7 @@ import {
   dollars,
   type ErrorText,
   errorText,
+  failedParts,
   finishedParts,
   HomeFeed,
   type Mode,
@@ -91,7 +92,7 @@ function InboxStatus({
   if (loaded)
     return (
       <section className="section-card" aria-label={t('Nothing needs you')}>
-        <p className="muted">{t('Nothing needs you.')}</p>
+        <p className="quiet-line">{t('Nothing needs you.')}</p>
       </section>
     );
   return (
@@ -100,6 +101,30 @@ function InboxStatus({
       <span className="skeleton-line" />
       <span className="skeleton-line" style={{ width: '80%' }} />
     </section>
+  );
+}
+
+/** The day at the top of Home, large, the way a phone's lock screen opens: weekday, date, time. */
+function Today({ now }: { now: () => number }) {
+  const { language } = useT();
+  const [at, setAt] = useState(now);
+  useEffect(() => {
+    const tick = setInterval(() => setAt(now()), 30_000);
+    return () => clearInterval(tick);
+  }, [now]);
+  const locale = { en: 'en', 'zh-Hans': 'zh-CN', 'zh-Hant': 'zh-TW' }[language];
+  const date = new Date(at);
+  return (
+    <header className="today">
+      <p className="today-day">
+        {new Intl.DateTimeFormat(locale, { weekday: 'long', month: 'long', day: 'numeric' }).format(
+          date,
+        )}
+      </p>
+      <p className="today-time">
+        {new Intl.DateTimeFormat(locale, { hour: 'numeric', minute: '2-digit' }).format(date)}
+      </p>
+    </header>
   );
 }
 
@@ -193,6 +218,7 @@ export function Home({
   // What Maka only suggests is not something that "needs you".
   const { waiting: open, suggested } = splitSuggestions(live);
   const finished = since === undefined || done === undefined ? [] : doneSince(done, since);
+  const unfinished = finished.filter((entry) => entry.state !== 'succeeded').length;
   const spent = finished.reduce((sum, entry) => sum + (entry.costUsd ?? 0), 0);
   const anySpend = finished.some((entry) => entry.costUsd !== undefined);
   const schedule = projects === undefined ? undefined : nextRuns(projects, now());
@@ -218,6 +244,7 @@ export function Home({
 
   return (
     <div className="page home">
+      {!startOnly && <Today now={now} />}
       {/* Desktop: what waits on you beside the work, as Hark keeps its cards beside the chat.
           A phone reads one column, in this order: waiting, suggested, start, results. */}
       <div className="home-side" hidden={startOnly}>
@@ -243,7 +270,10 @@ export function Home({
                 />
               ) : (
                 <div key={item.itemId} className="decision">
-                  <span className="chip verb">{shared(verbOf(item.kind))}</span>
+                  {/* A card that did not finish names that itself; a verb above it would repeat it. */}
+                  {!failedParts(item) && (
+                    <span className="chip verb">{shared(verbOf(item.kind))}</span>
+                  )}
                   <InboxCard
                     item={item}
                     disabled={busy}
@@ -420,7 +450,11 @@ export function Home({
           <section className="card section-card" aria-label={t('Since you were last here')}>
             <h2>{t('Since you were last here')}</h2>
             <div className="stat-tiles">
-              <StatTile label={t('Done')} value={String(finished.length)} />
+              {/* What did not finish is counted apart, so "Done" never claims it. */}
+              <StatTile label={t('Done')} value={String(finished.length - unfinished)} />
+              {unfinished > 0 && (
+                <StatTile label={t('Did not finish')} value={String(unfinished)} />
+              )}
               {anySpend && <StatTile label={t('Spent')} value={dollars(spent)} />}
             </div>
             <ul className="done-lines">

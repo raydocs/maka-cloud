@@ -127,6 +127,11 @@ textarea {
   resize: vertical;
   min-height: 70px;
 }
+textarea::placeholder,
+input::placeholder {
+  color: var(--ink-muted);
+  opacity: 1;
+}
 .round-button {
   flex: none;
   width: 40px;
@@ -296,19 +301,142 @@ textarea {
 }
 
 /* Welcome (sign in) */
+/* Sign in: the work playing on the left, the way in on the right; stacked on a phone. */
 .welcome {
-  max-width: 560px;
-  padding: 12vh 20px 8vh;
+  max-width: 1120px;
+  min-height: 100dvh;
   margin: auto;
+  padding: 6vh 20px;
+  display: grid;
+  gap: 32px;
+  align-content: center;
+}
+.welcome-panel {
+  max-width: 440px;
 }
 .welcome .brand {
   font-size: 22px;
 }
+.welcome .welcome-wordmark {
+  font-family: "New York", "Iowan Old Style", ui-serif, Georgia, serif;
+  font-size: 56px;
+  font-weight: 500;
+  letter-spacing: -0.03em;
+  line-height: 1;
+}
 .welcome h1 {
   font-size: var(--t-xl);
-  line-height: 1.1;
-  letter-spacing: -0.03em;
-  margin: 24px 0 16px;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+  margin: 24px 0 12px;
+}
+.welcome-stage {
+  order: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 24px;
+  border-radius: var(--radius-panel);
+  background: var(--panel);
+  border: 1px solid rgb(255 255 255 / 0.08);
+  box-shadow: var(--card-shadow);
+  color: var(--panel-ink);
+  font-size: var(--t-sm);
+  min-width: 0;
+}
+.welcome-stage p {
+  color: inherit;
+}
+.stage-bubble {
+  align-self: flex-start;
+  max-width: 85%;
+  padding: 10px 14px;
+  border-radius: 18px 18px 18px 6px;
+  background: var(--panel-glass);
+}
+.welcome-stage .stage-user {
+  align-self: flex-end;
+  border-radius: 18px 18px 6px 18px;
+  background: var(--panel-ink);
+  color: var(--panel);
+}
+.stage-computer {
+  display: grid;
+  gap: 2px;
+  padding: 12px 14px;
+  border-radius: var(--radius-small);
+  background: rgb(255 255 255 / 0.04);
+  border: 1px solid rgb(255 255 255 / 0.08);
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  color: var(--panel-muted);
+}
+.stage-ok {
+  color: #86d9a8;
+}
+.stage-chip {
+  align-self: flex-start;
+  padding: 6px 12px;
+  border-radius: var(--radius-pill);
+  background: var(--panel-ink);
+  color: var(--panel);
+  font-size: var(--t-xs);
+  font-weight: var(--w-medium);
+}
+/* Each piece arrives in turn, once; with reduced motion they are simply there. */
+.welcome-stage > *,
+.stage-computer > * {
+  animation: stage-in 420ms var(--ease) both;
+}
+.welcome-stage > :nth-child(2) {
+  animation-delay: 0.9s;
+}
+.welcome-stage > :nth-child(3) {
+  animation-delay: 1.8s;
+}
+.stage-computer > :nth-child(1) {
+  animation-delay: 2.1s;
+}
+.stage-computer > :nth-child(2) {
+  animation-delay: 2.7s;
+}
+.stage-computer > :nth-child(3) {
+  animation-delay: 3.1s;
+}
+.stage-computer > :nth-child(4) {
+  animation-delay: 3.5s;
+}
+.welcome-stage > :nth-child(4) {
+  animation-delay: 4.3s;
+}
+.welcome-stage > :nth-child(5) {
+  animation-delay: 5s;
+}
+@keyframes stage-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .welcome-stage > *,
+  .stage-computer > * {
+    animation: none;
+  }
+}
+@media (min-width: 900px) {
+  .welcome {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 440px);
+    gap: 64px;
+    align-items: center;
+  }
+  .welcome-stage {
+    order: 0;
+    min-height: 520px;
+    justify-content: center;
+    padding: 40px;
+    font-size: var(--t-md);
+  }
 }
 .welcome > p {
   color: var(--ink-muted);
@@ -437,6 +565,15 @@ textarea {
   flex-direction: column;
   gap: 16px;
 }
+/* The conversation sits on the sky itself, not on a slab: the bubbles are the surface. */
+.conversation.card {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  padding-inline: 4px;
+}
 .conversation-heading {
   display: flex;
   flex-wrap: wrap;
@@ -474,9 +611,38 @@ textarea {
   align-self: flex-end;
   max-width: 85%;
   padding: 10px 16px;
-  border-radius: 20px;
-  background: var(--chip);
-  color: var(--ink);
+  border-radius: 20px 20px 6px 20px;
+  background: var(--pill-on);
+  color: var(--on-pill-on);
+}
+.message.user p {
+  color: inherit;
+}
+.message.user .message-status {
+  color: inherit;
+  opacity: 0.72;
+}
+/* The employee speaks in its own bubbles, one thought each, the way a person texts. */
+.message.assistant {
+  align-self: flex-start;
+  max-width: 88%;
+  padding: 10px 16px;
+  border-radius: 20px 20px 20px 6px;
+  background: var(--card-strong);
+  border: 1px solid var(--card-edge);
+  box-shadow: var(--card-shadow);
+  animation: bubble-in var(--dur) var(--ease) both;
+}
+@keyframes bubble-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .message.assistant {
+    animation: none;
+  }
 }
 .message-status {
   display: flex;
@@ -497,11 +663,55 @@ textarea {
   font-size: 14px;
 }
 .empty {
-  padding: 24px 0;
+  padding: 8px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+/* Thinking: a small sphere with a light turning inside it, where the reply will appear. */
+.thinking {
+  align-self: flex-start;
+  padding: 10px 14px;
+  border-radius: 20px 20px 20px 6px;
+  background: var(--card-strong);
+  border: 1px solid var(--card-edge);
+  box-shadow: var(--card-shadow);
+  line-height: 0;
+}
+.thinking-orb {
+  display: inline-block;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 32% 30%, rgb(255 255 255 / 0.95) 0 12%, transparent 42%),
+    conic-gradient(from 0deg, var(--pill-on), var(--accent), var(--ink-muted), var(--pill-on));
+  animation:
+    orb-turn 2.7s linear infinite,
+    orb-breathe 1.35s var(--ease) infinite alternate;
+}
+@keyframes orb-turn {
+  to {
+    transform: rotate(1turn);
+  }
+}
+@keyframes orb-breathe {
+  from {
+    scale: 0.86;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .thinking-orb {
+    animation: none;
+  }
 }
 .empty p {
   color: var(--ink-muted);
   margin-top: 8px;
+}
+.empty .message.assistant {
+  color: var(--ink);
+  margin: 0;
 }
 /* Pinned to the bottom of the conversation with its own solid backing, so what scrolls under it
    never shows through the field or the mode chips. */
@@ -556,10 +766,9 @@ textarea {
   margin-right: 2px;
   padding: 0 12px;
   border: 1px solid var(--card-edge);
-  border-radius: var(--radius-small);
+  border-radius: var(--radius-pill);
   background: var(--card-strong);
   color: var(--ink);
-  box-shadow: var(--card-shadow);
   font-weight: var(--w-medium);
   cursor: pointer;
   transition:
@@ -590,6 +799,86 @@ textarea {
 }
 .quiet-action:hover:not(:disabled) {
   color: var(--ink);
+}
+/* The one thing a card asks for: a dark pill the size of its label, never a full-width bar.
+   Qualified by element so it beats the reset that gives every button the page's ink. */
+button.pill-action {
+  justify-self: start;
+  min-height: 40px;
+  padding: 0 18px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--pill-on);
+  color: var(--on-pill-on);
+  font-size: var(--t-sm);
+  font-weight: var(--w-medium);
+  cursor: pointer;
+  transition: transform var(--dur-fast) var(--ease);
+}
+.pill-action:active:not(:disabled) {
+  transform: scale(0.96);
+}
+.pill-action:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 16px;
+}
+.setup-card {
+  gap: 14px;
+}
+.setup-card-text {
+  display: grid;
+  gap: 4px;
+}
+.setup-card-text h3 {
+  margin: 0;
+  font-size: var(--t-md);
+  font-weight: var(--w-medium);
+}
+.setup-card-text .muted {
+  font-size: var(--t-sm);
+  line-height: 1.45;
+}
+/* Each step left is a row: what it is on the left, its verb and "Later" on the right. */
+.setup-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+}
+.setup-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px 12px;
+  padding: 12px 0;
+}
+.setup-row + .setup-row {
+  border-top: 1px solid var(--card-edge);
+}
+.setup-row .card-actions {
+  display: grid;
+  justify-items: center;
+  gap: 0;
+}
+.setup-row button.quiet-action {
+  min-height: 28px;
+  font-size: var(--t-xs);
+}
+/* A quieter line, set in a serif: what Home says when nothing waits on you. */
+.quiet-line {
+  font-family: "New York", "Iowan Old Style", ui-serif, Georgia, "Songti SC", serif;
+  font-style: italic;
+  font-weight: 300;
+  font-size: var(--t-xl);
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+  color: var(--ink-muted);
 }
 .question > .quiet-action {
   justify-self: start;
@@ -775,8 +1064,40 @@ a.evidence-chip:hover {
   color: var(--ok);
   font-size: 14px;
 }
+/* The held call is what a yes lets happen: shown as code, exactly, on an opaque surface. */
 .held-action code {
-  overflow-wrap: anywhere;
+  display: block;
+  margin-top: 6px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--solid);
+  color: var(--solid-ink);
+  border: 1px solid var(--solid-line);
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+.question + .question,
+.question + .inbox,
+.inbox + .question {
+  margin-top: 12px;
+}
+.question > .quiet-action {
+  min-height: 32px;
+  font-size: var(--t-xs);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+/* The way into a card's conversation is a quiet link, not body text (beats the button reset). */
+.decision > button.quiet-action {
+  min-height: 32px;
+  margin-top: -4px;
+  color: var(--ink-muted);
+  font-size: var(--t-sm);
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 .inbox {
   display: grid;
@@ -885,16 +1206,43 @@ a.evidence-chip:hover {
   margin: 2px 0 0 16px;
 }
 .task-actions .quiet-action {
-  padding: 0;
+  min-height: 32px;
+  padding: 0 12px;
+  border-radius: var(--radius-pill);
+  background: var(--chip);
+  border: 1px solid var(--card-edge);
   font-size: var(--t-xs);
 }
 .computer {
   margin: 8px 0 0 16px;
 }
-.computer summary {
+/* Opening the computer is a control, not a disclosure triangle. */
+.computer > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 0 14px;
+  border-radius: var(--radius-pill);
+  background: var(--panel);
+  color: var(--panel-ink);
+  font-size: var(--t-sm);
+  font-weight: var(--w-medium);
+  list-style: none;
   cursor: pointer;
-  color: var(--ink);
-  padding: 6px 0;
+}
+.computer > summary::-webkit-details-marker {
+  display: none;
+}
+.computer > summary::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #86d9a8;
+}
+.computer[open] > summary {
+  margin-bottom: 10px;
 }
 
 /* Results */
@@ -966,7 +1314,7 @@ a.evidence-chip:hover {
   font-weight: var(--w-medium);
   min-height: 44px;
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 10px;
 }
 .memory-panel summary .muted {
@@ -1004,6 +1352,7 @@ a.evidence-chip:hover {
 .mode-choice button {
   min-height: 34px;
   padding: 4px 14px;
+  white-space: nowrap;
   border: 0;
   border-radius: var(--radius-pill);
   background: transparent;
@@ -1014,6 +1363,29 @@ a.evidence-chip:hover {
 .mode-choice button[aria-pressed="true"] {
   background: var(--pill-on);
   color: var(--on-pill-on);
+}
+/* On a phone four choices do not fit one pill: two by two, each still one word. */
+@media (max-width: 520px) {
+  .mode-choice {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+    border-radius: 20px;
+  }
+  .mode-choice button {
+    border-radius: 16px;
+    min-height: 40px;
+  }
+}
+.memory-panel:not([open]) {
+  gap: 0;
+}
+/* A scrolling column keeps a thin, quiet bar instead of the system's grey one. */
+.chat-dock,
+.search-sheet,
+.stage-sheet-body {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--ink-muted) 35%, transparent) transparent;
 }
 
 /* The cloud computer viewer: dense and opaque, never blurred */
@@ -1353,6 +1725,121 @@ a.evidence-chip:hover {
   cursor: pointer;
   list-style: none;
 }
+.narration {
+  margin: 4px 0 10px 16px;
+}
+/* The work as chips: each check's own result, opening to the lines it printed. */
+.panel-chips {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 10px 16px;
+}
+.delivery .panel-chips {
+  margin: 2px 0 4px;
+}
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.panel-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 12px 0 8px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--card-edge);
+  background: var(--chip);
+  font-size: var(--t-xs);
+  cursor: pointer;
+}
+.panel-chip[aria-expanded="true"] {
+  background: var(--pill-on);
+  color: var(--on-pill-on);
+}
+.panel-mark {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  display: inline-grid;
+  place-items: center;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--on-accent);
+  background: var(--ink-muted);
+}
+.panel-chip.passed .panel-mark {
+  background: var(--ok);
+}
+.panel-chip.failed .panel-mark {
+  background: var(--bad);
+}
+.panel-chip.running .panel-mark {
+  background: transparent;
+  border: 2px solid var(--accent);
+  border-right-color: transparent;
+  animation: panel-spin 0.9s linear infinite;
+}
+@keyframes panel-spin {
+  to {
+    transform: rotate(1turn);
+  }
+}
+.panel-title {
+  font-weight: var(--w-medium);
+}
+.panel-summary {
+  opacity: 0.75;
+  font-variant-numeric: tabular-nums;
+}
+.panel-tail {
+  margin: 0;
+  padding: 10px 12px;
+  max-height: 220px;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+@media (prefers-reduced-motion: reduce) {
+  .panel-chip.running .panel-mark {
+    animation: none;
+  }
+}
+/* What it is doing now reads as alive: a light passes over the line while the task runs. */
+.current-step .step-now {
+  font-size: var(--t-md);
+  background: linear-gradient(
+    90deg,
+    var(--ink) 0%,
+    var(--ink) 35%,
+    var(--ink-muted) 50%,
+    var(--ink) 65%,
+    var(--ink) 100%
+  );
+  background-size: 250% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: step-light 2.4s linear infinite;
+}
+@keyframes step-light {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -150% 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .current-step .step-now {
+    animation: none;
+    color: var(--ink);
+  }
+}
 
 /* The viewer: a result large over a blurred, dimmed page */
 .viewer {
@@ -1483,6 +1970,8 @@ a.evidence-chip:hover {
 }
 .stat-tile {
   display: grid;
+  /* A label on two lines still leaves every number on the same baseline. */
+  align-content: space-between;
   gap: 2px;
   padding: 10px 12px;
   border-radius: var(--radius-small);
@@ -2096,6 +2585,29 @@ strong {
 .source-card:focus-visible {
   transform: none;
 }
+/* A result is a full-width row that reads left to right, like a list, not centred text. */
+.search-sheet button.search-hit {
+  display: block;
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  color: var(--ink);
+  font-size: var(--t-md);
+  text-align: left;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.search-sheet > button.quiet-action:last-child {
+  justify-self: end;
+  color: var(--ink-muted);
+  font-size: var(--t-sm);
+}
+.search-sheet button.search-hit:hover,
+.search-sheet button.search-hit:focus-visible {
+  background: var(--chip);
+}
 .search-sheet {
   position: fixed;
   z-index: 30;
@@ -2150,6 +2662,26 @@ strong {
 @media (max-width: 899px) {
   .shell:not([data-view="chat"]) .chat-dock {
     display: none;
+  }
+  /* The header floats on the sky; what scrolls under it fades out instead of colliding. */
+  .shell-top {
+    background: linear-gradient(180deg, var(--bg-top) 55%, var(--bg-top-clear));
+  }
+  /* What scrolls under the floating composer fades into the sky instead of meeting its edge. */
+  .shell::after {
+    content: "";
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 11;
+    height: calc(var(--composer-height, 118px) + 48px);
+    background: linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--bg-bottom) 0%, transparent),
+      var(--bg-bottom) 70%
+    );
+    pointer-events: none;
   }
 }
 @media (min-width: 900px) {
@@ -2227,9 +2759,15 @@ strong {
   box-shadow: none;
   background: transparent;
 }
+/* On a phone the starter only lends Projects its composer, which is fixed: it keeps no space. */
+.project-starter .page {
+  padding: 0;
+  min-height: 0;
+}
 .project-starter .start > h1,
 .project-starter .start > p,
-.project-starter .onboarding {
+.project-starter .onboarding,
+.project-starter .starter-ideas {
   display: none;
 }
 .status-mark.running,
@@ -2410,6 +2948,17 @@ strong {
   gap: 0.5rem;
   margin-top: 0.75rem;
 }
+/* An idea is a small chip read left to right; a long one (Chinese has no spaces) wraps inside
+   it rather than widening the page. */
+.starter-ideas button.chip {
+  max-width: 100%;
+  min-height: 36px;
+  padding: 6px 14px;
+  font-size: var(--t-sm);
+  line-height: 1.4;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
 .composer-choices button span,
 .composer-choices button small {
   display: block;
@@ -2427,4 +2976,337 @@ strong {
 .composer-fields {
   display: grid;
   gap: 8px;
+}
+
+/* Beside a running conversation on a wide screen: the employee's computer, a dark slab like the
+   phone's compact panel. While it is there, Home steps aside. */
+.content-pane:has(#work-stage:not(:empty)) > :not(#work-stage) {
+  display: none;
+}
+.work-stage {
+  display: grid;
+  gap: 20px;
+  padding: 28px;
+  border-radius: var(--radius-panel);
+  background: var(--panel);
+  color: var(--panel-ink);
+  box-shadow: var(--card-shadow);
+  animation: stage-in 420ms var(--ease) both;
+}
+.stage-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.stage-head-text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.stage-head h2 {
+  font-size: var(--t-lg);
+  color: var(--panel-ink);
+}
+.work-stage .muted {
+  color: var(--panel-muted);
+  font-size: var(--t-sm);
+}
+.stage-live {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #86d9a8;
+  box-shadow: 0 0 0 0 rgb(134 217 168 / 0.5);
+  animation: stage-pulse 1.8s ease-out infinite;
+}
+@keyframes stage-pulse {
+  to {
+    box-shadow: 0 0 0 10px rgb(134 217 168 / 0);
+  }
+}
+.stage-now {
+  font-size: var(--t-xl);
+  line-height: 1.3;
+  letter-spacing: -0.015em;
+}
+.work-stage .step-now {
+  font-size: inherit;
+  background-size: 250% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: step-light 2.4s linear infinite;
+  background-image: linear-gradient(
+    90deg,
+    var(--panel-ink) 0%,
+    var(--panel-ink) 35%,
+    var(--panel-muted) 50%,
+    var(--panel-ink) 65%,
+    var(--panel-ink) 100%
+  );
+}
+/* The plan as a timeline: done, the one it is on, nothing invented ahead. */
+.stage-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0;
+}
+.stage-step {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 0 0 14px;
+  font-size: var(--t-sm);
+  color: var(--panel-muted);
+}
+.stage-step:not(:last-child)::before {
+  content: "";
+  position: absolute;
+  left: 8px;
+  top: 20px;
+  bottom: 2px;
+  width: 1px;
+  background: rgb(255 255 255 / 0.14);
+}
+.stage-step.now {
+  color: var(--panel-ink);
+  font-weight: var(--w-medium);
+}
+.stage-step-mark {
+  flex: none;
+  width: 17px;
+  height: 17px;
+  margin-top: 1px;
+  border-radius: 50%;
+  display: inline-grid;
+  place-items: center;
+}
+.stage-step.done .stage-step-mark {
+  background: #86d9a8;
+}
+.stage-step.done .stage-step-mark::after {
+  content: "✓";
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--panel);
+}
+.stage-step.now .stage-step-mark {
+  border: 2px solid var(--panel-ink);
+  border-right-color: transparent;
+  animation: panel-spin 0.9s linear infinite;
+}
+.stage-panels {
+  display: grid;
+  gap: 10px;
+}
+.stage-panel {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border-radius: 20px;
+  background: var(--panel-glass);
+}
+.stage-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: var(--t-sm);
+}
+.stage-panel .panel-chip {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  min-height: 0;
+  color: var(--panel-ink);
+  cursor: default;
+}
+.stage-panel .panel-summary {
+  color: var(--panel-muted);
+  font-variant-numeric: tabular-nums;
+}
+.stage-panel.passed .panel-mark {
+  background: #86d9a8;
+  color: var(--panel);
+}
+.stage-panel.failed .panel-mark {
+  background: #ff9ea2;
+  color: var(--panel);
+}
+.stage-panel.running .panel-mark {
+  border-color: var(--panel-ink);
+  border-right-color: transparent;
+}
+.stage-tail {
+  margin: 0;
+  max-height: 240px;
+  overflow: auto;
+  padding: 12px;
+  border-radius: 12px;
+  background: rgb(0 0 0 / 0.35);
+  color: var(--panel-muted);
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* With the checks open beside it, the task in the conversation keeps only its controls and its
+   computer, which stays next to pause and resume. */
+.shell:has(#work-stage:not(:empty)) .chat-dock .task .panel-chips {
+  display: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .work-stage .step-now {
+    animation: none;
+    color: var(--panel-ink);
+  }
+  .work-stage,
+  .stage-live,
+  .stage-step.now .stage-step-mark {
+    animation: none;
+  }
+}
+
+/* On a phone: the computer is a bar resting on the composer, and a sheet when opened.
+   Qualified by element to beat the reset that gives every button the page's ink. */
+button.stage-bar {
+  position: fixed;
+  left: 16px;
+  right: 16px;
+  bottom: calc(max(16px, env(safe-area-inset-bottom)) + var(--composer-height, 118px) + 10px);
+  z-index: 13;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 52px;
+  padding: 8px 16px;
+  border: 0;
+  border-radius: 20px;
+  background: var(--panel);
+  color: var(--panel-ink);
+  box-shadow: var(--card-shadow);
+  text-align: left;
+  cursor: pointer;
+  animation: stage-in 320ms var(--ease) both;
+}
+.stage-bar-text {
+  display: grid;
+  min-width: 0;
+}
+.stage-bar-title {
+  font-size: var(--t-xs);
+  color: var(--panel-muted);
+}
+.stage-bar-now {
+  font-size: var(--t-sm);
+  font-weight: var(--w-medium);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.stage-sheet {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+.stage-scrim {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  background: var(--overlay);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  cursor: pointer;
+}
+.stage-sheet-body {
+  position: relative;
+  max-height: 88dvh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border-radius: 28px 28px 0 0;
+  background: var(--panel);
+  padding-bottom: env(safe-area-inset-bottom);
+  animation: sheet-up 280ms var(--ease) both;
+}
+@keyframes sheet-up {
+  from {
+    transform: translateY(40px);
+    opacity: 0;
+  }
+}
+.stage-grip {
+  display: block;
+  width: 40px;
+  height: 5px;
+  margin: 10px auto 0;
+  border-radius: 3px;
+  background: rgb(255 255 255 / 0.22);
+}
+.stage-sheet .work-stage {
+  border-radius: 0;
+  box-shadow: none;
+  padding: 16px 20px 24px;
+  animation: none;
+}
+.stage-sheet .stage-now {
+  font-size: var(--t-lg);
+}
+.stage-close {
+  margin-left: auto;
+  min-height: 36px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--panel-glass);
+  color: var(--panel-ink);
+  font-size: var(--t-sm);
+  cursor: pointer;
+}
+.shell:has(.stage-bar) .chat .task .panel-chips {
+  display: none;
+}
+/* With the bar on the composer, the conversation keeps clear of both. */
+.shell:has(.stage-bar) .chat {
+  padding-bottom: calc(var(--composer-height, 118px) + 96px);
+}
+@media (min-width: 900px) {
+  .stage-bar {
+    display: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .stage-bar,
+  .stage-sheet-body {
+    animation: none;
+  }
+}
+
+/* Home opens on the day, large and quiet, before anything asks for attention. */
+.today {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 2px;
+  padding: 8px 4px 4px;
+}
+.today-day {
+  font-size: var(--t-xl);
+  font-weight: var(--w-medium);
+  letter-spacing: -0.02em;
+}
+.today-time {
+  font-family: "New York", "Iowan Old Style", ui-serif, Georgia, serif;
+  font-size: 56px;
+  font-weight: 300;
+  line-height: 1;
+  letter-spacing: -0.03em;
+  color: var(--ink-muted);
+  font-variant-numeric: tabular-nums;
 }

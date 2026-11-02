@@ -65,7 +65,9 @@ test('starter ideas fill the draft and offscreen decisions have a jump chip', as
     const spacer = document.createElement('div');
     spacer.style.height = '2000px';
     document.querySelector('[data-waiting="true"]')!.before(spacer);
+    // On a wide screen the conversation scrolls in its own column, not the window.
     window.scrollTo(0, 0);
+    document.querySelector('.chat-dock')?.scrollTo(0, 0);
   });
   await page.getByRole('button', { name: '1 waiting', exact: true }).click();
   await expect(page.getByText('Choose a direction')).toBeInViewport();

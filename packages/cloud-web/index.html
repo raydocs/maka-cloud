@@ -12,9 +12,26 @@
         try {
           stored = localStorage.getItem('maka.theme');
         } catch (e) {}
+        // "sky": dark from sunset to sunrise, the same rule as daylight() in theme.tsx.
+        function sunUp(now) {
+          var year = now.getFullYear();
+          var standard = Math.max(
+            new Date(year, 0, 1).getTimezoneOffset(),
+            new Date(year, 6, 1).getTimezoneOffset(),
+          );
+          var day = Math.floor((now - new Date(year, 0, 0)) / 86400000);
+          var decl = ((23.44 * Math.PI) / 180) * Math.sin((2 * Math.PI * (284 + day)) / 365);
+          var half =
+            (Math.acos(-Math.tan((35 * Math.PI) / 180) * Math.tan(decl)) * 180) / Math.PI / 15;
+          var noon = 12 + (standard - now.getTimezoneOffset()) / 60;
+          var hour = now.getHours() + now.getMinutes() / 60;
+          return hour >= noon - half && hour < noon + half;
+        }
         var dark =
           stored === 'dark' ||
+          (stored === 'sky' && !sunUp(new Date())) ||
           (stored !== 'light' &&
+            stored !== 'sky' &&
             !!window.matchMedia &&
             window.matchMedia('(prefers-color-scheme: dark)').matches);
         document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');

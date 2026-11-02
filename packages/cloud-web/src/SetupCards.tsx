@@ -17,6 +17,26 @@ const titles: Record<SetupStep, Key> = {
   notifications: 'Enable notifications',
   conversation: 'Send your first message',
 };
+/** One line under the title, and the button's own short verb. */
+const lines: Record<SetupStep, { what: Key; verb: Key }> = {
+  language: { what: 'Pick the language Maka writes in.', verb: 'Choose' },
+  project: {
+    what: 'Give Maka a GitHub repository to work in.',
+    verb: 'Connect',
+  },
+  model: {
+    what: 'The owner turns on model access for your account.',
+    verb: 'Ask',
+  },
+  notifications: {
+    what: 'Hear when work finishes or needs you, even with the tab closed.',
+    verb: 'Turn on',
+  },
+  conversation: {
+    what: 'Say what you want done. Maka plans it, does it and shows proof.',
+    verb: 'Write it',
+  },
+};
 export function SetupCards({
   client,
   onAction,
@@ -60,35 +80,54 @@ export function SetupCards({
       window.removeEventListener('focus', refresh);
     };
   }, [client, version, retry, pushAvailable]);
+  const cards = (readiness?.cards ?? []).filter(
+    (card) => card.id !== 'notifications' || pushAvailable,
+  );
   return (
     <>
-      {readiness?.cards
-        .filter((card) => card.id !== 'notifications' || pushAvailable)
-        .map((card) => (
-          <section key={card.id} className="card section-card">
-            <h2>{t(titles[card.id])}</h2>
-            <button className="quiet-action" type="button" onClick={() => onAction(card.action)}>
-              {t(titles[card.id])}
-            </button>
-            <button
-              className="quiet-action"
-              type="button"
-              disabled={busy}
-              onClick={() => {
-                setBusy(true);
-                void client
-                  .setup({ dismiss: card.id })
-                  .then(
-                    (value) => setReadiness(value.readiness),
-                    (failure) => setError(errorText(failure)),
-                  )
-                  .finally(() => setBusy(false));
-              }}
-            >
-              {t('Later')}
-            </button>
-          </section>
-        ))}
+      {/* The steps left share one card, a row each, so setup never pushes the work off a phone. */}
+      {cards.length > 0 && (
+        <section className="card section-card setup-card" aria-label={t('Finish setting up')}>
+          <h2>{t('Finish setting up')}</h2>
+          <ul className="setup-rows">
+            {cards.map((card) => (
+              <li key={card.id} className="setup-row">
+                <div className="setup-card-text">
+                  <h3>{t(titles[card.id])}</h3>
+                  <p className="muted">{t(lines[card.id].what)}</p>
+                </div>
+                <div className="card-actions">
+                  <button
+                    className="pill-action"
+                    type="button"
+                    aria-label={t(titles[card.id])}
+                    onClick={() => onAction(card.action)}
+                  >
+                    {t(lines[card.id].verb)}
+                  </button>
+                  <button
+                    className="quiet-action"
+                    type="button"
+                    disabled={busy}
+                    onClick={() => {
+                      setBusy(true);
+                      void client
+                        .setup({ dismiss: card.id })
+                        .then(
+                          (value) => setReadiness(value.readiness),
+                          (failure) => setError(errorText(failure)),
+                        )
+                        .finally(() => setBusy(false));
+                    }}
+                  >
+                    {t('Later')}
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
       {error && (
         <section className="card section-card">
           <p role="alert">{shared(error)}</p>

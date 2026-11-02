@@ -4,6 +4,7 @@ import {
   TERMINAL,
   type CloudClient,
   type Conversation,
+  type TaskPanel,
   type TaskView,
   type TaskMessageState,
   displayText,
@@ -59,9 +60,9 @@ export function RunningClock({ task }: { task: TaskView }) {
   }, [task.state, task.startedAt]);
   if (task.startedAt === undefined || task.state !== 'running') return null;
   return (
-    <p className="muted mono">
+    <span className="mono">
       {t('Working for {time}', { time: elapsed(now - task.startedAt - held.current.paused) })}
-    </p>
+    </span>
   );
 }
 
@@ -495,5 +496,41 @@ export function ConversationChoices({
         );
       })}
     </>
+  );
+}
+
+/**
+ * The work as chips: tests, changes, review. Each is the check's own result, and opening one shows
+ * the last lines it printed. A reader copy, never the proof.
+ */
+export function PanelChips({ panels }: { panels: readonly TaskPanel[] }) {
+  const { t } = useT();
+  const [open, setOpen] = useState<string>();
+  const shown = panels.find((panel) => panel.panelId === open);
+  return (
+    <div className="panel-chips">
+      <div className="chip-row">
+        {panels.map((panel) => (
+          <button
+            key={panel.panelId}
+            type="button"
+            className={`panel-chip ${panel.state}`}
+            aria-expanded={open === panel.panelId}
+            onClick={() => setOpen(open === panel.panelId ? undefined : panel.panelId)}
+          >
+            <span className="panel-mark" aria-hidden="true">
+              {panel.state === 'passed' ? '✓' : panel.state === 'failed' ? '!' : ''}
+            </span>
+            <span className="panel-title">{displayText(panel.title)}</span>
+            <span className="panel-summary">{displayText(panel.summary)}</span>
+          </button>
+        ))}
+      </div>
+      {shown?.tail && (
+        <pre className="panel-tail solid" aria-label={t('Last lines')}>
+          {displayText(shown.tail)}
+        </pre>
+      )}
+    </div>
   );
 }

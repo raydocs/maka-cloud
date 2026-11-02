@@ -153,3 +153,41 @@ test('only granted devices upgrade notification readiness; unsupported browsers 
     expect(screen.queryByRole('button', { name: 'Enable notifications' })).toBeNull(),
   );
 });
+
+test('a send the server may have taken says so and offers a safe retry, not "Not sent"', async () => {
+  localStorage.clear();
+  const client = new CloudClient('test', (async (url, init) => {
+    const path = String(url);
+    if (path.startsWith('/v1/events'))
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            init?.signal?.addEventListener('abort', () => controller.close(), { once: true });
+          },
+        }),
+        { headers: { 'content-type': 'text/event-stream' } },
+      );
+    if (path.includes('/tasks?')) return Response.json({ tasks: [] });
+    if (path.endsWith('/messages') && init?.method === 'POST')
+      return Response.json({ error: 'unavailable' }, { status: 503 });
+    return Response.json({});
+  }) as typeof fetch);
+  const { ConversationView } = await import('../src/App');
+  render(
+    <ConversationView
+      client={client}
+      conversation={{ conversationId: 'unknown-outcome', title: 'Test', createdAt: 0 }}
+    />,
+  );
+  fireEvent.change(screen.getByPlaceholderText('What would you like to do next?'), {
+    target: { value: 'hello' },
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
+  const reason = await screen.findByText(
+    'It may have arrived. Sending again is safe: it runs only once.',
+  );
+  const bubble = reason.closest('article');
+  expect(bubble?.textContent).toContain('Not confirmed');
+  expect(bubble?.textContent).not.toContain('Not sent');
+  expect(screen.getByRole('button', { name: 'Send again' })).toBeTruthy();
+});

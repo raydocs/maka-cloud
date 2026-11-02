@@ -100,14 +100,13 @@ test('Chat renders Chinese while preserving server titles, question text and cus
     </LanguageProvider>,
   );
   expect(screen.getByRole('heading', { name: 'Home' })).toBeTruthy();
-  expect(screen.getByRole('heading', { name: '想完成什么？' })).toBeTruthy();
+  // A first conversation opens with the employee introducing itself, in the chosen language.
+  expect(screen.getByText('你好，我是 Maka。')).toBeTruthy();
   expect(screen.getByPlaceholderText('接下来想做什么？')).toBeTruthy();
   expect(screen.getByRole('button', { name: '发送' })).toBeTruthy();
   expect(screen.getByRole('log', { name: '消息' })).toBeTruthy();
   await waitFor(() =>
-    expect(
-      screen.getByText('带来一个问题、一个项目或一个计划，Maka 会把工作都留在这里。'),
-    ).toBeTruthy(),
+    expect(screen.getByText('电脑合上也没关系，我会一直做完，做好了告诉你。')).toBeTruthy(),
   );
   rerender(
     <LanguageProvider language="zh-Hans">

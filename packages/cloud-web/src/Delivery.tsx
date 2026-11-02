@@ -18,6 +18,7 @@ import {
   type TaskView,
 } from '@maka-cloud/client';
 import { Viewer } from './Viewer';
+import { PanelChips } from './WorkStatus';
 
 /** A picture's bytes as a local object URL, revoked when it goes. */
 function useObjectUrl(blob: Blob | undefined): string {
@@ -312,6 +313,8 @@ export function DeliveryCard({
         )}
       </div>
       <p className="delivery-outcome">{outcome}</p>
+      {/* The proof under the claim: each check's own result, the same chips as while it ran. */}
+      {task.panels && task.panels.length > 0 && <PanelChips panels={task.panels} />}
       {views && (
         <div className="delivery-views" role="group" aria-label={caption}>
           {views.map((view) => (
