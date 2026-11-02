@@ -10,7 +10,7 @@ a heading time is more than five minutes off that SHA's committer date.
 
 ## 2026-11-02 11:35 MST — cursor/superagent-shared-box-51be — 59924d4af
 
-- **PR:** none ([compare](https://github.com/raydocs/maka-cloud/compare/main...cursor/superagent-shared-box-51be))
+- **PR:** [#472](https://github.com/raydocs/maka-cloud/pull/472)
 - **What:** One long-lived Instabox box per tenant (`BoxPool`). Mandate size default 4/8192, up to 4 concurrent workers, git worktrees at `/work/<workerId>` from a cached base clone, shared npm cache, host-side secrets. Activity lease while anyone is active; idle 5 min then suspend; `deleteAfterSeconds` is a 7-day backstop only. Wake reports phase `waking` with measured time. Gone box rebuilds from the base snapshot, else a fresh create. Box JSON in the store (no migration). W-rule `box_stuck` for stuck suspend/resume or a leftover lease. Ledger records create/wake/restore wallMs. LayerFS stays off.
 - **Why:** User request: one box per tenant, many workers, no 30-min kill.
 - **Tests:** 141 passed in `@maka-cloud/superagent` (`test:dist`). FakeSandbox parity — concurrent workers, idle suspend then wake, snapshot rebuild — plus sqlite JSON persist, admission `worker_cap`, watchdog `box_stuck`. Host typecheck clean.
