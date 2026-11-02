@@ -9,16 +9,17 @@ review comments resume the same worker (Router is not called).
 
 | Piece | CI / default CLI | Live (`MAKA_CLOUD_LOOP_LIVE=1`) |
 |---|---|---|
-| Sandbox | `FakeSandbox` | Instabox `HttpSandbox`, 2 vCPU / 4096 MiB, template `universal` |
-| Coder | `FakeCoder` (writes `add.js`) | still `FakeCoder` in this slice; host can later inject `CodingRunner` / Agent SDK. Model key stays on the host |
+| Sandbox | `FakeSandbox` | Instabox `HttpSandbox` when `INSTABOX_API_KEY` is set: 2 vCPU / 4096 MiB, template `universal`, always destroyed |
+| Coder | `FakeCoder` (writes `add.js`) | `HttpCoder` via Anthropic Messages when `ANTHROPIC_API_KEY` or `MAKA_CLOUD_JUDGE_API_KEY` is set; falls back to `FakeCoder` on a bad reply. Key stays on the host. Host can later inject `CodingRunner` |
 | Tests | `node add.test.js` on the host workspace | same, plus `echo loop-verify` in the box |
-| Git / PR | `FakeGitHost` (local commit, fake URL) | same unless you replace `GitHostPort` |
-| Router | forced `act` mandate | `createJudgeFromEnv` (heuristic prefilter + ModelJudge when a key is set) |
-| Merge | held, then approved in the fake CLI | still held — owner must approve exact bound text |
+| Git / PR | `FakeGitHost` (local commit, fake URL) | `HttpGitHost` when `MAKA_GITHUB_TOKEN=github_pat_…` and `MAKA_CLOUD_LOOP_REPO=owner/name` (GitHub git API, token never on argv) |
+| Router | forced `act` mandate | still forced `act` so the scratch run actually pushes. Product Router (`createJudgeFromEnv`) is separate |
+| Merge | held, then approved against the fake host | held only — live GitHub is never auto-merged |
 
 The box never receives `INSTABOX_API_KEY`, `ANTHROPIC_API_KEY` or
-`MAKA_GITHUB_TOKEN`. That matches `cloud-playbooks` `GitHubPublisher`: publish
-from the host.
+`MAKA_GITHUB_TOKEN`. Clone / coder / tests / git stay on the host
+`WorkspaceStore` (the same split as `cloud-playbooks` `GitHubPublisher`).
+The box is the machine proof: `ensureRunning` + `echo loop-verify`.
 
 Worker-branch push (`maka/sa-<workerId>`) is allowed under intensity `act` and
 authority `open-pr`. `main` / `master` are protected. Merge, protected push,
@@ -38,16 +39,20 @@ npm run real-loop -w @maka-cloud/superagent
 
 ```bash
 export MAKA_CLOUD_LOOP_LIVE=1
-export INSTABOX_API_KEY='…'           # env only, never argv
-# optional:
+export INSTABOX_API_KEY='…'                 # env only, never argv
+# optional Instabox:
 # export INSTABOX_TEMPLATE_ID='universal'
-# export ANTHROPIC_API_KEY='…'        # ModelJudge prefilter
-# export MAKA_GITHUB_TOKEN='github_pat_…'  # only if you swap in a live GitHost
+# optional model coder (host-side Anthropic Messages):
+# export ANTHROPIC_API_KEY='…'              # or MAKA_CLOUD_JUDGE_API_KEY
+# optional live GitHub (fine-grained PAT only; scratch repo must exist with a default branch):
+# export MAKA_GITHUB_TOKEN='github_pat_…'
+# export MAKA_CLOUD_LOOP_REPO='owner/scratch'
 npm run build -w @maka-cloud/superagent
 npm run real-loop -w @maka-cloud/superagent
 ```
 
-The box is always destroyed. Agents and CI do not run this live.
+The box is always destroyed. Live GitHub never auto-merges. Agents and CI
+do not run this live.
 
 ## Metrics harness
 

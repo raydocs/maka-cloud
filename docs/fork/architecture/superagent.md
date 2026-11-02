@@ -808,7 +808,7 @@ Filled in by the implementation PR; kept accurate here:
 | Event log + idempotency | implemented |
 | Subscription table + pass-through | implemented |
 | Router admission + `HeuristicJudge` | implemented |
-| `ModelJudge` | injectable `JudgeClient` + `FetchJudgeClient`. Superagent constructor stays heuristic. `createJudgeFromEnv` uses ModelJudge with a heuristic prefilter when a key is present; `=heuristic` / `=model` force one path. Decisions log `confidence` and source. Optional read-only `RouterInspect` (`git log`, CI URL) |
+| `ModelJudge` | injectable `JudgeClient` + `FetchJudgeClient`. Superagent constructor stays heuristic (no keys). `createJudgeFromEnv` uses ModelJudge with a heuristic prefilter when a key is present; `=heuristic` / `=model` force one path. Decisions log `confidence` and source. Optional read-only `RouterInspect` (`git log`, CI URL) |
 | Worker state machine, inbox, sleep/wake/retire | implemented |
 | Durable memory / plan / transcript pointer | implemented |
 | Sqlite restore | implemented |
@@ -824,7 +824,7 @@ Filled in by the implementation PR; kept accurate here:
 | Host / duties / conductor wiring | P2: `startStack` creates one in-process Superagent; duties `readDelivery` is the GitHub Source; watchdog escalations are T33 stuck cards. Host passes `instaboxSandboxPort`, `EnvOrgSecrets`, `createJudgeFromEnv` |
 | Local loop | `npm ci` + `npm run build -w @maka-cloud/superagent` + `npm run local-loop -w @maka-cloud/superagent`. CI smoke: `local-loop.test.ts` with fakes |
 | Live Instabox smoke | `npm run live-smoke -w @maka-cloud/superagent` (env `INSTABOX_API_KEY`; template defaults to `universal`). Creates 2 vCPU / 4096 MiB, `echo live-smoke`, always deletes. Not run in CI |
-| Real loop | `CodingLoopHandler`: WorkspaceStore clone, FakeCoder (or a live client), tests, worker-branch push under `act`, PR + evidence. Merge / protected push / secrets / deploy stay behind Safety. `npm run real-loop`. Live only with `MAKA_CLOUD_LOOP_LIVE=1` + keys (never in CI) |
+| Real loop | `CodingLoopHandler`: WorkspaceStore clone, `FakeCoder` / `HttpCoder`, host tests, worker-branch push under `act`, PR + evidence. `HttpGitHost` uses the GitHub git API when a fine-grained PAT is set. Merge / protected push / secrets / deploy stay behind Safety. `npm run real-loop`. Live only with `MAKA_CLOUD_LOOP_LIVE=1` + keys (never in CI) |
 | Metrics harness | `npm run metrics -w @maka-cloud/superagent -- --n 3 --parallel 2 --out /tmp/sa-metrics`. FakeSandbox only. JSON + markdown: success rate, time-to-green, humans, $/PR, wasted Router wakeups |
 | `#460` follow-up engine | not copied; `FollowUpBridge` only |
 | `#452` InstaboxClient adapter | structural; used when host passes a client |

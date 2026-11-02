@@ -1,16 +1,16 @@
 import { rm } from 'node:fs/promises';
 import type { IngestInput } from './events.js';
 import { sequentialIds } from './ids.js';
+import { createCoderFromEnv } from './loop-coder.js';
+import { createGitHostFromEnv } from './loop-github.js';
 import {
   CodingLoopHandler,
-  FakeCoder,
   FakeGitHost,
   NodeFileTestPort,
   mergeAction,
   scratchFiles,
   workerBranch,
 } from './loop.js';
-import { createJudgeFromEnv } from './judge-client.js';
 import { Superagent } from './runtime.js';
 import {
   HttpSandbox,
@@ -33,6 +33,8 @@ export interface RealLoopReport {
   prUrl: string | null;
   destroyed: boolean;
   machineId: string | null;
+  coder: 'fake' | 'model';
+  git: 'fake' | 'github';
   evidence: string;
   steps: string[];
   error?: string;
@@ -43,6 +45,7 @@ export interface RealLoopOptions {
   sandbox?: SandboxPort;
   repoDir?: string;
   keepDir?: boolean;
+  fetch?: typeof fetch;
 }
 
 /**
@@ -61,13 +64,14 @@ export async function runRealLoop(options: RealLoopOptions = {}): Promise<RealLo
     prUrl: null,
     destroyed: false,
     machineId: null,
+    coder: 'fake',
+    git: 'fake',
     evidence: '',
     steps: [],
   };
   let dir: string | undefined;
   let box: HttpSandbox | undefined;
   let machineId: string | undefined;
-  const key = env.INSTABOX_API_KEY?.trim() ?? '';
   try {
     dir = options.repoDir ?? (await initLocalRepo(scratchFiles()));
     report.steps.push('workspace');
@@ -88,9 +92,15 @@ export async function runRealLoop(options: RealLoopOptions = {}): Promise<RealLo
       report.machineId = machineId ?? null;
       report.steps.push('sandbox-create');
     }
-    const git = new FakeGitHost();
+    const fetchImpl = options.fetch ?? fetch;
+    const coded = createCoderFromEnv(env, fetchImpl);
+    const hosted = createGitHostFromEnv(env, fetchImpl);
+    report.coder = coded.kind;
+    report.git = hosted.kind;
+    const repoName = hosted.repo ?? 'local/scratch';
+    const git = hosted.git;
     const handler = new CodingLoopHandler({
-      coder: new FakeCoder(),
+      coder: coded.coder,
       tests: new NodeFileTestPort(),
       git,
       sandbox,
@@ -100,21 +110,21 @@ export async function runRealLoop(options: RealLoopOptions = {}): Promise<RealLo
       handler,
       sandbox,
       sandboxRef: machineId,
-      judge: live
-        ? createJudgeFromEnv(env)
-        : {
-            async decide(event) {
-              return {
-                action: 'spawn',
-                mandate: actMandate(event.subject?.repo ? [event.subject.repo] : ['local/scratch']),
-                title: 'real-loop',
-              };
-            },
-          },
+      // Scratch CLI always spawns with `act` so the worker may push a
+      // worker branch. HeuristicJudge's default is observe (no push).
+      judge: {
+        async decide(event) {
+          return {
+            action: 'spawn',
+            mandate: actMandate(event.subject?.repo ? [event.subject.repo] : [repoName]),
+            title: 'real-loop',
+          };
+        },
+      },
       ids: sequentialIds(300),
       admission: { allowActors: ['alice'] },
     });
-    const opened = await agent.ingest(prOpened());
+    const opened = await agent.ingest(prOpened(repoName));
     report.steps.push('spawn');
     if (opened.result !== 'spawned') {
       throw new Error(`expected spawn, got ${opened.result}`);
@@ -122,34 +132,35 @@ export async function runRealLoop(options: RealLoopOptions = {}): Promise<RealLo
     report.workerId = opened.workerId;
     const after = agent.store.worker('inv_loop', opened.workerId);
     report.branch = workerBranch(opened.workerId);
-    report.prUrl = git.pullRequests[0]?.url ?? null;
+    const pr = handler.lastPr.get(opened.workerId);
+    report.prUrl = pr?.url ?? null;
     report.evidence = formatEvidence(after?.evidence ?? []);
-    if (!git.pushes[0] || !git.pullRequests[0]) {
+    const pushed = Boolean(after?.memory?.includes('pushed') && pr);
+    if (!pushed || !pr) {
       throw new Error('loop did not push a worker branch or open a PR');
     }
     report.steps.push('push', 'pr');
-    const pr = git.pullRequests[0];
-    const ci = await agent.ingest(ciFailed('inv_loop', 7));
+    const ci = await agent.ingest(ciFailed('inv_loop', 7, repoName));
     if (ci.result === 'passthrough') report.steps.push('ci-resume');
-    const comment = await agent.ingest(reviewComment('inv_loop', 7));
+    const comment = await agent.ingest(reviewComment('inv_loop', 7, repoName));
     if (comment.result === 'passthrough') report.steps.push('review-resume');
     const waiting = agent.store.worker('inv_loop', opened.workerId);
     if (waiting) {
-      const held = agent.safety.gate(waiting, mergeAction('local/scratch', pr.number), Date.now());
+      const action = mergeAction(repoName, pr.number);
+      const held = agent.safety.gate(waiting, action, Date.now());
       if (!held.allowed && held.reason === 'held') {
         report.steps.push('merge-held');
-        await agent.approve(
-          'inv_loop',
-          held.approvalId,
-          mergeAction('local/scratch', pr.number).boundText,
-        );
-        report.steps.push('merge-approved');
+        // Live GitHub never auto-merges. Fake host may approve to prove the gate.
+        if (git instanceof FakeGitHost) {
+          await agent.approve('inv_loop', held.approvalId, action.boundText);
+          report.steps.push('merge-approved');
+        }
       }
     }
-    report.ok = git.pushes.length >= 1 && git.pullRequests.length >= 1;
+    report.ok = pushed && Boolean(pr.url);
     agent.close();
   } catch (error) {
-    report.error = redactSecret(error instanceof Error ? error.message : 'real-loop failed', key);
+    report.error = redactKeys(error instanceof Error ? error.message : 'real-loop failed', env);
   } finally {
     if (machineId && box) {
       try {
@@ -157,7 +168,7 @@ export async function runRealLoop(options: RealLoopOptions = {}): Promise<RealLo
         report.destroyed = true;
         report.steps.push('sandbox-destroy');
       } catch (error) {
-        const extra = redactSecret(error instanceof Error ? error.message : 'destroy failed', key);
+        const extra = redactKeys(error instanceof Error ? error.message : 'destroy failed', env);
         report.error = report.error ? `${report.error}; ${extra}` : extra;
       }
     }
@@ -176,6 +187,8 @@ export function formatRealLoopReport(report: RealLoopReport): string {
     `branch: ${report.branch ?? '(none)'}`,
     `pr: ${report.prUrl ?? '(none)'}`,
     `machine: ${report.machineId ?? '(none)'}`,
+    `coder: ${report.coder}`,
+    `git: ${report.git}`,
     `destroyed: ${report.destroyed}`,
     `steps: ${report.steps.join(' → ')}`,
     report.evidence,
@@ -186,10 +199,21 @@ export function formatRealLoopReport(report: RealLoopReport): string {
 }
 
 export async function runRealLoopCli(env: NodeJS.ProcessEnv = process.env): Promise<number> {
-  const key = env.INSTABOX_API_KEY?.trim() ?? '';
   const report = await runRealLoop({ env });
-  console.log(redactSecret(formatRealLoopReport(report), key));
+  console.log(redactKeys(formatRealLoopReport(report), env));
   return report.ok ? 0 : 1;
+}
+
+function redactKeys(text: string, env: NodeJS.ProcessEnv): string {
+  return [
+    env.INSTABOX_API_KEY,
+    env.MAKA_GITHUB_TOKEN,
+    env.ANTHROPIC_API_KEY,
+    env.MAKA_CLOUD_JUDGE_API_KEY,
+  ]
+    .map((value) => value?.trim() ?? '')
+    .filter(Boolean)
+    .reduce((out, secret) => redactSecret(out, secret), text);
 }
 
 async function liveSandbox(env: NodeJS.ProcessEnv): Promise<HttpSandbox> {
@@ -197,7 +221,7 @@ async function liveSandbox(env: NodeJS.ProcessEnv): Promise<HttpSandbox> {
   return new HttpSandbox({ apiKey: api.apiKey, baseUrl: api.baseUrl });
 }
 
-function prOpened(): IngestInput {
+function prOpened(repo: string): IngestInput {
   return {
     source: 'github',
     tenantId: 'inv_loop',
@@ -211,13 +235,13 @@ function prOpened(): IngestInput {
         user: { login: 'alice', type: 'User' },
         head: { ref: 'maka/pr-7' },
       },
-      repository: { full_name: 'local/scratch' },
+      repository: { full_name: repo },
       sender: { login: 'alice', type: 'User' },
     },
   };
 }
 
-function ciFailed(tenantId: string, number: number): IngestInput {
+function ciFailed(tenantId: string, number: number, repo: string): IngestInput {
   return {
     source: 'github',
     tenantId,
@@ -233,13 +257,13 @@ function ciFailed(tenantId: string, number: number): IngestInput {
         head_branch: 'maka/pr-7',
         pull_requests: [{ number }],
       },
-      repository: { full_name: 'local/scratch' },
+      repository: { full_name: repo },
       sender: { login: 'github-actions[bot]', type: 'Bot' },
     },
   };
 }
 
-function reviewComment(tenantId: string, number: number): IngestInput {
+function reviewComment(tenantId: string, number: number, repo: string): IngestInput {
   return {
     source: 'github',
     tenantId,
@@ -249,7 +273,7 @@ function reviewComment(tenantId: string, number: number): IngestInput {
       action: 'created',
       issue: { number, title: 'add', pull_request: {} },
       comment: { id: 1, body: 'please also add a comment' },
-      repository: { full_name: 'local/scratch' },
+      repository: { full_name: repo },
       sender: { login: 'bob', type: 'User' },
     },
   };

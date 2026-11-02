@@ -44,7 +44,8 @@ listener is for laptop replay only.
 | Name | Why |
 |---|---|
 | `MAKA_CLOUD_SUPERAGENT_ACTORS` | Comma-separated logins allowed to spawn. Empty = any non-bot (still filtered). |
-| `MAKA_CLOUD_SUPERAGENT_JUDGE=model` plus a judge key | Cheap Router model. Heuristic stays default. |
+| Judge key (`ANTHROPIC_API_KEY` / `MAKA_CLOUD_JUDGE_API_KEY`) | `createJudgeFromEnv` uses ModelJudge with a heuristic prefilter. `=heuristic` / `=model` force one path. |
+| `MAKA_GITHUB_TOKEN` + `MAKA_CLOUD_LOOP_REPO` | Fine-grained PAT (`github_pat_`) for the live real-loop GitHub host. |
 | `MAKA_CLOUD_ORG_SECRET_*` / `MAKA_CLOUD_ORG_SECRETS_FILE` | Local Org Secrets. Instabox org-secret injection is still not assumed. |
 | `OPENAI_API_KEY` | Only if a Codex / OpenAI mode is in `MAKA_CLOUD_MODES`. |
 | Web Push (`CLOUD_PUSH_*`) | Spend alerts. Not P0. |
@@ -80,7 +81,32 @@ listener is for laptop replay only.
    a PR on the scratch repo from an allowed actor and confirm a worker row
    in `superagent.db`.
 
-5. **Spend cap.** Gateway and invite daily/monthly limits stay in force.
+5. **Real loop (fake first, then live).** Agents do not run the live path.
+   ```bash
+   npm run real-loop -w @maka-cloud/superagent
+   ```
+   Expect `ok: true`, `coder: fake`, `git: fake`, and steps
+   `workspace → spawn → push → pr → ci-resume → review-resume → merge-held → merge-approved`.
+
+   Live (owner only; keys in the environment, never argv):
+   ```bash
+   export MAKA_CLOUD_LOOP_LIVE=1
+   export INSTABOX_API_KEY='…'
+   # optional:
+   # export ANTHROPIC_API_KEY='…'
+   # export MAKA_GITHUB_TOKEN='github_pat_…'
+   # export MAKA_CLOUD_LOOP_REPO='owner/scratch'
+   npm run real-loop -w @maka-cloud/superagent
+   ```
+   Expect the box created and destroyed. Live GitHub holds merge (no auto-merge).
+
+6. **Metrics harness (fakes only).**
+   ```bash
+   npm run metrics -w @maka-cloud/superagent -- --n 3 --parallel 2 --out /tmp/sa-metrics
+   ```
+   Writes `metrics.json` and `metrics.md`.
+
+7. **Spend cap.** Gateway and invite daily/monthly limits stay in force.
    P0 should use a cheap model (`claude-haiku-5-5` or the built-in quick mode).
 
 ## Still stubbed / out of this repo

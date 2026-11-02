@@ -93,8 +93,10 @@ npm run build -w @maka-cloud/superagent
 npm run real-loop -w @maka-cloud/superagent
 ```
 
-Live Instabox (owner only): `MAKA_CLOUD_LOOP_LIVE=1` plus `INSTABOX_API_KEY`.
-See [real-loop.md](real-loop.md). Never put keys on argv.
+Live (owner only): `MAKA_CLOUD_LOOP_LIVE=1` plus `INSTABOX_API_KEY`. Optional
+`ANTHROPIC_API_KEY` (host-side coder) and `MAKA_GITHUB_TOKEN=github_pat_…`
+with `MAKA_CLOUD_LOOP_REPO=owner/name`. See [real-loop.md](real-loop.md).
+Never put keys on argv.
 
 ## 4. Metrics harness (fakes)
 
@@ -143,14 +145,19 @@ when you want a throwaway box.
 
 ## Optional ModelJudge
 
-HeuristicJudge stays the default. To send unowned events through the same
-Anthropic Messages API the host already uses:
+HeuristicJudge stays the Superagent constructor default (no keys in CI).
+When a judge key is present, `createJudgeFromEnv` uses `ModelJudge` with the
+heuristic as a **prefilter** (ignore/empty skips the model). Force one path
+with `MAKA_CLOUD_SUPERAGENT_JUDGE=heuristic` or `=model`. Decisions log
+`confidence` and source. Optional read-only `RouterInspect` (`git log`, CI
+URL) is a cheap check so the Router can verify instead of guessing.
 
 ```bash
-export MAKA_CLOUD_SUPERAGENT_JUDGE=model
+# default when a key is set: ModelJudge + heuristic prefilter
 export ANTHROPIC_API_KEY='…'          # or MAKA_CLOUD_JUDGE_API_KEY
 # optional: ANTHROPIC_BASE_URL or MAKA_CLOUD_JUDGE_BASE_URL
 # optional: MAKA_CLOUD_JUDGE_MODEL (default claude-haiku-5-5)
+# optional force: MAKA_CLOUD_SUPERAGENT_JUDGE=model|heuristic|prefilter
 ```
 
 Point `MAKA_CLOUD_JUDGE_BASE_URL` at the gateway's `/anthropic` prefix if you

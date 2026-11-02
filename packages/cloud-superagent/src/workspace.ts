@@ -180,6 +180,8 @@ export async function initLocalRepo(files: Record<string, string>, dir?: string)
   await run('git', ['init', '-b', 'main', root]);
   await run('git', ['-C', root, 'config', 'user.email', 'superagent@test']);
   await run('git', ['-C', root, 'config', 'user.name', 'Superagent Test']);
+  await run('git', ['-C', root, 'config', 'commit.gpgsign', 'false']);
+  await run('git', ['-C', root, 'config', 'core.hooksPath', '/dev/null']);
   for (const [rel, content] of Object.entries(files)) {
     const path = join(root, rel);
     await mkdir(dirname(path), { recursive: true });

@@ -157,6 +157,14 @@ export {
   type LoopPorts,
   type TestPort,
 } from './loop.js';
+export { HttpCoder, createCoderFromEnv, parseCoderJson } from './loop-coder.js';
+export {
+  GITHUB_TOKEN_ENV,
+  LOOP_REPO_ENV,
+  HttpGitHost,
+  createGitHostFromEnv,
+  githubTokenProblem,
+} from './loop-github.js';
 export {
   formatRealLoopReport,
   runRealLoop,
