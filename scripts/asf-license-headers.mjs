@@ -259,6 +259,7 @@ export const exclusionRules = [
         '.github/workflows/fork-cloud-mobile.yml',
         '.github/workflows/fork-deploy-rehearsal.yml',
         '.dockerignore',
+        '.agents/setup',
       )(path) ||
       startsWith('docs/fork')(path) ||
       startsWith('deploy')(path) ||

@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# Prepares a fresh Amp orb: the Node toolchain CI pins, the Linux packages the
+# runtime sandbox tests need, and every npm dependency tree in the repository.
+# Amp may rerun this on a stale snapshot, so every step skips work it finds done.
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+step() {
+  local label="$1"
+  shift
+  local start=$SECONDS
+  echo "==> $label"
+  "$@"
+  echo "<== $label ($((SECONDS - start))s)"
+}
+
+# CI (.github/workflows/ci.yml) runs Node 24.22.1 and package.json pins npm.
+# The orb image ships a newer Node; native modules (node-pty, sharp) and the
+# Electron postinstall are only exercised against the CI version.
+node_version="24.22.1"
+npm_version="$(sed -n 's/.*"packageManager": *"npm@\([^"]*\)".*/\1/p' package.json)"
+node_dir="$HOME/.local/share/node-v$node_version"
+bin_dir="$HOME/.local/bin"
+# npm's shebang resolves node from PATH, and a global install lands in that
+# node's prefix, so the pinned Node must come first before npm runs.
+export PATH="$node_dir/bin:$PATH"
+
+install_node() {
+  if [[ ! -x "$node_dir/bin/node" ]]; then
+    local tmp
+    tmp="$(mktemp -d)"
+    curl -fsSL --retry 3 "https://nodejs.org/dist/v$node_version/node-v$node_version-linux-x64.tar.xz" |
+      tar -xJ -C "$tmp"
+    mkdir -p "$(dirname "$node_dir")"
+    rm -rf "$node_dir"
+    mv "$tmp/node-v$node_version-linux-x64" "$node_dir"
+    rmdir "$tmp"
+  fi
+  if [[ "$("$node_dir/bin/npm" --version)" != "$npm_version" ]]; then
+    "$node_dir/bin/npm" install --global --no-audit --no-fund "npm@$npm_version"
+  fi
+  # ~/.local/bin precedes /usr/local/bin on the orb's PATH, so these links
+  # reach Amp, login shells and supervised services without a profile hook.
+  mkdir -p "$bin_dir"
+  local tool
+  for tool in node npm npx corepack; do
+    ln -sfn "$node_dir/bin/$tool" "$bin_dir/$tool"
+  done
+}
+
+# Ripgrep ships with the orb; bubblewrap backs the runtime's Linux sandbox.
+install_system_packages() {
+  local missing=()
+  local pkg
+  for pkg in bubblewrap; do
+    dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'install ok installed' || missing+=("$pkg")
+  done
+  if ((${#missing[@]})); then
+    sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${missing[@]}"
+  fi
+}
+
+step "Node $node_version / npm $npm_version" install_node
+step "System packages" install_system_packages
+
+# npm ci deletes and rebuilds node_modules on every run, and the root install
+# also downloads Electron, so a stale snapshot skips any tree whose lockfile and
+# Node version match the ones it was installed from.
+npm_ci() {
+  local dir="$1"
+  shift
+  local marker="$dir/node_modules/.orb-setup-stamp"
+  local stamp
+  stamp="node-$node_version $(sha256sum "$dir/package-lock.json" | cut -d' ' -f1)"
+  if [[ -f "$marker" && "$(cat "$marker")" == "$stamp" ]]; then
+    echo "$dir/node_modules matches its lockfile; skipping npm ci"
+    return
+  fi
+  (cd "$dir" && npm ci --no-audit --no-fund "$@")
+  echo "$stamp" >"$marker"
+}
+
+# The root install runs postinstall (dependency patches, Electron download) and
+# prepare (model metadata sync, husky hooks).
+step "Root dependencies" npm_ci .
+
+# Not root workspaces: each keeps its own lockfile, and its CI lane installs it
+# with scripts disabled.
+for pkg in packages/cloud-web packages/cloud-client packages/cloud-mobile; do
+  step "$pkg dependencies" npm_ci "$pkg" --ignore-scripts
+done
+
+echo "Setup complete: node $(node --version), npm $(npm --version)"

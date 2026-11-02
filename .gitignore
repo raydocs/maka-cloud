@@ -60,3 +60,6 @@ perf-results/
 artifacts/startup-correctness/
 
 apps/desktop/dist-assistant-web/
+
+# Amp orb portal registrations (maka-cloud fork)
+.amp/portals/*
