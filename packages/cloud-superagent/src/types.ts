@@ -60,8 +60,62 @@ export const WATCHDOG_RULES = [
   'over_budget',
   'subject_closed',
   'awaiting_expired',
+  'box_stuck',
 ] as const;
 export type WatchdogRule = (typeof WATCHDOG_RULES)[number];
+
+export const TENANT_BOX_STATES = [
+  'creating',
+  'running',
+  'suspending',
+  'suspended',
+  'resuming',
+  'waking',
+  'rebuilding',
+  'gone',
+] as const;
+export type TenantBoxState = (typeof TENANT_BOX_STATES)[number];
+
+/** One long-lived Instabox box per tenant. JSON on the store; no sqlite bump. */
+export interface TenantBoxRecord {
+  tenantId: string;
+  boxId: string;
+  state: TenantBoxState;
+  snapshotId: string | null;
+  vcpus: number;
+  memMiB: number;
+  activeWorkers: string[];
+  idleSince: number | null;
+  lastWakeAt: number | null;
+  lastSuspendAt: number | null;
+  lastCreateAt: number | null;
+  lastRestoreAt: number | null;
+  leaseHolder: string | null;
+  leaseRenewedAt: number | null;
+  /** Backstop only (default 7 days). Idle suspend is the normal path. */
+  deleteAfterSeconds: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export const TENANT_BOX_PREFIX = '__tenant_box__:';
+
+export function tenantBoxWorkerId(tenantId: string): string {
+  return `${TENANT_BOX_PREFIX}${tenantId}`;
+}
+
+export function isTenantBoxWorkerId(workerId: string): boolean {
+  return workerId.startsWith(TENANT_BOX_PREFIX);
+}
+
+/** Default shared-box size. Mandate may raise it; Instabox Pro allows 4/8192. */
+export const DEFAULT_SHARED_BOX = { vcpus: 4, memMiB: 8192 } as const;
+export const DEFAULT_WORKERS_PER_BOX = 4;
+export const DEFAULT_IDLE_SUSPEND_MS = 5 * 60_000;
+export const DEFAULT_BOX_LEASE_TTL_MS = 60_000;
+export const DEFAULT_BOX_LEASE_RENEW_MS = 30_000;
+export const DEFAULT_BOX_DELETE_AFTER_SECONDS = 7 * 24 * 60 * 60;
+export const DEFAULT_BOX_STUCK_AFTER_MS = 10 * 60_000;
 
 export interface Actor {
   login: string;
@@ -108,6 +162,8 @@ export interface Mandate {
   allowNoCi?: boolean;
   /** Owner may pause this worker. Default true. Set false to refuse pause. */
   ownerPause?: boolean;
+  /** Shared-box size. Default 4 vCPU / 8192 MiB. */
+  box?: { vcpus?: number; memMiB?: number };
 }
 
 export interface Usage {
@@ -157,6 +213,8 @@ export interface WorkerRecord {
   lastLive?: { sha?: string; ci?: string; prMerged?: boolean; at: number };
   /** Named step plan + heartbeat. JSON only; no schema bump. */
   progress?: import('./progress.js').WorkerProgress;
+  /** Copy of the tenant box (JSON). Source of truth is SuperagentStore.tenantBox. */
+  box?: TenantBoxRecord;
   usage: Usage;
   evidence: EvidenceBlock[];
   createdAt: number;
@@ -322,6 +380,8 @@ export interface AdmissionPolicy {
   allowSources?: EventSource[];
   /** Live workers with a sandboxRef (or about to get one) allowed at once. */
   maxBoxes?: number;
+  /** Concurrent workers on one tenant box. Default 4 when sharedBox is on. */
+  maxWorkersPerBox?: number;
   /** Tenant ledger cap in USD. Spawn is refused when usage already meets it. */
   spendCapUsd?: number;
 }
@@ -382,6 +442,40 @@ export function isLiveState(state: WorkerState): boolean {
 
 export function emptyUsage(): Usage {
   return { tokens: 0, usdMicros: 0, wallMs: 0 };
+}
+
+/** Reserved retired row that carries tenant box JSON through sqlite replay. */
+export function tenantBoxAsWorker(box: TenantBoxRecord): WorkerRecord {
+  const at = box.updatedAt;
+  return {
+    workerId: tenantBoxWorkerId(box.tenantId),
+    tenantId: box.tenantId,
+    subject: {
+      kind: 'conversation',
+      tenantId: box.tenantId,
+      key: tenantBoxWorkerId(box.tenantId),
+    },
+    state: 'retired',
+    generation: 1,
+    mandate: observeMandate([]),
+    memory: '',
+    spills: [],
+    plan: '',
+    transcriptPointer: null,
+    sandboxRef: box.boxId,
+    workspaceRef: null,
+    lastEventId: null,
+    lastProgressAt: at,
+    lastHeartbeatAt: at,
+    lastStepSignature: null,
+    stepRepeats: 0,
+    box,
+    usage: emptyUsage(),
+    evidence: [],
+    createdAt: box.createdAt,
+    updatedAt: at,
+    retiredAt: at,
+  };
 }
 
 export function observeMandate(repos: string[], strength: Strength = 'inferred'): Mandate {

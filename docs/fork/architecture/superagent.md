@@ -82,7 +82,7 @@ life**.
 | Durable state | T28 step log, epoch fence, transcript mirror | Worker record adds memory, plan, transcript pointer, mandate, inbox offset. The step log remains the record of a **run**; the worker record is the record of a **subject**. |
 | Watchdog | `@maka-cloud/supervisor` R1–R5 ("rules decide, models describe"); T33 stuck report is docs only (#444) | Super-agent watchdog is a second, subject-level loop: stuck, looping, over-budget, crashed. It calls supervisor-shaped escalation; it does not replace R1–R5. |
 | Sandbox | `@maka-cloud/instabox` `InstaboxClient`; open PR #452 `SandboxApi` | Super-agent talks to `SandboxPort` (the #452 pick). Default adapter is Instabox. boat.dev stays parked. |
-| Workspace | Fresh git clone per task in the box | `WorkspaceStore` with `GitCloneStore` default. LayerFS behind a flag. |
+| Workspace | Fresh git clone per task in the box | Shared tenant box: git worktrees under `/work/<workerId>` from a cached base clone. `GitCloneStore` on the host. LayerFS stays off. |
 | Approvals | Conductor `GrantRow` bound to exact text; T15 taint; duty `Authority` | Worker `Mandate` + Super-agent approval kinds (merge, protected push, secrets, deploy, spend). Conductor grants stay for conductor tools. |
 | Isolation | `docs/fork/isolation-model.md` I1–…; one box per invite at launch | Tenant id on every Super-agent row. A worker never sees another tenant's store, sandbox, or secrets. |
 | Spend | Gateway caps, duty `runBudgetUsd` / `dailyCapUsd`, orchestrator `budgetUsd` | Per-worker budgets on the Mandate; metering hooks for a later ledger (T17). |
@@ -718,11 +718,28 @@ type SandboxPort = Pick<
 >;
 ```
 
-Workers do not create machines. The host's `SandboxProvider` / box pool
-does. Super-agent stores `sandboxRef` and calls `ensureRunning` on wake.
+`BoxPool` gives each tenant **one** long-lived Instabox box (mandate size,
+default 4/8192) shared by up to N workers (default 4). Admission still
+caps spend. Each worker execs with cwd `/work/<workerId>` (a git worktree
+of a cached base clone) and its own env (`npm_config_cache` is shared).
+Cross-worker paths are refused. Secrets stay on the host.
+
+Lifecycle: an activity lease is held and renewed while any worker is
+active. When all are idle, leases drop and the box suspends after 5
+minutes (or Instabox auto-suspends). `deleteAfterSeconds` is only a 7-day
+backstop, not a 30-minute kill. The next event `ensureRunning` / wakes
+the box and reports progress phase `waking` with the measured time. A
+gone or erroring box rebuilds from the latest base snapshot (taken after
+the base install), else a fresh create.
+
+Box id, state, and last wake/suspend times live in store JSON (a reserved
+retired worker row). No sqlite `user_version` bump. A box stuck in
+`suspending`/`resuming`, or a lease that was not released, is W-rule
+`box_stuck`. Cold create, wake, and snapshot-restore timings go on
+`usage_events` as `__box__:create|wake|restore`.
 
 The API key stays on the host. Isolation model I-series still apply. Super-agent
-does not add a second egress path.
+does not add a second egress path. LayerFS stays off.
 
 T32 (own computer) is after launch and is another `SandboxPort`. Not in P0–P3.
 
@@ -1045,7 +1062,7 @@ column. Flag if a later change needs `user_version` 3.
 ### 18.8 First-class progress
 
 A 40–50 minute silent run looks stuck. Each worker carries a step plan
-(`materialize`, `edit`, `install`, `test`, `push`, `pr`, `ci-wait`,
+(`waking`, `materialize`, `edit`, `install`, `test`, `push`, `pr`, `ci-wait`,
 `review-wait`, `merge-held`) on `worker.progress` (JSON only). The
 runtime emits structured views: phase `k/N`, percent, elapsed, ETA
 (median of completed phase samples on the tenant, else a weak mean of

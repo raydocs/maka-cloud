@@ -7,11 +7,12 @@ import type {
   InboxItem,
   NormalizedEvent,
   Subscription,
+  TenantBoxRecord,
   Usage,
   UsageEntry,
   WorkerRecord,
 } from './types.js';
-import { emptyUsage, isLiveState } from './types.js';
+import { emptyUsage, isLiveState, tenantBoxAsWorker } from './types.js';
 
 const SCHEMA_VERSION = 2;
 
@@ -537,6 +538,18 @@ export class SqliteSuperagentStore implements SuperagentStore {
 
   tenantUsage(tenantId: string) {
     return this.memory.tenantUsage(tenantId);
+  }
+
+  putTenantBox(box: TenantBoxRecord): void {
+    this.putWorker(tenantBoxAsWorker(box));
+  }
+
+  tenantBox(tenantId: string): TenantBoxRecord | undefined {
+    return this.memory.tenantBox(tenantId);
+  }
+
+  allTenantBoxes(): TenantBoxRecord[] {
+    return this.memory.allTenantBoxes();
   }
 
   close(): void {

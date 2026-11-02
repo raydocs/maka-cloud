@@ -8,6 +8,15 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
+## 2026-11-02 11:20 MST — cursor/superagent-shared-box-51be
+
+- **PR:** none
+- **What:** One long-lived Instabox box per tenant (`BoxPool`). Mandate size default 4/8192, up to 4 concurrent workers, git worktrees at `/work/<workerId>` from a cached base clone, shared npm cache, host-side secrets. Activity lease while anyone is active; idle 5 min then suspend; `deleteAfterSeconds` is a 7-day backstop only. Wake reports phase `waking` with measured time. Gone box rebuilds from the base snapshot, else a fresh create. Box JSON in the store (no migration). W-rule `box_stuck` for stuck suspend/resume or a leftover lease. Ledger records create/wake/restore wallMs. LayerFS stays off.
+- **Why:** User request: one box per tenant, many workers, no 30-min kill.
+- **Tests:** 141 passed in `@maka-cloud/superagent` (`test:dist`). FakeSandbox parity — concurrent workers, idle suspend then wake, snapshot rebuild — plus sqlite JSON persist, admission `worker_cap`, watchdog `box_stuck`. Host typecheck clean.
+- **Live:** n/a (Instabox timings separately)
+- **Migrations / risk:** none. JSON fields only. No sqlite `user_version` bump.
+
 ## 2026-11-02 11:06 MST — cursor/superagent-real-loop-51be — 4b2c813e3
 
 - **PR:** [#471](https://github.com/raydocs/maka-cloud/pull/471)

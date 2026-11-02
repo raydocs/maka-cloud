@@ -134,6 +134,21 @@ export function instaboxSandboxPort(client: InstaboxClient): SandboxPort {
     suspend: async (machineId) => {
       await client.suspendMachine(machineId);
     },
+    createMachine: async (request) => {
+      const created = await client.createMachine({
+        name: request.name,
+        metadata: request.metadata,
+        vcpus: request.vcpus,
+        memMiB: request.memMiB,
+        ...(request.snapshotId
+          ? { snapshotId: request.snapshotId }
+          : { templateId: request.templateId ?? 'universal' }),
+      });
+      return { id: created.machineId ?? created.id };
+    },
+    deleteMachine: async (machineId) => {
+      await client.deleteMachine(machineId);
+    },
   };
 }
 
