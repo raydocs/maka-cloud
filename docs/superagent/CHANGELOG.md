@@ -17,6 +17,15 @@ a heading time is more than five minutes off that SHA's committer date.
 - **Live:** n/a
 - **Migrations / risk:** none
 
+## 2026-11-02 16:00 MST — cursor/superagent-workspaces-51be — 3dc73baac
+
+- **PR:** [#465](https://github.com/raydocs/maka-cloud/pull/465)
+- **What:** Merge `origin/main` `4f54c25dc` (PR #464 Super-agent host) into Super-agent workspaces. Kept T34 P3 (`superagent` before `runners`). `AGENTS.md` T34 wording and CHANGELOG conflicted; ours plus #464's changelog entry kept.
+- **Why:** #464 landed on main; this PR was DIRTY. User asked to merge main up the remaining stack immediately.
+- **Tests:** conflict resolution only; prior head `19bf5136f` already had non-iOS CI green
+- **Live:** n/a
+- **Migrations / risk:** none
+
 ## 2026-11-02 14:54 MST — cursor/superagent-usable-51be — b792005a4
 
 - **PR:** [#470](https://github.com/raydocs/maka-cloud/pull/470)
@@ -40,6 +49,15 @@ a heading time is more than five minutes off that SHA's committer date.
 - **PR:** [#470](https://github.com/raydocs/maka-cloud/pull/470)
 - **What:** Merge `origin/main` `6682cdc34` (PR #469 MakaEngine) into Super-agent usable. Kept MakaEngine and T34 P3 (`superagent` before `runners`). `AGENTS.md` and `package.json` conflicted; both sides kept.
 - **Why:** #469 landed on main; this PR was DIRTY. Prior `test` on `e6234fce7` (run 41508419480) failed desktop e2e `workhub-layout` (`aria-haspopup` expected `listbox`, got `dialog`). `apps/desktop` / `packages/ui` match #466 where that spec passed; prior #470 head `520f204b` was green. Upstream flake, not the usable build. Not a test we own; merge retriggers CI. Assertions unchanged.
+- **Tests:** conflict resolution only
+- **Live:** n/a
+- **Migrations / risk:** none. Inherits #469 MakaEngine. No sqlite change.
+
+## 2026-11-02 13:38 MST — cursor/superagent-workspaces-51be — b10cab40f
+
+- **PR:** [#465](https://github.com/raydocs/maka-cloud/pull/465)
+- **What:** Merge `origin/main` `6682cdc34` (PR #469 MakaEngine) into Super-agent workspaces. Kept MakaEngine (workspace, `build`/`build:eval` after `@maka/eval`, fork-lane/Dockerfile step, import-boundary) and T34 P3 (`superagent` still builds before `runners`). `AGENTS.md` and `package.json` conflicted; both sides kept. `docs/superagent` joins the ASF header exclusion.
+- **Why:** #469 landed on main; this PR was DIRTY. User asked to merge main up the stack and keep MakaEngine.
 - **Tests:** conflict resolution only
 - **Live:** n/a
 - **Migrations / risk:** none. Inherits #469 MakaEngine. No sqlite change.
