@@ -8,6 +8,15 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
+## 2026-11-02 16:53 MST — cursor/superagent-ledger-51be — cdec5b8b5
+
+- **PR:** [#466](https://github.com/raydocs/maka-cloud/pull/466)
+- **What:** Merge `origin/main` `e83340599` (PR #465 Super-agent workspaces) into Super-agent ledger. CHANGELOG conflicted; both sides kept, newest first.
+- **Why:** #465 landed on main; this PR was DIRTY. User asked to merge main forward and report Linux-green SHAs.
+- **Tests:** conflict resolution only; prior head `9a9f8ba87` already had Linux CI green or in progress
+- **Live:** n/a
+- **Migrations / risk:** none
+
 ## 2026-11-02 16:01 MST — cursor/superagent-ledger-51be — 56d1a02e4
 
 - **PR:** [#466](https://github.com/raydocs/maka-cloud/pull/466)
