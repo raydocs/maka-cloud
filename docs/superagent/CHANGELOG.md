@@ -8,6 +8,15 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
+## 2026-11-02 11:05 MST — cursor/superagent-real-loop-51be
+
+- **PR:** [#471](https://github.com/raydocs/maka-cloud/pull/471)
+- **What:** cloud-web progress tests typecheck: mock `request` takes the path so `calls[0][0]` is a string, and look/aria attributes use `getAttribute` (vitest has no jest-dom `toHaveAttribute`). Same assertions.
+- **Why:** `cloud-web`, `rehearsal`, and `real-accounts` failed on #471 head `0356d514b` because `tsc --noEmit` includes tests.
+- **Tests:** `packages/cloud-web` typecheck of `tests/work-status.test.tsx`
+- **Live:** n/a
+- **Migrations / risk:** none. Test-only.
+
 ## 2026-11-02 03:00 MST — cursor/superagent-real-loop-51be — 6f2e26320
 
 - **PR:** none ([compare](https://github.com/raydocs/maka-cloud/compare/main...cursor/superagent-real-loop-51be))

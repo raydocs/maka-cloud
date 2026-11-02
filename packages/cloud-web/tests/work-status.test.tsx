@@ -106,7 +106,7 @@ test('multiple tasks require a choice and delivered messages have no withdraw', 
   expect(screen.queryByText('Take back')).toBeNull();
 });
 test('superagent progress list loads GET /v1/superagent/progress and hides a 404', async () => {
-  const request = vi.fn(async () => ({
+  const request = vi.fn(async (_path: string) => ({
     workers: [
       {
         workerId: 'wrk_1',
@@ -125,8 +125,7 @@ test('superagent progress list loads GET /v1/superagent/progress and hides a 404
   expect(await screen.findByTestId('superagent-progress-list')).toBeTruthy();
   expect(screen.getByText('test 4/9')).toBeTruthy();
   expect(request.mock.calls[0]?.[0]).toBe('/v1/superagent/progress');
-  request.mockRejectedValueOnce(new Error('not_found'));
-  const empty = vi.fn(async () => {
+  const empty = vi.fn(async (_path: string) => {
     throw new Error('not_found');
   });
   render(<SuperagentProgress client={{ request: empty } as unknown as CloudClient} />);
@@ -150,8 +149,8 @@ test('superagent progress bar distinguishes waiting from stuck', () => {
       }}
     />,
   );
-  expect(screen.getByTestId('worker-progress')).toHaveAttribute('data-look', 'running');
-  expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '22');
+  expect(screen.getByTestId('worker-progress').getAttribute('data-look')).toBe('running');
+  expect(screen.getByRole('progressbar').getAttribute('aria-valuenow')).toBe('22');
   expect(screen.getByText('model step')).toBeTruthy();
   rerender(
     <WorkerProgressBar
@@ -169,7 +168,7 @@ test('superagent progress bar distinguishes waiting from stuck', () => {
       }}
     />,
   );
-  expect(screen.getByTestId('worker-progress')).toHaveAttribute('data-look', 'waiting');
+  expect(screen.getByTestId('worker-progress').getAttribute('data-look')).toBe('waiting');
   expect(screen.getByText('Waiting on ci: https://ci')).toBeTruthy();
   expect(screen.queryByRole('progressbar')).toBeNull();
   rerender(
