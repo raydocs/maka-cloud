@@ -36,6 +36,28 @@ export class FakeGitHub {
   }[] = [];
   branches = new Set(['main']);
   defaultBranch = 'main';
+  /** What `GET /pulls/:n` says beyond the head: merged or closed. */
+  prState: 'open' | 'closed' | 'merged' = 'open';
+  /** Check runs by commit sha; an unknown sha has none. */
+  readonly checkRuns = new Map<
+    string,
+    { id: number; name: string; status: string; conclusion: string | null }[]
+  >();
+  /** Answer the check-runs endpoint with 403, as for a token without "Checks: read". */
+  checksForbidden = false;
+  /** Workflow runs and their jobs by commit sha, for the fallback. */
+  readonly workflowRuns = new Map<
+    string,
+    {
+      id: number;
+      name: string;
+      status: string;
+      conclusion: string | null;
+      jobs: { id: number; name: string; status: string; conclusion: string | null }[];
+    }[]
+  >();
+  /** Job logs by job id, served behind a redirect as GitHub does. */
+  readonly logs = new Map<number, string>();
   /** Answer every call with this status and message. */
   failWith: { status: number; message: string } | undefined;
   url = '';
@@ -87,6 +109,12 @@ export class FakeGitHub {
       res.end(JSON.stringify(value));
     };
     if (this.failWith) return send(this.failWith.status, { message: this.failWith.message });
+    const blob = /^\/blob-logs\/(\d+)$/.exec(path);
+    if (blob) {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.end(this.logs.get(Number(blob[1])) ?? '');
+      return;
+    }
     const prefix = `/repos/${this.repo}`;
     if (!path.startsWith(prefix)) return send(404, { message: 'Not Found' });
     const rest = path.slice(prefix.length);
@@ -140,12 +168,60 @@ export class FakeGitHub {
         ? send(200, { name: m[1] })
         : send(404, { message: 'Branch not found' });
     }
+    m = /^\/pulls\/(\d+)$/.exec(rest);
+    if (req.method === 'GET' && m) {
+      const pull = this.pulls.find((candidate) => candidate.number === Number(m?.[1]));
+      if (!pull) return send(404, { message: 'Not Found' });
+      return send(200, {
+        number: pull.number,
+        state: this.prState === 'open' ? 'open' : 'closed',
+        merged: this.prState === 'merged',
+        head: { ref: pull.head, sha: this.refs.get(pull.head) },
+      });
+    }
+    m = /^\/commits\/([0-9a-f]{40})\/check-runs$/.exec(rest);
+    if (req.method === 'GET' && m) {
+      if (this.checksForbidden)
+        return send(403, { message: 'Resource not accessible by personal access token' });
+      const runs = this.checkRuns.get(m[1] as string) ?? [];
+      return send(200, { total_count: runs.length, check_runs: runs });
+    }
+    if (req.method === 'GET' && rest === '/actions/runs') {
+      const runs = this.workflowRuns.get(url.searchParams.get('head_sha') ?? '') ?? [];
+      return send(200, { workflow_runs: runs.map(({ jobs: _jobs, ...run }) => run) });
+    }
+    m = /^\/actions\/runs\/(\d+)\/jobs$/.exec(rest);
+    if (req.method === 'GET' && m) {
+      const run = [...this.workflowRuns.values()].flat().find((r) => r.id === Number(m?.[1]));
+      return send(200, { jobs: run?.jobs ?? [] });
+    }
+    m = /^\/actions\/jobs\/(\d+)\/logs$/.exec(rest);
+    if (req.method === 'GET' && m) {
+      if (!this.logs.has(Number(m[1]))) return send(404, { message: 'Not Found' });
+      res.writeHead(302, { location: `${this.url}/blob-logs/${m[1]}` });
+      res.end();
+      return;
+    }
+    m = /^\/git\/refs\/heads\/(.+)$/.exec(rest);
+    if (req.method === 'PATCH' && m) {
+      const name = m[1] as string;
+      const current = this.refs.get(name);
+      if (!current) return send(422, { message: 'Reference does not exist' });
+      const next = this.commits.get(body.sha);
+      if (!body.force && next?.parents[0]?.sha !== current) {
+        return send(422, { message: 'Update is not a fast forward' });
+      }
+      this.refs.set(name, body.sha);
+      return send(200, { object: { sha: body.sha } });
+    }
     if (req.method === 'GET' && rest === '/pulls') {
       const head = url.searchParams.get('head') ?? '';
       const owner = this.repo.split('/')[0];
       return send(
         200,
-        this.pulls.filter((pull) => `${owner}:${pull.head}` === head),
+        this.pulls
+          .filter((pull) => `${owner}:${pull.head}` === head)
+          .map((pull) => ({ ...pull, state: this.prState === 'open' ? 'open' : 'closed' })),
       );
     }
     if (req.method === 'POST' && rest === '/pulls') {
