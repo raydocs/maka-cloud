@@ -1,18 +1,17 @@
 import { randomUUID } from 'node:crypto';
-import type { SessionEvent } from '@maka/core/events';
-import type { ModelCallAttempt } from '@maka/core/model-call-attempt';
-import type { ThinkingLevel } from '@maka/core/model-thinking';
-import { AiSdkBackend } from '@maka/runtime/ai-sdk-backend';
-import { buildProviderOptions, getAIModel } from '@maka/runtime/model-factory';
 import {
+  AiSdkBackend,
   type BackendFactoryContext,
-  BackendRegistry,
-  SessionManager,
-} from '@maka/runtime/session-manager';
-import type { MakaTool } from '@maka/runtime/tool-runtime';
-import { createSqliteAgentRunStore } from '@maka/storage/agent-run-store';
-import { createWorkspaceRuntimeStore } from '@maka/storage/runtime-event-persistence';
-import { createSessionStore } from '@maka/storage/session-store';
+  type MakaEngine,
+  type MakaSessionRuntime,
+  type MakaTool,
+  type ModelCallAttempt,
+  type SessionEvent,
+  type ThinkingLevel,
+  TsInProcessEngine,
+  buildProviderOptions,
+  getAIModel,
+} from '@maka-cloud/maka-engine';
 import {
   CONNECTION_SLUG,
   conductorConnection,
@@ -27,6 +26,8 @@ import type { ConductorState, SessionKind } from './state.js';
 export interface MakaHostOptions {
   /** Maka's storage root (sessions, run ledger, runtime events). */
   root: string;
+  /** Defaults to `TsInProcessEngine`. Tests may pass a fake. */
+  engine?: MakaEngine;
   access: ModelAccess;
   state: ConductorState;
   /** The tools a session of this kind sees. Must return the same definitions every time. */
@@ -56,8 +57,7 @@ export interface MakaHostOptions {
  *   no redacted_thinking is dropped by a checkpoint (paths 3, 4, 5).
  */
 export class MakaHost {
-  private readonly manager: SessionManager;
-  private readonly runStore: ReturnType<typeof createSqliteAgentRunStore>;
+  private readonly runtime: MakaSessionRuntime;
   private readonly connection;
   private readonly identity: `sha256:${string}`;
   private readonly now: () => number;
@@ -67,21 +67,17 @@ export class MakaHost {
     this.now = options.now ?? Date.now;
     this.connection = conductorConnection(options.access);
     this.identity = providerStateIdentity(options.access);
-    this.runStore = createSqliteAgentRunStore(options.root);
-    const backends = new BackendRegistry();
-    backends.register('ai-sdk', {
-      prepare: async () => ({
-        providerStateIdentity: this.identity,
-        build: (ctx: BackendFactoryContext) => this.buildBackend(ctx),
-      }),
-    });
-    this.manager = new SessionManager({
-      store: createSessionStore(options.root),
-      runStore: this.runStore,
-      runtimeEventStore: createWorkspaceRuntimeStore(options.root),
-      backends,
-      newId: () => randomUUID(),
+    const engine = options.engine ?? new TsInProcessEngine();
+    this.runtime = engine.openSessionRuntime({
+      root: options.root,
       now: this.now,
+      newId: () => randomUUID(),
+      backend: {
+        prepare: async () => ({
+          providerStateIdentity: this.identity,
+          build: (ctx: BackendFactoryContext) => this.buildBackend(ctx),
+        }),
+      },
     });
   }
 
@@ -92,7 +88,7 @@ export class MakaHost {
     thinkingLevel: ThinkingLevel;
     runId: string | null;
   }): Promise<string> {
-    const session = await this.manager.createSession({
+    const session = await this.runtime.createSession({
       cwd: this.options.root,
       llmConnectionId: connectionIdOf(this.options.access),
       llmConnectionSlug: CONNECTION_SLUG,
@@ -110,16 +106,16 @@ export class MakaHost {
   }
 
   send(makaSessionId: string, text: string, maxSteps: number): AsyncIterable<SessionEvent> {
-    return this.manager.sendMessage(makaSessionId, { turnId: randomUUID(), text, maxSteps });
+    return this.runtime.sendMessage(makaSessionId, { turnId: randomUUID(), text, maxSteps });
   }
 
   async stop(makaSessionId: string): Promise<void> {
-    await this.manager.stopSession(makaSessionId);
+    await this.runtime.stopSession(makaSessionId);
   }
 
   /** Settles turns a previous process left running, so their sessions take new turns. */
   async recoverInterrupted(): Promise<string[]> {
-    return this.manager.recoverInterruptedSessions();
+    return this.runtime.recoverInterruptedSessions();
   }
 
   /** Whether model requests are charged by the gateway when they settle. */
@@ -139,7 +135,7 @@ export class MakaHost {
     for (const makaSessionId of [...this.gatewayClients.keys()]) {
       this.releaseModelAccess(makaSessionId);
     }
-    await this.runStore.close?.();
+    await this.runtime.close();
   }
 
   private gatewayFetch(makaSessionId: string): typeof fetch {
