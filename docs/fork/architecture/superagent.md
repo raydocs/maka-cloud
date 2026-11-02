@@ -273,6 +273,10 @@ Intake drops a payload it cannot parse. It does not invent a subject.
 | `lastStepSignature` | string \| null | Watchdog W3. |
 | `stepRepeats` | int | |
 | `nudges` | int? | W2: one nudge already delivered. JSON only; no schema bump. |
+| `doneClaim` | claim? | Worker "done" is a claim until signals read back. JSON only. |
+| `reviewReceipts` | receipt[]? | CLEAR/BLOCK pinned to a head SHA. JSON only. |
+| `pausedFrom` / `pausedVerified` | state? / bool? | Owner pause, only after a verified stop. JSON only. |
+| `lastLive` | facts? | Last live PR/CI snapshot the lead re-read. JSON only. |
 | `usage` | `{ tokens, usdMicros, wallMs }` | |
 | `createdAt` / `updatedAt` / `retiredAt` | ms | |
 
@@ -291,6 +295,7 @@ Frozen at spawn. Default intensity is **`observe`**.
 | `budgets` | `{ tokens?, usd?, wallMs? }` | Hard. Exceeding → W4, worker stops. |
 | `strength` | `explicit` \| `inferred` | From the article / DSH. Inferred work stays `observe` unless a person raises it. |
 | `allowNoCi` | bool? | Scratch / no-CI repos only. Merge treats an empty Checks/Statuses list as green when set; default refuse. |
+| `ownerPause` | bool? | Owner may pause this worker. Default true. `false` refuses `Superagent.pause`. |
 
 ### 4.6 Approval and audit
 
@@ -449,6 +454,11 @@ stateDiagram-v2
   stuck --> retiring: max restarts / person stop
   crashed --> retiring: max restarts
   running --> retiring: subject closed / person stop
+  sleeping --> paused: owner pause after verified stop
+  running --> paused: owner pause after box stopped
+  awaiting_approval --> paused: owner pause
+  paused --> sleeping: explicit resume
+  paused --> awaiting_approval: explicit resume to pausedFrom
   retiring --> retired: sandbox released, sub retired
   retired --> [*]
 ```
@@ -464,7 +474,8 @@ Rules:
    in `seq` order.
 4. A host restart calls `restore()`: `running` / `waking` / `awaiting_approval`
    stay; `spawning` retries start; `crashed` waits for the watchdog;
-   `sleeping` stays asleep.
+   `sleeping` stays asleep; `paused` stays paused until an explicit
+   `resume()`.
 5. Subject close → `retiring`. The handler gets one `subject_closed` event to
    write a last note. It cannot open a new PR on the way out.
 6. A person stop withdraws the Mandate. Resume after stop requires a new
@@ -472,6 +483,9 @@ Rules:
    Ticket under the same Mandate; we do **not**, because a paid product must
    not silently regain `act` after the owner stopped it.
 7. Intensity `observe` may read and comment; it may not push, merge, or spend.
+8. Owner pause is a verified stop (`pausedVerified`), not a prompt. Drain
+   and the watchdog do not run the worker while it is paused. Only
+   `Superagent.resume` ends it. See §18.
 
 ### 6.1 Assignment (execution)
 
@@ -568,7 +582,7 @@ Supervisor principle: **rules decide, models describe**.
 | Id | Finding | Condition | Action |
 |---|---|---|---|
 | W1 | `crashed` | `state=running` and `now - lastHeartbeatAt > heartbeatAfterMs`, or handler threw | Restart if `generation < maxRestarts` (3), else escalate |
-| W2 | `stuck` | `running`/`waking` and `now - lastProgressAt > stallAfterMs` | Nudge once (enqueue `watchdog_nudge`, do not mark stuck). Escalate on the next stall. A worker whose memory or plan self-reports `waiting` is exempt. |
+| W2 | `stuck` | `running`/`waking` and `now - lastProgressAt > stallAfterMs` | Nudge once (enqueue `watchdog_nudge`, do not mark stuck). Escalate on the next stall. A worker whose memory or plan self-reports `waiting` is exempt. A `paused` worker is skipped (no nudge). |
 | W3 | `looping` | `lastStepSignature` repeated `loopRepeat` (3) times without progress | Escalate; optional restart once |
 | W4 | `over_budget` | usage ≥ any Mandate budget | Stop handler, escalate, no restart |
 | W5 | `subject_closed` | close event not yet retiring | Force `retiring` |
@@ -621,6 +635,13 @@ Checks + Statuses for that SHA and refuses failed, pending, or all-skipped
 runs. An empty check list is never green unless the mandate sets
 `allowNoCi`. `HttpGitHost.merge` sends `sha` on `PUT /pulls/N/merge` so
 GitHub rejects a moved head.
+
+Merge approval also requires a **review receipt**: a fresh, non-interactive
+reviewer session pinned to that exact head SHA that printed `VERDICT: CLEAR`
+or `VERDICT: BLOCK` as its last verdict line. A missing `VERDICT` line is
+not a receipt. `Safety.gate` returns `review_required` until a CLEAR
+receipt for that SHA is on the worker; the receipt is written to audit.
+`evaluateMergeGate` refuses the GitHub merge without it.
 
 `observe` workers cannot reach these actions; the gate refuses before an
 approval is even opened.
@@ -817,13 +838,13 @@ Filled in by the implementation PR; kept accurate here:
 | Subscription table + pass-through | implemented |
 | Router admission + `HeuristicJudge` | implemented |
 | `ModelJudge` | injectable `JudgeClient` + `FetchJudgeClient`. Superagent constructor stays heuristic (no keys). `createJudgeFromEnv` uses ModelJudge with a heuristic prefilter when a key is present; `=heuristic` / `=model` force one path. Decisions log `confidence` and source. Optional read-only `RouterInspect` (`git log`, CI URL) |
-| Worker state machine, inbox, sleep/wake/retire | implemented |
+| Worker state machine, inbox, sleep/wake/retire | implemented. `paused` is a first-class state (existing `state` column; no schema bump) |
 | Durable memory / plan / transcript pointer | implemented |
 | Sqlite restore | implemented |
 | Watchdog W1–W6 | implemented. W2 nudges once before escalate; `waiting` in memory/plan is exempt |
 | Drain coalesce | implemented: one handler call per backlog; `approval_granted` wins |
 | Spawn admission | `maxBoxes` (live sandboxRef workers) and `spendCapUsd` (tenant ledger) before spawn |
-| Mandate + approval gate + audit | implemented |
+| Mandate + approval gate + audit | implemented. Merge also needs a CLEAR receipt at the head SHA |
 | Tenant scoping | implemented |
 | Metering hooks | implemented; P4 append-only tenant ledger in `superagent.db` (`usage_events`, schema 2). **No cloud-server migration** |
 | Org Secrets | `OrgSecretPort`; `UnconfiguredOrgSecrets` default; `EnvOrgSecrets` for local/env. Never returns a raw secret |
@@ -842,6 +863,10 @@ Filled in by the implementation PR; kept accurate here:
 | Inline & Spill / Chain of Recall | implemented (`spillMemory` / `recallMemory`; spills on worker json, no schema bump) |
 | P5 hi device | interface + `OffHiDevice` only; not wired |
 | Speculative silent fix | not implemented (explicit non-goal) |
+| Done-signal contract | implemented. Kinds: merged / closed / published / command / file / url. Unpushed work refuses retire. Applies to PR, issue, and conversation subjects |
+| Review receipts | implemented. `FakeReviewer` in tests; hosts inject a non-interactive reviewer. Missing VERDICT = no receipt |
+| Owner pause | implemented. Verified stop, no W2 nudge, explicit resume only |
+| Freshness + lead channel | implemented. `reportToLead` re-reads live PR/CI; `LeadPort` is the only user channel; worker `userMessage` is dropped |
 
 ## 16. Open questions — decisions recorded (revisit with the owner)
 
@@ -875,3 +900,143 @@ overrides them.
   work as ideas. No code.
 - maka-cloud isolation, approvals, T28, duties, supervisor, #444, #452,
   #460: this fork, already in-tree.
+- [dori-superagent](https://github.com/sisyphuslabs/dori-superagent) (MIT,
+  sisyphuslabs). Ideas only: verifiable completion, review receipts, owner
+  pause, freshness, lead-only voice. No dori source is copied. See §18.
+
+## 18. Lessons from dori
+
+Source, ideas only (no code copied):
+[sisyphuslabs/dori-superagent](https://github.com/sisyphuslabs/dori-superagent)
+README, `src/harness.ts`, `src/store.ts`, `prompts/*.md`,
+`skills/dori-mode/references/{done-protocol,sessions}.md`, and
+`scripts/src/{done-flow,pause,freshness,host-guard,heavy-slot}.ts`.
+
+dori is a production harness on herdr + omo: one lead session talks to the
+human, each task is a lane, READY needs evidence, merge needs a CLEAR
+review receipt at the exact head plus green checks. The five rules below
+are now structural in `@maka-cloud/superagent`, not prompt text.
+
+### 18.1 Verifiable completion
+
+A worker `done` is a **claim**. `HandlerResult.done` is stored on the
+worker and is not retirement. `verifyDone` re-reads a Done-signal
+contract before the worker may retire:
+
+| Kind | Live check |
+|---|---|
+| `merged` | PR is merged and a merge SHA is present |
+| `closed` | Issue (or thread subject) is closed |
+| `published` | Package + version is on the registry the host injected |
+| `command` | Exit 0, optional stdout match |
+| `file` | Path exists; optional sha256 / JSON path |
+| `url` | HTTP status (default 200) and optional body match |
+
+An empty signal list or empty evidence string is refused. If the claim
+names a `workspaceDir` and `DoneWorld.unpushed` reports dirty or unpushed
+commits, retirement is refused. This applies to **non-PR subjects**
+(Q&A and research conversation threads use `file` / `url` / `command` /
+`closed`) the same way it applies to a pull request.
+
+Default `DoneWorld` only reads the local filesystem and `git` status.
+Hosts inject `pull` / `issue` / `published` / `command` / `fetch`.
+
+### 18.2 Review receipts
+
+A merge approval is invalid without a receipt. `Superagent.review` (and
+auto-review when a merge is proposed) runs a **fresh, non-interactive**
+`ReviewerPort` pinned to `{ repo, number, sha }`. The last line matching
+`VERDICT: CLEAR` or `VERDICT: BLOCK` becomes the receipt. **No VERDICT
+line means no receipt** — the reviewer's prose is not enough.
+
+`Safety.gate` on `merge` returns `review_required` until
+`hasClearReceipt(receipts, repo#n, sha)`. `evaluateMergeGate` and
+`HttpGitHost.merge` / `FakeGitHost.merge` refuse without a CLEAR receipt
+at that exact SHA. The receipt is appended to `worker.reviewReceipts` and
+audited as `review_receipt` or `review_no_verdict`. A later push changes
+the SHA, so the old receipt no longer matches.
+
+### 18.3 Owner pause
+
+`paused` is a first-class `WorkerState` (same sqlite `state` column; no
+schema bump). `Superagent.pause`:
+
+1. Refuses when `mandate.ownerPause === false`, or when the worker is
+   retired.
+2. If the worker has a sandbox, reads `getMachine`. A still-running box
+   is asked to `suspend`, then re-read. Still running → `box_still_running`.
+3. Without a box, `spawning` / `running` / `waking` → `still_active`.
+4. Records `pausedFrom`, `pausedVerified: true`, audits `paused`.
+
+Drain returns immediately on `paused` (inbox stays queued). The watchdog
+skips W1–W3 nudge/escalate while paused (subject-closed and over-budget
+still apply). **Only `Superagent.resume` ends a pause.** Resume restores
+`pausedFrom` unless that would jump back into an executing state, then
+drains.
+
+### 18.4 Freshness
+
+The lead must not report cached worker memory as current. `reportToLead`
+re-reads live facts (`liveFacts` hook and/or `DoneWorld.pull`) and
+compares them to `worker.lastLive`. A moved head, changed CI, a PR that
+merged since the last report, or a snapshot older than 15 minutes is
+flagged `STALE` in the lead message and in audit (`lead_report`).
+
+### 18.5 Lead-only-speaks-to-human (structural)
+
+This is not a prompt rule.
+
+- `WorkerContext` has no `LeadPort` and no `speak`.
+- `HandlerResult.userMessage` is dropped and audited
+  `worker_outbound_refused`. The lead is not called.
+- Router `answer` and `reportToLead` are the user-facing paths; both go
+  through `LeadPort.speak`.
+- Tests inject `RecordingLead`. Production default is `SilentLead` until
+  the host wires chat.
+
+### 18.6 Remaining dori items (not implemented)
+
+These stayed out of this pass. They are real gaps, not implicit next
+work.
+
+| dori piece | What it does | Why it is still a gap |
+|---|---|---|
+| Nudge at 10 / 20 / 40 minutes | Duty loop; escalate to the lead at 40 | We nudge once, then escalate. No timed schedule. |
+| herdr pane status | Read idle/working/blocked/done before send or done | We have Instabox `getMachine`, not a pane agent-state. Busy-pane queue-until-idle is drain coalesce, not herdr. |
+| LOST pane | Duty reports a vanished pane | No pane process to lose. |
+| READY evidence links as a CLI gate | `dori ready` refuses without `--evidence` | We verify signals at retire time; there is no separate READY command. |
+| Receipts on disk | `~/.dori/receipts/` | Receipts live on the worker JSON. |
+| Full-text answer ledger | `Lane.final` / `Lane.log` | Evidence blocks + audit; no per-lane answer file. |
+| host-guard | Refuse host-mutating lane commands | Isolation is Instabox + Mandate; no dori host-guard script. |
+| heavy-slot | Serialize expensive jobs | Spawn admission is `maxBoxes` / `spendCapUsd`, not a heavy-slot queue. |
+| 5-minute claim window | (sessions / done-flow) | Not ported. |
+| dori telemetry | Anonymous OTLP counts | Out of scope; never send tenant text. |
+
+### 18.7 Remaining DSH gaps
+
+Diff of this document against
+[DSH *000-philosophy*](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/docs/000-philosophy.md)
+and the article / prototype mapping already in §1–§16.
+
+Already aligned: two-level Router/Worker, subscription pass-through,
+Mandate, external watchdog, observe-by-default, one live owner per
+subject, honest merge/CI (now plus receipts), least-attention Router
+(unowned events only).
+
+Still open, on purpose or not yet built:
+
+| DSH / article | Our state |
+|---|---|
+| Feishu (and other chat) Source | GitHub + in-process chat/timer only. Email/Slack/Feishu remain a non-goal (§1.1). |
+| Router-turn batching of unowned Triggers | Unowned events are still judged one by one. Owned drain coalesces. |
+| Panel that shows only what needs a person | No product panel. Stuck cards + pending approvals are the stand-in. |
+| Written team-rule proactive work | We do not start work nobody asked for. There is no "record-only proactive" rule file. |
+| One concrete question at a time | Approvals are bound-text; there is no structured one-question UX. |
+| Reopen an ended Ticket under the same Mandate | Explicitly refused (§6 rule 6). |
+| Admission `maxWorkers` default 3 | We have `maxBoxes` and `spendCapUsd`, not a global worker cap of 3. |
+| Prototype `danger-full-access` on the operator OS user | We do **not**. Untrusted work stays in Instabox. |
+
+No sqlite table migration in this pass. New data lives on the worker
+JSON (`doneClaim`, `reviewReceipts`, `pausedFrom`, `pausedVerified`,
+`lastLive`, `nudges`). `paused` is a new value of the existing `state`
+column. Flag if a later change needs `user_version` 3.

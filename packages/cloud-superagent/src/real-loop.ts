@@ -21,6 +21,7 @@ import type { BoxExecLog } from './loop-box.js';
 import { formatBoxExec } from './loop-box.js';
 import { HttpGitHost, LOOP_SEED_ENV } from './loop-github.js';
 import type { CiVerdict } from './loop-github.js';
+import { FakeReviewer } from './review.js';
 import { Superagent } from './runtime.js';
 import {
   HttpSandbox,
@@ -176,6 +177,7 @@ export async function runRealLoop(options: RealLoopOptions = {}): Promise<RealLo
       handler,
       sandbox,
       sandboxRef: machineId,
+      reviewer: new FakeReviewer(),
       // Scratch CLI always spawns with `act` so the worker may push a
       // worker branch. HeuristicJudge's default is observe (no push).
       judge: {
@@ -249,8 +251,15 @@ export async function runRealLoop(options: RealLoopOptions = {}): Promise<RealLo
       const comment = await agent.ingest(reviewComment('inv_loop', 7, repoName));
       if (comment.result === 'passthrough') report.steps.push('review-resume');
     }
-    const waiting = agent.store.worker('inv_loop', opened.workerId);
     const headSha = handler.lastPush.get(opened.workerId)?.sha;
+    if (publish && pr && headSha) {
+      await agent.review('inv_loop', opened.workerId, {
+        repo: repoName,
+        number: pr.number,
+        sha: headSha,
+      });
+    }
+    const waiting = agent.store.worker('inv_loop', opened.workerId);
     if (publish && pr && waiting && headSha) {
       const action = mergeAction(repoName, pr.number, headSha);
       const held = agent.safety.gate(waiting, action, Date.now());

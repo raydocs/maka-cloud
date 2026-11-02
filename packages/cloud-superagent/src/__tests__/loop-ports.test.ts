@@ -15,6 +15,11 @@ import {
 } from '../loop-github.js';
 import { initLocalRepo } from '../workspace.js';
 import { scratchFiles } from '../loop.js';
+import type { ReviewReceipt } from '../review.js';
+
+function clearReceipt(sha: string, pr = 'acme/scratch#4'): ReviewReceipt {
+  return { pr, sha, verdict: 'CLEAR', at: 1, summary: 'VERDICT: CLEAR' };
+}
 
 test('githubTokenProblem refuses classic tokens and empty values', () => {
   assert.match(githubTokenProblem(undefined) ?? '', /not set/);
@@ -163,15 +168,31 @@ test('summarizeCi treats an empty Checks/Statuses list as no-checks, not failure
 });
 
 test('evaluateMergeGate refuses failed, pending, skipped and no-checks unless allowNoCi', () => {
-  assert.equal(evaluateMergeGate({ verdict: 'success', detail: 'ok' }).ok, true);
-  assert.equal(evaluateMergeGate({ verdict: 'no-checks', detail: 'empty' }).ok, false);
+  const receipt = clearReceipt('abc');
+  assert.equal(evaluateMergeGate({ verdict: 'success', detail: 'ok' }).ok, false);
   assert.equal(
-    evaluateMergeGate({ verdict: 'no-checks', detail: 'empty' }, { allowNoCi: true }).ok,
+    evaluateMergeGate({ verdict: 'success', detail: 'ok' }, { receipt, sha: 'abc' }).ok,
     true,
   );
-  assert.equal(evaluateMergeGate({ verdict: 'pending', detail: 'wait' }).ok, false);
-  assert.equal(evaluateMergeGate({ verdict: 'failure', detail: 'fail' }).ok, false);
-  assert.equal(evaluateMergeGate({ verdict: 'skipped', detail: 'skip' }).ok, false);
+  assert.equal(
+    evaluateMergeGate(
+      { verdict: 'success', detail: 'ok' },
+      { receipt: { ...receipt, verdict: 'BLOCK' }, sha: 'abc' },
+    ).ok,
+    false,
+  );
+  assert.equal(
+    evaluateMergeGate({ verdict: 'success', detail: 'ok' }, { receipt, sha: 'def' }).ok,
+    false,
+  );
+  assert.equal(evaluateMergeGate({ verdict: 'no-checks', detail: 'empty' }, { receipt }).ok, false);
+  assert.equal(
+    evaluateMergeGate({ verdict: 'no-checks', detail: 'empty' }, { allowNoCi: true, receipt }).ok,
+    true,
+  );
+  assert.equal(evaluateMergeGate({ verdict: 'pending', detail: 'wait' }, { receipt }).ok, false);
+  assert.equal(evaluateMergeGate({ verdict: 'failure', detail: 'fail' }, { receipt }).ok, false);
+  assert.equal(evaluateMergeGate({ verdict: 'skipped', detail: 'skip' }, { receipt }).ok, false);
 });
 
 test('HttpGitHost publishes blobs and opens a PR without putting the token on argv', async () => {
@@ -319,8 +340,9 @@ test('HttpGitHost.merge sends sha and refuses ungreen checks', async () => {
     baseUrl: `http://127.0.0.1:${port}`,
   });
   const sha = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  const receipt = clearReceipt(sha);
   try {
-    await git.merge({ repo: 'acme/scratch', number: 4, sha });
+    await git.merge({ repo: 'acme/scratch', number: 4, sha, receipt });
     const put = seen.find((row) => row.method === 'PUT');
     assert.deepEqual(put?.body, { merge_method: 'merge', sha });
     assert.deepEqual(git.merged, [4]);
@@ -329,7 +351,7 @@ test('HttpGitHost.merge sends sha and refuses ungreen checks', async () => {
     checks = { total_count: 0, check_runs: [] };
     seen.length = 0;
     await assert.rejects(
-      () => git.merge({ repo: 'acme/scratch', number: 4, sha }),
+      () => git.merge({ repo: 'acme/scratch', number: 4, sha, receipt }),
       /MERGE_REFUSED no checks/,
     );
     assert.equal(
@@ -337,19 +359,19 @@ test('HttpGitHost.merge sends sha and refuses ungreen checks', async () => {
       false,
     );
 
-    await git.merge({ repo: 'acme/scratch', number: 4, sha, allowNoCi: true });
+    await git.merge({ repo: 'acme/scratch', number: 4, sha, allowNoCi: true, receipt });
     assert.equal(git.merged.length, 2);
 
     status = { state: 'failure', total_count: 1, statuses: [{ state: 'failure' }] };
     checks = { total_count: 0, check_runs: [] };
     await assert.rejects(
-      () => git.merge({ repo: 'acme/scratch', number: 4, sha }),
+      () => git.merge({ repo: 'acme/scratch', number: 4, sha, receipt }),
       /MERGE_REFUSED a check or status failed/,
     );
 
     status = { state: 'pending', total_count: 1, statuses: [{ state: 'pending' }] };
     await assert.rejects(
-      () => git.merge({ repo: 'acme/scratch', number: 4, sha }),
+      () => git.merge({ repo: 'acme/scratch', number: 4, sha, receipt }),
       /MERGE_REFUSED checks still running/,
     );
 
@@ -359,8 +381,12 @@ test('HttpGitHost.merge sends sha and refuses ungreen checks', async () => {
       check_runs: [{ status: 'completed', conclusion: 'skipped', name: 'ci' }],
     };
     await assert.rejects(
-      () => git.merge({ repo: 'acme/scratch', number: 4, sha }),
+      () => git.merge({ repo: 'acme/scratch', number: 4, sha, receipt }),
       /MERGE_REFUSED every check was skipped/,
+    );
+    await assert.rejects(
+      () => git.merge({ repo: 'acme/scratch', number: 4, sha }),
+      /MERGE_REFUSED no review receipt/,
     );
   } finally {
     await new Promise<void>((resolve, reject) =>

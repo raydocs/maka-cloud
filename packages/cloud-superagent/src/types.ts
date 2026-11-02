@@ -23,6 +23,7 @@ export const WORKER_STATES = [
   'sleeping',
   'waking',
   'awaiting_approval',
+  'paused',
   'stuck',
   'crashed',
   'retiring',
@@ -105,6 +106,8 @@ export interface Mandate {
    * Scratch / no-CI repos only. Default is refuse (`no-checks` is not green).
    */
   allowNoCi?: boolean;
+  /** Owner may pause this worker. Default true. Set false to refuse pause. */
+  ownerPause?: boolean;
 }
 
 export interface Usage {
@@ -144,6 +147,14 @@ export interface WorkerRecord {
   stepRepeats: number;
   /** W2 nudges already delivered. One nudge, then escalate. JSON only; no schema bump. */
   nudges?: number;
+  /** Done is a claim until signals read back live. JSON only; no schema bump. */
+  doneClaim?: import('./done.js').DoneClaim;
+  /** CLEAR/BLOCK receipts pinned to a head SHA. JSON only; no schema bump. */
+  reviewReceipts?: import('./review.js').ReviewReceipt[];
+  pausedFrom?: WorkerState;
+  /** Pause is recorded only after the worker is verified stopped. */
+  pausedVerified?: boolean;
+  lastLive?: { sha?: string; ci?: string; prMerged?: boolean; at: number };
   usage: Usage;
   evidence: EvidenceBlock[];
   createdAt: number;
@@ -251,6 +262,13 @@ export interface HandlerResult {
   usage?: Partial<Usage>;
   evidence?: EvidenceBlock[];
   action?: ProposedAction;
+  /** Claim only. Superagent re-reads signals before retiring. */
+  done?: import('./done.js').DoneClaim;
+  /**
+   * Forbidden. Workers have no outbound user channel. Superagent drops this
+   * and audits `worker_outbound_refused`.
+   */
+  userMessage?: string;
 }
 
 export interface WorkerContext {
@@ -260,6 +278,10 @@ export interface WorkerContext {
   orgSecrets: OrgSecretPort;
   /** Chain of Recall: spilled chunks plus the inline window. */
   recall: () => string;
+  /**
+   * Intentionally absent: workers have no outbound user channel.
+   * `LeadPort.speak` lives on Superagent, never here.
+   */
 }
 
 export interface WorkerHandler {
@@ -340,6 +362,7 @@ export const LIVE_STATES: readonly WorkerState[] = [
   'sleeping',
   'waking',
   'awaiting_approval',
+  'paused',
   'stuck',
   'crashed',
 ];

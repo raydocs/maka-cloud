@@ -87,7 +87,19 @@ export interface GitHostPort {
     number?: number;
   }): Promise<PullRequestResult>;
   ciLink(repo: string, sha: string): string;
-  merge?(input: { repo: string; number: number; sha: string; allowNoCi?: boolean }): Promise<void>;
+  merge?(input: {
+    repo: string;
+    number: number;
+    sha: string;
+    allowNoCi?: boolean;
+    receipt?: import('./review.js').ReviewReceipt;
+  }): Promise<void>;
+  readPull?(input: {
+    repo: string;
+    number: number;
+  }): Promise<{ merged: boolean; mergeSha?: string }>;
+  readIssue?(input: { repo: string; number: number }): Promise<{ closed: boolean }>;
+  readCi?(sha: string, repo?: string): Promise<import('./loop-github.js').CiStatus>;
 }
 
 export const LOOP_TIMING_PHASES = [
@@ -260,9 +272,32 @@ export class FakeGitHost implements GitHostPort {
     return `https://github.com/${repo}/commit/${sha}/checks`;
   }
 
-  async merge(input: { number: number; sha: string }): Promise<void> {
+  async merge(input: {
+    number: number;
+    sha: string;
+    receipt?: import('./review.js').ReviewReceipt;
+  }): Promise<void> {
+    if (!input.receipt || input.receipt.verdict !== 'CLEAR' || input.receipt.sha !== input.sha) {
+      throw new Error('MERGE_REFUSED no review receipt at head');
+    }
     this.merged.push(input.number);
     this.mergedShas.push(input.sha);
+  }
+
+  async readPull(input: { number: number }): Promise<{ merged: boolean; mergeSha?: string }> {
+    const index = this.merged.indexOf(input.number);
+    return {
+      merged: index >= 0,
+      mergeSha: index >= 0 ? this.mergedShas[index] : undefined,
+    };
+  }
+
+  async readIssue(): Promise<{ closed: boolean }> {
+    return { closed: false };
+  }
+
+  async readCi(): Promise<import('./loop-github.js').CiStatus> {
+    return { verdict: 'success', detail: 'fake' };
   }
 }
 
@@ -513,11 +548,15 @@ export class CodingLoopHandler implements WorkerHandler {
       }
       if (this.ports.git.merge) {
         try {
+          const receipt = ctx.worker.reviewReceipts?.find(
+            (row) => row.sha === sha && row.verdict === 'CLEAR',
+          );
           await this.ports.git.merge({
             repo: parsed?.repo || repo,
             number: parsed?.number ?? pr.number,
             sha,
             allowNoCi: ctx.worker.mandate.allowNoCi === true,
+            receipt,
           });
         } catch (error) {
           const message = error instanceof Error ? error.message : 'MERGE_REFUSED';

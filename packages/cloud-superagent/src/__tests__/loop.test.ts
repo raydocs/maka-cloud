@@ -17,6 +17,7 @@ import {
   scratchFiles,
   workerBranch,
 } from '../loop.js';
+import { FakeReviewer } from '../review.js';
 import { Superagent } from '../runtime.js';
 import { FakeSandbox } from '../sandbox.js';
 import { actMandate, observeMandate } from '../types.js';
@@ -37,6 +38,7 @@ async function loopRig(intensity: 'act' | 'observe' = 'act') {
   const agent = new Superagent({
     handler,
     sandbox,
+    reviewer: new FakeReviewer(),
     ids: sequentialIds(200),
     admission: { allowActors: ['alice', 'bob'] },
     judge: {
@@ -146,7 +148,15 @@ test('merge stays held until the owner approves the exact bound text', async () 
   assert.deepEqual(parseMergeBound(action.boundText), { repo: REPO, number: pr.number, sha });
   const worker = agent.worker(TENANT, opened.workerId);
   assert.ok(worker);
-  const held = agent.safety.gate(worker, action, Date.now());
+  const reviewed = await agent.review(TENANT, opened.workerId, {
+    repo: REPO,
+    number: pr.number,
+    sha,
+  });
+  assert.equal(reviewed.ok, true);
+  const current = agent.worker(TENANT, opened.workerId);
+  assert.ok(current);
+  const held = agent.safety.gate(current, action, Date.now());
   assert.equal(held.allowed, false);
   if (held.allowed || held.reason !== 'held') return;
   const moved = mergeAction(REPO, pr.number, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');

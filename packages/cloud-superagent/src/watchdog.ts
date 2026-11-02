@@ -28,6 +28,7 @@ export function evaluateWorker(
   if (budget) {
     return finding(worker, 'over_budget', 'stop', `Budget ${budget} exhausted.`);
   }
+  if (worker.state === 'paused') return undefined;
   if (isLiveState(worker.state) && worker.stepRepeats >= settings.loopRepeat) {
     return finding(
       worker,

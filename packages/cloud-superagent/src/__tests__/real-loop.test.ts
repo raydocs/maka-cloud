@@ -115,7 +115,7 @@ test('live GitHub host opens a PR through a mock API and does not auto-merge', a
       if (method === 'POST' && url.endsWith('/git/blobs')) return reply(201, { sha: 'blob1' });
       if (method === 'POST' && url.endsWith('/git/trees')) return reply(201, { sha: 'tree222' });
       if (method === 'POST' && url.endsWith('/git/commits'))
-        return reply(201, { sha: 'commit999' });
+        return reply(201, { sha: 'abcdef0123456789abcdef0123456789abcdef01' });
       if (method === 'GET' && url.includes('/git/ref/heads/maka')) {
         return branchExists
           ? reply(200, { object: { sha: 'old' } })
@@ -241,7 +241,7 @@ test('live GitHub seeds an empty private scratch repo then holds merge', async (
       if (method === 'GET' && url.includes('/git/ref/heads/main')) {
         return empty
           ? reply(409, { message: 'Git Repository is empty.' })
-          : reply(200, { object: { sha: 'seeded1' } });
+          : reply(200, { object: { sha: '1111111111111111111111111111111111111111' } });
       }
       if (method === 'GET' && url.includes('/git/commits/')) {
         return reply(200, { tree: { sha: 'tree-seed' } });
@@ -252,7 +252,11 @@ test('live GitHub seeds an empty private scratch repo then holds merge', async (
       }
       if (method === 'POST' && url.endsWith('/git/trees')) return reply(201, { sha: 'tree-new' });
       if (method === 'POST' && url.endsWith('/git/commits'))
-        return reply(201, { sha: empty ? 'seeded1' : 'commit999' });
+        return reply(201, {
+          sha: empty
+            ? '1111111111111111111111111111111111111111'
+            : 'abcdef0123456789abcdef0123456789abcdef01',
+        });
       if (method === 'GET' && url.includes('/git/ref/heads/maka')) {
         return branchExists
           ? reply(200, { object: { sha: 'old' } })

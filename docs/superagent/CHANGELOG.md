@@ -5,6 +5,15 @@ Every behavior change under `packages/cloud-superagent` must add an entry
 in the same commit. `changelog.test.ts` fails the package suite when this
 file is missing from the branch diff.
 
+## 2026-11-02 02:39 MST — cursor/superagent-real-loop-51be
+
+- **PR:** none ([compare](https://github.com/raydocs/maka-cloud/compare/main...cursor/superagent-real-loop-51be))
+- **What:** Lessons from dori: Done-signal contract + unpushed check (PR, issue, conversation); review receipts (`VERDICT: CLEAR\|BLOCK`) pinned to head SHA as a merge-approval precondition; owner `paused` state with verified stop, no W2 nudge, explicit resume; lead reports re-read live PR/CI and flag STALE; workers have no outbound user channel (`LeadPort` only). Architecture §18.
+- **Why:** User request after the merge-gate task; study of [dori-superagent](https://github.com/sisyphuslabs/dori-superagent) README / harness / store / prompts / done-protocol / sessions / done-flow / pause / freshness / host-guard / heavy-slot.
+- **Tests:** 117 passed in `@maka-cloud/superagent` (`test:dist`)
+- **Live:** not run in this environment
+- **Migrations / risk:** none. No sqlite `user_version` bump. New fields are worker JSON. `paused` is a new value of the existing `state` column.
+
 ## 2026-11-02 02:26 MST — cursor/superagent-real-loop-51be — 3fd50604e, 8aaaaaf8a
 
 - **PR:** none ([compare](https://github.com/raydocs/maka-cloud/compare/main...cursor/superagent-real-loop-51be))

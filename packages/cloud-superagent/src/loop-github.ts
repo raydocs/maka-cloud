@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import type { GitHostPort, PullRequestResult, PushResult } from './loop.js';
 import { FakeGitHost } from './loop.js';
+import type { ReviewReceipt } from './review.js';
 import { redactSecret } from './sandbox.js';
 
 const run = promisify(execFile);
@@ -198,15 +199,44 @@ export class HttpGitHost implements GitHostPort {
     return summarizeCi(status, checks);
   }
 
+  async readPull(input: {
+    repo: string;
+    number: number;
+  }): Promise<{ merged: boolean; mergeSha?: string }> {
+    const repo = this.defaultRepo ?? input.repo;
+    const pull = await this.api<{ merged?: boolean; merge_commit_sha?: string | null }>(
+      'GET',
+      `/repos/${repo}/pulls/${input.number}`,
+    );
+    return {
+      merged: pull.merged === true,
+      mergeSha: pull.merge_commit_sha ?? undefined,
+    };
+  }
+
+  async readIssue(input: { repo: string; number: number }): Promise<{ closed: boolean }> {
+    const repo = this.defaultRepo ?? input.repo;
+    const issue = await this.api<{ state?: string }>(
+      'GET',
+      `/repos/${repo}/issues/${input.number}`,
+    );
+    return { closed: issue.state === 'closed' };
+  }
+
   async merge(input: {
     repo: string;
     number: number;
     sha: string;
     allowNoCi?: boolean;
+    receipt?: ReviewReceipt;
   }): Promise<void> {
     const repo = this.defaultRepo ?? input.repo;
     const ci = await this.readCi(input.sha, repo);
-    const gate = evaluateMergeGate(ci, { allowNoCi: input.allowNoCi === true });
+    const gate = evaluateMergeGate(ci, {
+      allowNoCi: input.allowNoCi === true,
+      receipt: input.receipt,
+      sha: input.sha,
+    });
     if (!gate.ok) throw new Error(`MERGE_REFUSED ${gate.reason}`);
     await this.api('PUT', `/repos/${repo}/pulls/${input.number}/merge`, {
       merge_method: 'merge',
@@ -427,8 +457,14 @@ export type MergeGateResult =
  */
 export function evaluateMergeGate(
   ci: CiStatus,
-  options: { allowNoCi?: boolean } = {},
+  options: { allowNoCi?: boolean; receipt?: ReviewReceipt; sha?: string } = {},
 ): MergeGateResult {
+  if (!options.receipt || options.receipt.verdict !== 'CLEAR') {
+    return { ok: false, reason: 'no review receipt at head', verdict: ci.verdict };
+  }
+  if (options.sha && options.receipt.sha !== options.sha) {
+    return { ok: false, reason: 'review receipt sha mismatch', verdict: ci.verdict };
+  }
   if (ci.verdict === 'success') return { ok: true, verdict: ci.verdict };
   if (ci.verdict === 'no-checks' && options.allowNoCi) {
     return { ok: true, verdict: ci.verdict };

@@ -91,6 +91,35 @@ export {
   type LocalLoopOptions,
   type LocalLoopReport,
 } from './local-loop.js';
+export {
+  defaultDoneWorld,
+  gitUnpushed,
+  readDoneFile,
+  verifyDone,
+  DONE_KINDS,
+  type DoneClaim,
+  type DoneKind,
+  type DoneSignal,
+  type DoneWorld,
+} from './done.js';
+export {
+  FakeReviewer,
+  hasClearReceipt,
+  parseReviewVerdict,
+  prRef,
+  receiptFromReview,
+  type ReviewReceipt,
+  type ReviewerPort,
+} from './review.js';
+export { formatLeadReport, freshnessOf, type LiveFacts } from './freshness.js';
+export {
+  RecordingLead,
+  SilentLead,
+  workerOutboundText,
+  type LeadMessage,
+  type LeadPort,
+} from './lead.js';
+export { boxLooksRunning, isPauseActive, resumeState, PAUSE_ACTIVE } from './pause.js';
 export { overBudget, RISKY_ACTIONS, Safety } from './safety.js';
 export { MemorySuperagentStore } from './memory-store.js';
 export {
