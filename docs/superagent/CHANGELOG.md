@@ -8,7 +8,7 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
-## 2026-11-02 12:15 MST — cursor/superagent-shared-box-51be
+## 2026-11-02 12:15 MST — cursor/superagent-shared-box-51be — 285bcb971
 
 - **PR:** [#472](https://github.com/raydocs/maka-cloud/pull/472)
 - **What:** `biome format` on `box-pool.ts` and `box-pool.test.ts`. Merged #471 W2 two-tick host test and #466 `.setup-*` cleanup.
