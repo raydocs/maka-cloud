@@ -89,9 +89,22 @@ export class RecordingJudge implements RouterJudge {
   }
 }
 
+export interface ModelCompletion {
+  text: string;
+  usage: {
+    inputTokens: number;
+    outputTokens: number;
+    tokens: number;
+    usdMicros: number;
+    wallMs: number;
+    model: string;
+  };
+}
+
 /** Injectable cheap Router model. Tests pass a fake client; no API keys live here. */
 export interface JudgeClient {
   complete(prompt: string): Promise<string>;
+  completeDetailed?(prompt: string): Promise<ModelCompletion>;
 }
 
 const ModelDecision = z.object({

@@ -273,10 +273,12 @@ export class CodingLoopHandler implements WorkerHandler {
   private readonly workspaces: WorkspaceStore;
   private readonly handles = new Map<string, WorkspaceHandle>();
   readonly lastPr = new Map<string, PullRequestResult>();
+  readonly lastPush = new Map<string, PushResult>();
   readonly lastTimings: LoopTimings = emptyTimings();
   lastExecs: BoxExecLog[] = [];
   lastPatch = '';
   lastPublishDir: string | null = null;
+  lastUsage: CoderResult['usage'];
 
   constructor(private readonly ports: LoopPorts) {
     this.workspaces = ports.workspaces ?? new GitCloneStore();
@@ -343,11 +345,19 @@ export class CodingLoopHandler implements WorkerHandler {
       if (boxed) await boxed.writeFiles(result.files);
       return result;
     });
+    this.lastUsage = coded.usage;
     evidence.push({
       kind: 'step',
       label: 'box-edit',
       body: `${coded.summary}\n${coded.changed.join('\n')}`,
     });
+    if (coded.usage) {
+      evidence.push({
+        kind: 'step',
+        label: 'model-usage',
+        body: formatModelUsage(coded.usage),
+      });
+    }
 
     const testCommand = this.ports.testCommand ?? 'node add.test.js';
     const tested = await this.timed('test', async () => {
@@ -460,6 +470,7 @@ export class CodingLoopHandler implements WorkerHandler {
       body: formatPrBody(worker, evidence, pushed),
       number: this.lastPr.get(worker.workerId)?.number,
     });
+    this.lastPush.set(worker.workerId, pushed);
     this.lastPr.set(worker.workerId, pr);
     const ci = this.ports.git.ciLink(repo, pushed.sha);
     evidence.push({ kind: 'artifact', label: 'CI', body: ci, path: pr.url });
@@ -524,6 +535,7 @@ export class CodingLoopHandler implements WorkerHandler {
     this.lastExecs = [];
     this.lastPatch = '';
     this.lastPublishDir = null;
+    this.lastUsage = undefined;
   }
 
   private async timed<T>(
@@ -581,6 +593,24 @@ function boxTest(
     ].join('\n'),
     command,
   };
+}
+
+export function formatModelUsage(usage: {
+  tokens?: number;
+  usdMicros?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+}): string {
+  const parts = [
+    usage.inputTokens !== undefined ? `input=${usage.inputTokens}` : undefined,
+    usage.outputTokens !== undefined ? `output=${usage.outputTokens}` : undefined,
+    `tokens=${usage.tokens ?? 0}`,
+    `usd_micros=${usage.usdMicros ?? 0}`,
+    usage.usdMicros !== undefined
+      ? `usd=${((usage.usdMicros ?? 0) / 1_000_000).toFixed(6)}`
+      : undefined,
+  ].filter(Boolean);
+  return parts.join(' ');
 }
 
 function formatPrBody(worker: WorkerRecord, evidence: EvidenceBlock[], pushed: PushResult): string {

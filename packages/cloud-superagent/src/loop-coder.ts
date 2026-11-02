@@ -1,8 +1,9 @@
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { z } from 'zod';
-import { createJudgeClientFromEnv } from './judge-client.js';
+import { CODER_MAX_TOKENS, createJudgeClientFromEnv } from './judge-client.js';
 import { FakeCoder, type CoderPort, type CoderResult } from './loop.js';
+import type { ModelCompletion } from './router.js';
 import type { NormalizedEvent, WorkerRecord } from './types.js';
 
 const CoderJson = z.object({
@@ -18,7 +19,7 @@ const CoderJson = z.object({
  */
 export class HttpCoder implements CoderPort {
   constructor(
-    private readonly complete: (prompt: string) => Promise<string>,
+    private readonly complete: (prompt: string) => Promise<string | ModelCompletion>,
     private readonly fallback: CoderPort = new FakeCoder(),
   ) {}
 
@@ -30,13 +31,15 @@ export class HttpCoder implements CoderPort {
     worker: WorkerRecord;
   }): Promise<CoderResult> {
     const snapshot = input.snapshot ?? (input.dir ? await snapshotFiles(input.dir) : '');
-    let raw: string;
+    const started = Date.now();
+    let raw: string | ModelCompletion;
     try {
       raw = await this.complete(promptOf(input.brief, snapshot));
     } catch {
       return this.fallback.apply(input);
     }
-    const parsed = parseCoderJson(raw);
+    const text = typeof raw === 'string' ? raw : raw.text;
+    const parsed = parseCoderJson(text);
     if (!parsed) return this.fallback.apply(input);
     const changed: string[] = [];
     for (const [rel, content] of Object.entries(parsed.files)) {
@@ -49,13 +52,23 @@ export class HttpCoder implements CoderPort {
       changed.push(rel);
     }
     if (changed.length === 0) return this.fallback.apply(input);
+    const usage =
+      typeof raw === 'string'
+        ? { tokens: Math.ceil(text.length / 4), usdMicros: 400, wallMs: Date.now() - started }
+        : {
+            tokens: raw.usage.tokens,
+            usdMicros: raw.usage.usdMicros,
+            wallMs: raw.usage.wallMs || Date.now() - started,
+            inputTokens: raw.usage.inputTokens,
+            outputTokens: raw.usage.outputTokens,
+          };
     return {
       changed,
       files: Object.fromEntries(
         Object.entries(parsed.files).filter(([rel]) => !rel.includes('..') && !rel.startsWith('/')),
       ),
       summary: parsed.summary ?? `model coder wrote ${changed.join(', ')}`,
-      usage: { tokens: Math.ceil(raw.length / 4), usdMicros: 400, wallMs: 1 },
+      usage,
     };
   }
 }
@@ -83,8 +96,8 @@ export function createCoderFromEnv(
   const live = env.MAKA_CLOUD_LOOP_LIVE === '1';
   const hasKey = Boolean(env.ANTHROPIC_API_KEY?.trim() || env.MAKA_CLOUD_JUDGE_API_KEY?.trim());
   if (!live || !hasKey) return { coder: new FakeCoder(), kind: 'fake' };
-  const client = createJudgeClientFromEnv(env, fetchImpl);
-  return { coder: new HttpCoder((prompt) => client.complete(prompt)), kind: 'model' };
+  const client = createJudgeClientFromEnv(env, fetchImpl, { maxTokens: CODER_MAX_TOKENS });
+  return { coder: new HttpCoder((prompt) => client.completeDetailed(prompt)), kind: 'model' };
 }
 
 async function snapshotFiles(dir: string): Promise<string> {

@@ -86,8 +86,9 @@ listener is for laptop replay only.
    npm run real-loop -w @maka-cloud/superagent
    ```
    Expect `ok: true`, `boxed: true`, `coder: fake`, `git: fake`, a `timings:`
-   line (`create/materialize/edit/test/diff/destroy`), in-box execs with
-   `exit=`, and steps including `box-materialize → box-edit → box-test` then
+   line (`create/materialize/edit/test/diff/destroy`), `usage:` / `ledger:`
+   lines, in-box execs with `exit=`, and steps including
+   `box-materialize → box-edit → box-test` then
    `push → pr → ci-resume → review-resume → merge-held → merge-approved`.
    Push is the box `git diff --cached` applied to a clean host checkout.
 
@@ -102,16 +103,19 @@ listener is for laptop replay only.
    ```
    Expect the box created, public clone + tests inside it, then destroyed.
 
-   Live scratch + optional model / GitHub:
+   Live scratch + optional model / GitHub (empty private repo is OK):
    ```bash
    export MAKA_CLOUD_LOOP_LIVE=1
    export INSTABOX_API_KEY='…'
    # export ANTHROPIC_API_KEY='…'
    # export MAKA_GITHUB_TOKEN='github_pat_…'
-   # export MAKA_CLOUD_LOOP_REPO='owner/scratch'
+   # export MAKA_CLOUD_LOOP_REPO='raydocs/maka-loop-scratch'
+   # export MAKA_CLOUD_LOOP_SEED=1
    npm run real-loop -w @maka-cloud/superagent
    ```
-   Expect the box created and destroyed. Live GitHub holds merge (no auto-merge).
+   Expect the box created and destroyed, `usage:` from the Messages API when
+   a model key is set, `ci: no-checks` when the repo has no Actions, and
+   merge held (never auto-merged).
 
 6. **Metrics harness (fakes only).**
    ```bash

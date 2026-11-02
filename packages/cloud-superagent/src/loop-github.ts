@@ -10,6 +10,20 @@ const run = promisify(execFile);
 
 export const GITHUB_TOKEN_ENV = 'MAKA_GITHUB_TOKEN';
 export const LOOP_REPO_ENV = 'MAKA_CLOUD_LOOP_REPO';
+export const LOOP_SEED_ENV = 'MAKA_CLOUD_LOOP_SEED';
+
+export type CiVerdict = 'no-checks' | 'pending' | 'success' | 'failure';
+
+export interface CiStatus {
+  verdict: CiVerdict;
+  detail: string;
+}
+
+export interface RepoInspect {
+  defaultBranch: string;
+  empty: boolean;
+  headSha?: string;
+}
 
 export function githubTokenProblem(token: string | undefined): string | undefined {
   if (token === undefined || token.trim() === '') {
@@ -114,6 +128,76 @@ export class HttpGitHost implements GitHostPort {
     return `https://github.com/${this.defaultRepo ?? repo}/commit/${sha}/checks`;
   }
 
+  async inspectRepo(repo?: string): Promise<RepoInspect> {
+    const name = this.defaultRepo ?? repo ?? '';
+    const info = await this.api<{ default_branch: string }>('GET', `/repos/${name}`);
+    const branch = info.default_branch || 'main';
+    const ref = await this.raw('GET', `/repos/${name}/git/ref/heads/${encodeURIComponent(branch)}`);
+    if (ref.status === 404 || ref.status === 409) {
+      return { defaultBranch: branch, empty: true };
+    }
+    if (!ref.ok) {
+      throw new Error(
+        redactSecret(
+          `GitHub GET default branch HTTP ${ref.status}: ${ref.text.slice(0, 200)}`,
+          this.token,
+        ),
+      );
+    }
+    const body = JSON.parse(ref.text) as { object?: { sha?: string } };
+    return { defaultBranch: branch, empty: false, headSha: body.object?.sha };
+  }
+
+  /**
+   * Creates the default branch on an empty repo with the scratch fixture.
+   * Only called when `MAKA_CLOUD_LOOP_SEED=1`. Token stays on the host.
+   */
+  async seedScratch(
+    files: Record<string, string>,
+    repo?: string,
+  ): Promise<{ sha: string; branch: string }> {
+    const name = this.defaultRepo ?? repo ?? '';
+    const info = await this.inspectRepo(name);
+    if (!info.empty) return { sha: info.headSha ?? '', branch: info.defaultBranch };
+    const branch = info.defaultBranch;
+    const tree: Array<{ path: string; mode: string; type: 'blob'; sha: string }> = [];
+    for (const [path, content] of Object.entries(files)) {
+      const blob = await this.api<{ sha: string }>('POST', `/repos/${name}/git/blobs`, {
+        content: Buffer.from(content).toString('base64'),
+        encoding: 'base64',
+      });
+      tree.push({ path, mode: '100644', type: 'blob', sha: blob.sha });
+    }
+    const newTree = await this.api<{ sha: string }>('POST', `/repos/${name}/git/trees`, { tree });
+    const commit = await this.api<{ sha: string }>('POST', `/repos/${name}/git/commits`, {
+      message: 'seed: broken add() scratch',
+      tree: newTree.sha,
+    });
+    await this.api('POST', `/repos/${name}/git/refs`, {
+      ref: `refs/heads/${branch}`,
+      sha: commit.sha,
+    });
+    return { sha: commit.sha, branch };
+  }
+
+  /**
+   * Combined Statuses + Checks. An empty list is `no-checks`, not failure.
+   * GitHub reports `state: pending` with `total_count: 0` on a bare commit.
+   */
+  async readCi(sha: string, repo?: string): Promise<CiStatus> {
+    const name = this.defaultRepo ?? repo ?? '';
+    const status = await this.api<{
+      state?: string;
+      total_count?: number;
+      statuses?: Array<{ state?: string; context?: string }>;
+    }>('GET', `/repos/${name}/commits/${encodeURIComponent(sha)}/status`);
+    const checks = await this.api<{
+      total_count?: number;
+      check_runs?: Array<{ status?: string; conclusion?: string | null; name?: string }>;
+    }>('GET', `/repos/${name}/commits/${encodeURIComponent(sha)}/check-runs`);
+    return summarizeCi(status, checks);
+  }
+
   async merge(input: { repo: string; number: number }): Promise<void> {
     const repo = this.defaultRepo ?? input.repo;
     await this.api('PUT', `/repos/${repo}/pulls/${input.number}/merge`, {
@@ -128,11 +212,13 @@ export class HttpGitHost implements GitHostPort {
     message: string,
     dir: string,
   ): Promise<string> {
-    const repoInfo = await this.api<{ default_branch: string }>('GET', `/repos/${repo}`);
-    const baseRef = await this.api<{ object: { sha: string } }>(
-      'GET',
-      `/repos/${repo}/git/ref/heads/${encodeURIComponent(repoInfo.default_branch)}`,
-    );
+    const inspected = await this.inspectRepo(repo);
+    if (inspected.empty) {
+      throw new Error(
+        `${repo} has no commits. Set ${LOOP_SEED_ENV}=1 to create the default branch with the scratch fixture via the GitHub API.`,
+      );
+    }
+    const baseRef = { object: { sha: inspected.headSha ?? '' } };
     const base = await this.api<{ tree: { sha: string } }>(
       'GET',
       `/repos/${repo}/git/commits/${baseRef.object.sha}`,
@@ -172,7 +258,11 @@ export class HttpGitHost implements GitHostPort {
     return commit.sha;
   }
 
-  private async api<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async raw(
+    method: string,
+    path: string,
+    body?: unknown,
+  ): Promise<{ ok: boolean; status: number; text: string }> {
     const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
       method,
       headers: {
@@ -184,15 +274,20 @@ export class HttpGitHost implements GitHostPort {
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
     const text = await response.text();
+    return { ok: response.ok, status: response.status, text };
+  }
+
+  private async api<T>(method: string, path: string, body?: unknown): Promise<T> {
+    const response = await this.raw(method, path, body);
     if (!response.ok) {
       throw new Error(
         redactSecret(
-          `GitHub ${method} ${path.split('?')[0]} HTTP ${response.status}: ${text.slice(0, 200)}`,
+          `GitHub ${method} ${path.split('?')[0]} HTTP ${response.status}: ${response.text.slice(0, 200)}`,
           this.token,
         ),
       );
     }
-    return (text ? JSON.parse(text) : undefined) as T;
+    return (response.text ? JSON.parse(response.text) : undefined) as T;
   }
 
   private async apiOrNull<T>(method: string, path: string): Promise<T | undefined> {
@@ -256,6 +351,44 @@ async function listFiles(dir: string): Promise<Array<{ path: string; content: st
     files.push({ path, content: await readFile(join(dir, path), 'utf8') });
   }
   return files;
+}
+
+export function summarizeCi(
+  status: {
+    state?: string;
+    total_count?: number;
+    statuses?: Array<{ state?: string }>;
+  },
+  checks: {
+    total_count?: number;
+    check_runs?: Array<{ status?: string; conclusion?: string | null }>;
+  },
+): CiStatus {
+  const statuses = status.statuses ?? [];
+  const runs = checks.check_runs ?? [];
+  const hasStatus = (status.total_count ?? statuses.length) > 0 && statuses.length > 0;
+  const hasChecks = (checks.total_count ?? runs.length) > 0 && runs.length > 0;
+  if (!hasStatus && !hasChecks) {
+    return { verdict: 'no-checks', detail: 'no Checks or Statuses on this SHA' };
+  }
+  const failedStatus = statuses.some((row) => row.state === 'failure' || row.state === 'error');
+  const failedCheck = runs.some(
+    (row) =>
+      row.conclusion === 'failure' ||
+      row.conclusion === 'timed_out' ||
+      row.conclusion === 'cancelled',
+  );
+  if (failedStatus || failedCheck) {
+    return { verdict: 'failure', detail: 'a check or status failed' };
+  }
+  const pendingStatus = statuses.some((row) => row.state === 'pending');
+  const pendingCheck = runs.some(
+    (row) => row.status === 'queued' || row.status === 'in_progress' || row.status === 'pending',
+  );
+  if (pendingStatus || pendingCheck) {
+    return { verdict: 'pending', detail: 'checks still running' };
+  }
+  return { verdict: 'success', detail: 'checks passed' };
 }
 
 function wrap(error: unknown, token: string, extra = ''): Error {

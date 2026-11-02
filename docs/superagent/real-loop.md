@@ -12,9 +12,10 @@ resume the same worker (Router is not called).
 |---|---|---|
 | Sandbox | `FakeSandbox` (real local exec in a per-machine dir) | Instabox `HttpSandbox` when `INSTABOX_API_KEY` is set: 2 vCPU / 4096 MiB, template `universal`, always destroyed |
 | Materialize | host tarball uploaded into the box (`base64` + `tar`) | public `MAKA_CLOUD_LOOP_CLONE_URL` → `git clone` in the box; otherwise the same host tarball (private / scratch; no token in the box) |
-| Coder | `FakeCoder` files written **inside the box** | `HttpCoder` on the host when `ANTHROPIC_API_KEY` / `MAKA_CLOUD_JUDGE_API_KEY` is set; files applied in the box. Public-clone probe without a model key uses `NoopCoder` |
+| Coder | `FakeCoder` files written **inside the box** | `HttpCoder` on the host when `ANTHROPIC_API_KEY` / `MAKA_CLOUD_JUDGE_API_KEY` is set; files applied in the box. Public-clone probe without a model key uses `NoopCoder`. Usage is the Messages API `input_tokens` / `output_tokens` plus estimated USD (Haiku 5.5 list price, same as the gateway) |
 | Tests / install | `node add.test.js` (and optional install) **in the box** | `MAKA_CLOUD_LOOP_TEST` / `MAKA_CLOUD_LOOP_INSTALL` in the box; output is evidence |
-| Git / PR | `FakeGitHost` after applying the box `git diff --cached` to a **clean** host checkout | `HttpGitHost` when `MAKA_GITHUB_TOKEN=github_pat_…` and `MAKA_CLOUD_LOOP_REPO=owner/name`. Public-clone live with no token skips publish |
+| Git / PR | `FakeGitHost` after applying the box `git diff --cached` to a **clean** host checkout | `HttpGitHost` when `MAKA_GITHUB_TOKEN=github_pat_…` and `MAKA_CLOUD_LOOP_REPO=owner/name` (e.g. `raydocs/maka-loop-scratch`). Empty repos need `MAKA_CLOUD_LOOP_SEED=1` to create `main` with the broken scratch fixture via the GitHub API. Public-clone live with no token skips publish |
+| CI | simulated webhook resume | Checks + Statuses API on the pushed SHA. An empty list is `no-checks`, not a failure |
 | Router | forced `act` mandate | still forced `act`. Product Router (`createJudgeFromEnv`) is separate |
 | Merge | held, then approved against the fake host | held only — live GitHub is never auto-merged |
 
@@ -23,8 +24,9 @@ The box never receives `INSTABOX_API_KEY`, `ANTHROPIC_API_KEY` or
 workspaces are packed on the host and uploaded as a tarball. The host does
 not write coder files itself: it `git reset --hard` a clean checkout and
 applies the box's cached diff, so the tree that ran tests is the tree that
-ships. The CLI prints `create/materialize/edit/test/diff/destroy` timings and
-saves every in-box exec's stdout/stderr/exit code.
+ships. The CLI prints `create/materialize/edit/test/diff/destroy` timings,
+Messages API input/output tokens plus estimated USD (also written to the
+usage ledger), and every in-box exec's stdout/stderr/exit code.
 
 Worker-branch push (`maka/sa-<workerId>`) is allowed under intensity `act` and
 authority `open-pr`. `main` / `master` are protected. Merge, protected push,
@@ -67,15 +69,35 @@ export MAKA_CLOUD_LOOP_LIVE=1
 export INSTABOX_API_KEY='…'
 # optional model coder (host-side Anthropic Messages; files applied in the box):
 # export ANTHROPIC_API_KEY='…'              # or MAKA_CLOUD_JUDGE_API_KEY
-# optional live GitHub (fine-grained PAT only; scratch repo must exist with a default branch):
+# optional live GitHub (fine-grained PAT only; Contents + Pull requests +
+# Checks/Statuses read; empty private repo is OK with SEED=1):
 # export MAKA_GITHUB_TOKEN='github_pat_…'
-# export MAKA_CLOUD_LOOP_REPO='owner/scratch'
+# export MAKA_CLOUD_LOOP_REPO='raydocs/maka-loop-scratch'
+# export MAKA_CLOUD_LOOP_SEED=1
 npm run build -w @maka-cloud/superagent
 npm run real-loop -w @maka-cloud/superagent
 ```
 
-The box is always destroyed. Live GitHub never auto-merges. Agents and CI
-do not run this live.
+The box is always destroyed. Live GitHub never auto-merges; it stops at
+`merge-held`. An empty Checks/Statuses list prints `ci: no-checks`. Agents
+and CI do not run this live.
+
+## Live — empty private scratch (`raydocs/maka-loop-scratch`)
+
+```bash
+export MAKA_CLOUD_LOOP_LIVE=1
+export INSTABOX_API_KEY='…'
+export ANTHROPIC_API_KEY='…'                # host-side coder; usage goes to the ledger
+export MAKA_GITHUB_TOKEN='github_pat_…'
+export MAKA_CLOUD_LOOP_REPO='raydocs/maka-loop-scratch'
+export MAKA_CLOUD_LOOP_SEED=1               # only when the repo has no commits
+npm run build -w @maka-cloud/superagent
+npm run real-loop -w @maka-cloud/superagent
+```
+
+Expect `seeded: true` on the first run, a worker-branch PR on that repo,
+`ci: no-checks` if the repo has no Actions, and `merge-held`. Re-runs skip
+seed once `main` exists.
 
 ## Metrics harness
 

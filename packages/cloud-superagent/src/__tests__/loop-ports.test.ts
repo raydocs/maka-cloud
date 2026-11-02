@@ -6,7 +6,12 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { HttpCoder, createCoderFromEnv, parseCoderJson } from '../loop-coder.js';
 import { ADD_FIXED } from '../loop.js';
-import { HttpGitHost, createGitHostFromEnv, githubTokenProblem } from '../loop-github.js';
+import {
+  HttpGitHost,
+  createGitHostFromEnv,
+  githubTokenProblem,
+  summarizeCi,
+} from '../loop-github.js';
 import { initLocalRepo } from '../workspace.js';
 import { scratchFiles } from '../loop.js';
 
@@ -68,6 +73,65 @@ test('HttpCoder writes model files and falls back on garbage', async () => {
   const second = await fallback.apply({ dir, brief: 'fix add', event, worker });
   assert.match(second.summary, /fake coder/);
   assert.equal(parseCoderJson('```json\n{"files":{"a.js":"x"}}\n```')?.files['a.js'], 'x');
+});
+
+test('HttpCoder records Messages API input/output tokens and estimated USD', async () => {
+  const dir = await initLocalRepo(scratchFiles());
+  const event = {
+    eventId: 'e',
+    tenantId: 't',
+    source: 'github' as const,
+    type: 'pr_opened' as const,
+    subject: null,
+    idempotencyKey: 'k',
+    actor: { login: 'alice' as const, kind: 'user' as const },
+    occurredAt: 1,
+    receivedAt: 1,
+    summary: 'fix add',
+    fields: [],
+    closesSubject: false,
+  };
+  const worker = { workerId: 'wrk' } as never;
+  const coded = new HttpCoder(async () => ({
+    text: JSON.stringify({ summary: 'fixed add', files: { 'add.js': ADD_FIXED } }),
+    usage: {
+      inputTokens: 80,
+      outputTokens: 20,
+      tokens: 100,
+      usdMicros: 10,
+      wallMs: 5,
+      model: 'claude-haiku-5-5',
+    },
+  }));
+  const result = await coded.apply({ dir, brief: 'fix add', event, worker });
+  assert.equal(result.usage?.inputTokens, 80);
+  assert.equal(result.usage?.outputTokens, 20);
+  assert.equal(result.usage?.tokens, 100);
+  assert.equal(result.usage?.usdMicros, 10);
+});
+
+test('summarizeCi treats an empty Checks/Statuses list as no-checks, not failure', () => {
+  assert.equal(
+    summarizeCi(
+      { state: 'pending', total_count: 0, statuses: [] },
+      { total_count: 0, check_runs: [] },
+    ).verdict,
+    'no-checks',
+  );
+  assert.equal(
+    summarizeCi(
+      { state: 'failure', total_count: 1, statuses: [{ state: 'failure' }] },
+      { total_count: 0, check_runs: [] },
+    ).verdict,
+    'failure',
+  );
+  assert.equal(
+    summarizeCi(
+      { state: 'success', total_count: 0, statuses: [] },
+      { total_count: 1, check_runs: [{ status: 'completed', conclusion: 'success' }] },
+    ).verdict,
+    'success',
+  );
 });
 
 test('HttpGitHost publishes blobs and opens a PR without putting the token on argv', async () => {

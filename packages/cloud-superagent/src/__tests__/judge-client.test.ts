@@ -2,7 +2,13 @@ import assert from 'node:assert/strict';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { test } from 'node:test';
-import { createJudgeClientFromEnv, createJudgeFromEnv, FetchJudgeClient } from '../judge-client.js';
+import {
+  createJudgeClientFromEnv,
+  createJudgeFromEnv,
+  estimateUsdMicros,
+  FetchJudgeClient,
+  parseMessagesUsage,
+} from '../judge-client.js';
 import { HeuristicJudge, ModelJudge } from '../router.js';
 
 test('createJudgeFromEnv stays heuristic unless a key or model is requested', () => {
@@ -36,7 +42,10 @@ test('FetchJudgeClient posts the Anthropic Messages path used by the host', asyn
       });
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(
-        JSON.stringify({ content: [{ type: 'text', text: '{"action":"ignore","reason":"ok"}' }] }),
+        JSON.stringify({
+          content: [{ type: 'text', text: '{"action":"ignore","reason":"ok"}' }],
+          usage: { input_tokens: 12, output_tokens: 4 },
+        }),
       );
     });
   });
@@ -50,6 +59,11 @@ test('FetchJudgeClient posts the Anthropic Messages path used by the host', asyn
     });
     const text = await client.complete('Decide ignore or spawn.');
     assert.equal(text, '{"action":"ignore","reason":"ok"}');
+    const detailed = await client.completeDetailed('Decide ignore or spawn.');
+    assert.equal(detailed.usage.inputTokens, 12);
+    assert.equal(detailed.usage.outputTokens, 4);
+    assert.equal(detailed.usage.tokens, 16);
+    assert.equal(detailed.usage.usdMicros, estimateUsdMicros(12, 4));
     assert.equal(seen[0]?.url, '/v1/messages');
     assert.equal(seen[0]?.key, 'sk-test-judge');
     assert.equal(seen[0]?.version, '2023-06-01');
@@ -77,6 +91,17 @@ test('FetchJudgeClient posts the Anthropic Messages path used by the host', asyn
       server.close((error) => (error ? reject(error) : resolve())),
     );
   }
+});
+
+test('estimateUsdMicros uses the gateway Haiku 5.5 list price', () => {
+  assert.equal(estimateUsdMicros(1_000_000, 0), 100_000);
+  assert.equal(estimateUsdMicros(0, 1_000_000), 500_000);
+  assert.equal(estimateUsdMicros(1000, 200), 200);
+  assert.equal(
+    parseMessagesUsage({ usage: { input_tokens: 3, output_tokens: 1 } }, 'claude-haiku-5-5', 9)
+      .tokens,
+    4,
+  );
 });
 
 function header(req: IncomingMessage, name: string): string | undefined {

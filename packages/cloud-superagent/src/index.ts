@@ -12,6 +12,7 @@ export {
   HeuristicJudge,
   ModelJudge,
   type JudgeClient,
+  type ModelCompletion,
   type ModelJudgeOptions,
   parseModelDecision,
   RecordingJudge,
@@ -27,7 +28,10 @@ export {
   createJudgeFromEnv,
   DEFAULT_ANTHROPIC_BASE_URL,
   DEFAULT_JUDGE_MODEL,
+  CODER_MAX_TOKENS,
   FetchJudgeClient,
+  estimateUsdMicros,
+  parseMessagesUsage,
 } from './judge-client.js';
 export {
   DEFAULT_STUCK_OPTIONS,
@@ -154,6 +158,7 @@ export {
   mergeAction,
   workerBranch,
   emptyTimings,
+  formatModelUsage,
   formatTimings,
   LOOP_TIMING_PHASES,
   type CoderPort,
@@ -176,9 +181,13 @@ export { HttpCoder, createCoderFromEnv, parseCoderJson } from './loop-coder.js';
 export {
   GITHUB_TOKEN_ENV,
   LOOP_REPO_ENV,
+  LOOP_SEED_ENV,
   HttpGitHost,
   createGitHostFromEnv,
   githubTokenProblem,
+  summarizeCi,
+  type CiStatus,
+  type CiVerdict,
 } from './loop-github.js';
 export {
   formatRealLoopReport,

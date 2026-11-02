@@ -1,9 +1,19 @@
-import { HeuristicJudge, ModelJudge, type JudgeClient } from './router.js';
+import { HeuristicJudge, ModelJudge, type JudgeClient, type ModelCompletion } from './router.js';
 import type { RouterJudge } from './types.js';
 
 export const DEFAULT_JUDGE_MODEL = 'claude-haiku-5-5';
 export const DEFAULT_ANTHROPIC_BASE_URL = 'https://api.anthropic.com';
 const ANTHROPIC_VERSION = '2023-06-01';
+/** Coder completions need more than the Router's 256. */
+export const CODER_MAX_TOKENS = 4096;
+
+/**
+ * Same list prices as `@maka-cloud/gateway` `BUILT_IN_MODELS` for Haiku 5.5
+ * (standard tier, 2026-10): $0.10 input / $0.50 output per million tokens.
+ * Super-agent stays zod-only and does not depend on the gateway package.
+ */
+export const HAIKU_55_INPUT_PER_MTOK_USD = 0.1;
+export const HAIKU_55_OUTPUT_PER_MTOK_USD = 0.5;
 
 export interface FetchJudgeClientOptions {
   apiKey: string;
@@ -18,10 +28,40 @@ export interface FetchJudgeClientOptions {
  * `anthropic-version` path the host gateway and runtime already use.
  * Point `baseUrl` at `ANTHROPIC_BASE_URL` or at the gateway's `/anthropic` prefix.
  */
+export function estimateUsdMicros(inputTokens: number, outputTokens: number): number {
+  const usd =
+    (inputTokens * HAIKU_55_INPUT_PER_MTOK_USD + outputTokens * HAIKU_55_OUTPUT_PER_MTOK_USD) /
+    1_000_000;
+  return Math.round(usd * 1_000_000);
+}
+
+export function parseMessagesUsage(
+  body: unknown,
+  model: string,
+  wallMs: number,
+): ModelCompletion['usage'] {
+  const usage =
+    typeof body === 'object' && body !== null && 'usage' in body
+      ? (body as { usage?: { input_tokens?: unknown; output_tokens?: unknown } }).usage
+      : undefined;
+  const inputTokens = Number(usage?.input_tokens ?? 0);
+  const outputTokens = Number(usage?.output_tokens ?? 0);
+  const input = Number.isFinite(inputTokens) ? inputTokens : 0;
+  const output = Number.isFinite(outputTokens) ? outputTokens : 0;
+  return {
+    inputTokens: input,
+    outputTokens: output,
+    tokens: input + output,
+    usdMicros: estimateUsdMicros(input, output),
+    wallMs,
+    model,
+  };
+}
+
 export class FetchJudgeClient implements JudgeClient {
+  readonly model: string;
   private readonly apiKey: string;
   private readonly baseUrl: string;
-  private readonly model: string;
   private readonly fetchImpl: typeof fetch;
   private readonly maxTokens: number;
 
@@ -35,6 +75,11 @@ export class FetchJudgeClient implements JudgeClient {
   }
 
   async complete(prompt: string): Promise<string> {
+    return (await this.completeDetailed(prompt)).text;
+  }
+
+  async completeDetailed(prompt: string): Promise<ModelCompletion> {
+    const started = Date.now();
     const response = await this.fetchImpl(`${this.baseUrl}/v1/messages`, {
       method: 'POST',
       headers: {
@@ -52,14 +97,24 @@ export class FetchJudgeClient implements JudgeClient {
     if (!response.ok) {
       throw new Error(`Judge provider HTTP ${response.status}: ${text.slice(0, 200)}`);
     }
-    return textOf(text);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = undefined;
+    }
+    return {
+      text: textOf(text),
+      usage: parseMessagesUsage(parsed, this.model, Date.now() - started),
+    };
   }
 }
 
 export function createJudgeClientFromEnv(
   env: NodeJS.ProcessEnv = process.env,
   fetchImpl: typeof fetch = fetch,
-): JudgeClient {
+  extras: { maxTokens?: number } = {},
+): FetchJudgeClient {
   const apiKey = env.MAKA_CLOUD_JUDGE_API_KEY?.trim() || env.ANTHROPIC_API_KEY?.trim() || '';
   if (!apiKey) {
     throw new Error(
@@ -75,7 +130,13 @@ export function createJudgeClientFromEnv(
     env.MAKA_CLOUD_JUDGE_MODEL?.trim() ||
     env.MAKA_CLOUD_SUMMARY_MODEL?.trim() ||
     DEFAULT_JUDGE_MODEL;
-  return new FetchJudgeClient({ apiKey, baseUrl, model, fetch: fetchImpl });
+  return new FetchJudgeClient({
+    apiKey,
+    baseUrl,
+    model,
+    fetch: fetchImpl,
+    ...(extras.maxTokens !== undefined ? { maxTokens: extras.maxTokens } : {}),
+  });
 }
 
 /**

@@ -106,6 +106,10 @@ export interface Usage {
   tokens: number;
   usdMicros: number;
   wallMs: number;
+  /** Messages API `usage.input_tokens` when a model call recorded them. */
+  inputTokens?: number;
+  /** Messages API `usage.output_tokens` when a model call recorded them. */
+  outputTokens?: number;
 }
 
 export interface MemorySpill {

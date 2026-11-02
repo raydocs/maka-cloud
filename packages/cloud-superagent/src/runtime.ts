@@ -433,6 +433,8 @@ export class Superagent {
         tokens: worker.usage.tokens + delta.tokens,
         usdMicros: worker.usage.usdMicros + delta.usdMicros,
         wallMs: worker.usage.wallMs + delta.wallMs,
+        inputTokens: (worker.usage.inputTokens ?? 0) + (result.usage.inputTokens ?? 0),
+        outputTokens: (worker.usage.outputTokens ?? 0) + (result.usage.outputTokens ?? 0),
       };
       this.store.putUsage(worker.tenantId, worker.workerId, worker.usage, at);
       this.store.appendUsageEvent({

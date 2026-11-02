@@ -43,6 +43,10 @@ test('real-loop fake path clones, tests, pushes, resumes CI/review, holds merge'
   assert.match(formatRealLoopReport(report), /ok: true/);
   assert.match(formatRealLoopReport(report), /timings: /);
   assert.ok(formatRealLoopReport(report).includes(formatTimings(report.timings)));
+  assert.ok(report.usage.tokens > 0);
+  assert.ok(report.ledger.events >= 1);
+  assert.match(formatRealLoopReport(report), /usage: /);
+  assert.match(formatRealLoopReport(report), /ledger: /);
 });
 
 test('real-loop does not go live without MAKA_CLOUD_LOOP_LIVE=1', async () => {
@@ -137,6 +141,10 @@ test('live GitHub host opens a PR through a mock API and does not auto-merge', a
       }
       if (method === 'PUT' && url.includes('/merge'))
         return reply(500, { message: 'must not merge' });
+      if (method === 'GET' && url.includes('/status'))
+        return reply(200, { state: 'pending', total_count: 0, statuses: [] });
+      if (method === 'GET' && url.includes('/check-runs'))
+        return reply(200, { total_count: 0, check_runs: [] });
       reply(500, { message: `unhandled ${method} ${url}` });
     });
   });
@@ -162,7 +170,150 @@ test('live GitHub host opens a PR through a mock API and does not auto-merge', a
     assert.equal(report.prUrl, 'https://github.com/acme/scratch/pull/9');
     assert.ok(report.steps.includes('merge-held'));
     assert.ok(!report.steps.includes('merge-approved'));
+    assert.equal(report.ci, 'no-checks');
+    assert.ok(report.steps.includes('ci-no-checks'));
     assert.ok(!JSON.stringify(report).includes('github_pat_test-live'));
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
+});
+
+test('live GitHub refuses an empty repo unless MAKA_CLOUD_LOOP_SEED=1', async () => {
+  const server = createServer((req: IncomingMessage, res: ServerResponse) => {
+    const url = req.url ?? '';
+    const method = req.method ?? 'GET';
+    const reply = (status: number, payload: unknown) => {
+      res.writeHead(status, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(payload));
+    };
+    if (method === 'GET' && url === '/repos/raydocs/maka-loop-scratch')
+      return reply(200, { default_branch: 'main' });
+    if (method === 'GET' && url.includes('/git/ref/heads/main'))
+      return reply(409, { message: 'Git Repository is empty.' });
+    reply(500, { message: `unhandled ${method} ${url}` });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+  try {
+    const report = await runRealLoop({
+      sandbox: new FakeSandbox(),
+      fetch: (input, init) => {
+        const url =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        return fetch(url.replace('https://api.github.com', `http://127.0.0.1:${port}`), init);
+      },
+      env: {
+        MAKA_CLOUD_LOOP_LIVE: '1',
+        MAKA_GITHUB_TOKEN: 'github_pat_test-live',
+        MAKA_CLOUD_LOOP_REPO: 'raydocs/maka-loop-scratch',
+      },
+    });
+    assert.equal(report.ok, false);
+    assert.match(report.error ?? '', /MAKA_CLOUD_LOOP_SEED/);
+    assert.equal(report.seeded, false);
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
+});
+
+test('live GitHub seeds an empty private scratch repo then holds merge', async () => {
+  let empty = true;
+  let pulls = 0;
+  let branchExists = false;
+  const blobs: string[] = [];
+  const server = createServer((req: IncomingMessage, res: ServerResponse) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (chunk) => chunks.push(chunk as Buffer));
+    req.on('end', () => {
+      const url = req.url ?? '';
+      const method = req.method ?? 'GET';
+      const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : undefined;
+      const reply = (status: number, payload: unknown) => {
+        res.writeHead(status, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(payload));
+      };
+      if (method === 'GET' && url === '/repos/raydocs/maka-loop-scratch')
+        return reply(200, { default_branch: 'main' });
+      if (method === 'GET' && url.includes('/git/ref/heads/main')) {
+        return empty
+          ? reply(409, { message: 'Git Repository is empty.' })
+          : reply(200, { object: { sha: 'seeded1' } });
+      }
+      if (method === 'GET' && url.includes('/git/commits/')) {
+        return reply(200, { tree: { sha: 'tree-seed' } });
+      }
+      if (method === 'POST' && url.endsWith('/git/blobs')) {
+        blobs.push('b');
+        return reply(201, { sha: `blob${blobs.length}` });
+      }
+      if (method === 'POST' && url.endsWith('/git/trees')) return reply(201, { sha: 'tree-new' });
+      if (method === 'POST' && url.endsWith('/git/commits'))
+        return reply(201, { sha: empty ? 'seeded1' : 'commit999' });
+      if (method === 'GET' && url.includes('/git/ref/heads/maka')) {
+        return branchExists
+          ? reply(200, { object: { sha: 'old' } })
+          : reply(404, { message: 'Not Found' });
+      }
+      if (method === 'POST' && url.endsWith('/git/refs')) {
+        empty = false;
+        const ref = typeof body?.ref === 'string' ? body.ref : '';
+        if (ref.includes('maka')) branchExists = true;
+        return reply(201, {});
+      }
+      if (method === 'PATCH' && url.includes('/git/refs/heads/')) return reply(200, {});
+      if (method === 'GET' && url.startsWith('/repos/raydocs/maka-loop-scratch/pulls')) {
+        return reply(
+          200,
+          pulls === 0
+            ? []
+            : [{ html_url: 'https://github.com/raydocs/maka-loop-scratch/pull/1', number: 1 }],
+        );
+      }
+      if (method === 'POST' && url === '/repos/raydocs/maka-loop-scratch/pulls') {
+        pulls += 1;
+        return reply(201, {
+          html_url: 'https://github.com/raydocs/maka-loop-scratch/pull/1',
+          number: 1,
+        });
+      }
+      if (method === 'GET' && url.includes('/status'))
+        return reply(200, { state: 'pending', total_count: 0, statuses: [] });
+      if (method === 'GET' && url.includes('/check-runs'))
+        return reply(200, { total_count: 0, check_runs: [] });
+      if (method === 'PUT' && url.includes('/merge'))
+        return reply(500, { message: 'must not merge' });
+      reply(500, { message: `unhandled ${method} ${url}` });
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+  try {
+    const report = await runRealLoop({
+      sandbox: new FakeSandbox(),
+      fetch: (input, init) => {
+        const url =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        return fetch(url.replace('https://api.github.com', `http://127.0.0.1:${port}`), init);
+      },
+      env: {
+        MAKA_CLOUD_LOOP_LIVE: '1',
+        MAKA_GITHUB_TOKEN: 'github_pat_test-live',
+        MAKA_CLOUD_LOOP_REPO: 'raydocs/maka-loop-scratch',
+        MAKA_CLOUD_LOOP_SEED: '1',
+      },
+    });
+    assert.equal(report.ok, true, report.error ?? '');
+    assert.equal(report.seeded, true);
+    assert.ok(report.steps.includes('seed'));
+    assert.equal(report.prUrl, 'https://github.com/raydocs/maka-loop-scratch/pull/1');
+    assert.equal(report.ci, 'no-checks');
+    assert.ok(report.steps.includes('merge-held'));
+    assert.ok(!report.steps.includes('merge-approved'));
+    assert.ok(blobs.length >= 3);
   } finally {
     await new Promise<void>((resolve, reject) =>
       server.close((error) => (error ? reject(error) : resolve())),

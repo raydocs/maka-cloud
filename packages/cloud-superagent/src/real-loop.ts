@@ -10,6 +10,7 @@ import {
   NoopCoder,
   NodeFileTestPort,
   emptyTimings,
+  formatModelUsage,
   formatTimings,
   mergeAction,
   scratchFiles,
@@ -18,6 +19,8 @@ import {
 } from './loop.js';
 import type { BoxExecLog } from './loop-box.js';
 import { formatBoxExec } from './loop-box.js';
+import { HttpGitHost, LOOP_SEED_ENV } from './loop-github.js';
+import type { CiVerdict } from './loop-github.js';
 import { Superagent } from './runtime.js';
 import {
   HttpSandbox,
@@ -43,6 +46,15 @@ export interface RealLoopReport {
   coder: 'fake' | 'model';
   git: 'fake' | 'github';
   boxed: boolean;
+  seeded: boolean;
+  ci: CiVerdict | 'skipped' | null;
+  usage: {
+    inputTokens: number;
+    outputTokens: number;
+    tokens: number;
+    usdMicros: number;
+  };
+  ledger: { tokens: number; usdMicros: number; events: number };
   timings: LoopTimings;
   execs: BoxExecLog[];
   evidence: string;
@@ -78,6 +90,10 @@ export async function runRealLoop(options: RealLoopOptions = {}): Promise<RealLo
     coder: 'fake',
     git: 'fake',
     boxed: false,
+    seeded: false,
+    ci: null,
+    usage: { inputTokens: 0, outputTokens: 0, tokens: 0, usdMicros: 0 },
+    ledger: { tokens: 0, usdMicros: 0, events: 0 },
     timings: emptyTimings(),
     execs: [],
     evidence: '',
@@ -131,6 +147,19 @@ export async function runRealLoop(options: RealLoopOptions = {}): Promise<RealLo
     report.git = hosted.kind;
     const repoName = hosted.repo ?? 'local/scratch';
     const git = hosted.git;
+    if (git instanceof HttpGitHost) {
+      const inspected = await git.inspectRepo();
+      if (inspected.empty) {
+        if (env[LOOP_SEED_ENV] !== '1') {
+          throw new Error(
+            `${repoName} has no commits. Set ${LOOP_SEED_ENV}=1 to create the default branch with the scratch fixture via the GitHub API.`,
+          );
+        }
+        await git.seedScratch(scratchFiles());
+        report.seeded = true;
+        report.steps.push('seed');
+      }
+    }
     const publish = !publicClone || hosted.kind === 'github';
     const handler = new CodingLoopHandler({
       coder: coded.coder,
@@ -177,6 +206,14 @@ export async function runRealLoop(options: RealLoopOptions = {}): Promise<RealLo
     report.timings.test = handler.lastTimings.test;
     report.timings.diff = handler.lastTimings.diff;
     report.execs = handler.lastExecs;
+    report.usage = {
+      inputTokens: after?.usage.inputTokens ?? handler.lastUsage?.inputTokens ?? 0,
+      outputTokens: after?.usage.outputTokens ?? handler.lastUsage?.outputTokens ?? 0,
+      tokens: after?.usage.tokens ?? handler.lastUsage?.tokens ?? 0,
+      usdMicros: after?.usage.usdMicros ?? handler.lastUsage?.usdMicros ?? 0,
+    };
+    const ledger = agent.ledger('inv_loop');
+    report.ledger = { tokens: ledger.tokens, usdMicros: ledger.usdMicros, events: ledger.events };
     const boxed = (after?.evidence ?? []).some(
       (row) => row.label === 'box-clone' || row.label === 'box-upload' || row.label === 'box-edit',
     );
@@ -192,10 +229,22 @@ export async function runRealLoop(options: RealLoopOptions = {}): Promise<RealLo
     } else if (!boxOk) {
       throw new Error(after?.memory || 'box tests did not pass');
     }
-    const ci = await agent.ingest(ciFailed('inv_loop', 7, repoName));
-    if (ci.result === 'passthrough') report.steps.push('ci-resume');
-    const comment = await agent.ingest(reviewComment('inv_loop', 7, repoName));
-    if (comment.result === 'passthrough') report.steps.push('review-resume');
+    if (git instanceof HttpGitHost) {
+      const sha = handler.lastPush.get(opened.workerId)?.sha;
+      if (sha) {
+        const status = await git.readCi(sha);
+        report.ci = status.verdict;
+        report.steps.push(`ci-${status.verdict}`);
+      } else {
+        report.ci = 'skipped';
+      }
+    } else {
+      report.ci = 'skipped';
+      const ci = await agent.ingest(ciFailed('inv_loop', 7, repoName));
+      if (ci.result === 'passthrough') report.steps.push('ci-resume');
+      const comment = await agent.ingest(reviewComment('inv_loop', 7, repoName));
+      if (comment.result === 'passthrough') report.steps.push('review-resume');
+    }
     const waiting = agent.store.worker('inv_loop', opened.workerId);
     if (publish && pr && waiting) {
       const action = mergeAction(repoName, pr.number);
@@ -245,6 +294,10 @@ export function formatRealLoopReport(report: RealLoopReport): string {
     `coder: ${report.coder}`,
     `git: ${report.git}`,
     `boxed: ${report.boxed}`,
+    `seeded: ${report.seeded}`,
+    `ci: ${report.ci ?? '(none)'}`,
+    `usage: ${formatModelUsage(report.usage)}`,
+    `ledger: tokens=${report.ledger.tokens} usd_micros=${report.ledger.usdMicros} events=${report.ledger.events}`,
     `destroyed: ${report.destroyed}`,
     `timings: ${formatTimings(report.timings)}`,
     `steps: ${report.steps.join(' → ')}`,
