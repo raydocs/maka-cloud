@@ -81,5 +81,9 @@ test('sqlite v1 gains usage_events in place; not a cloud-server migration', asyn
   });
   assert.equal(store.tenantUsage(TENANT).tokens, 3);
   store.close();
+  const reopened = SqliteSuperagentStore.open(path);
+  assert.equal(reopened.tenantUsage(TENANT).tokens, 3);
+  assert.equal(reopened.tenantUsage(TENANT).events, 1);
+  reopened.close();
   await rm(dir, { recursive: true, force: true });
 });
