@@ -587,9 +587,26 @@ Supervisor principle: **rules decide, models describe**.
 | W4 | `over_budget` | usage ≥ any Mandate budget | Stop handler, escalate, no restart |
 | W5 | `subject_closed` | close event not yet retiring | Force `retiring` |
 | W6 | `awaiting_expired` | pending approval past `expiresAt` | Deny, retire if the action was required |
+| W7 | `stream_silence` | no tokens/events on a model stream for 4 minutes | Retry the same endpoint; discard any partial |
+| W8 | `time_limit` | the response hit a hard time limit | Retry; stop after 2 attempts |
+| W9 | `empty_turns` | 3 consecutive turns with no visible output | Stop |
+| W10 | `repeat_tools` | 3 identical tool calls (name+args) | Nudge; 6 stops. New results (CI poll) continue |
 
 Defaults: `stallAfterMs = 15m`, `heartbeatAfterMs = 2m`, `loopRepeat = 3`,
 `maxRestarts = 3` (MAGI idea: wake at most three times, then a person).
+Bounded-autonomy thresholds are configurable; the defaults above match
+Factory Droid 1.0. Compaction summaries are budgeted at 16k tokens.
+Every stop / retry / nudge is a `usage_events` row (`kind`
+`autonomy_*`), a watchdog finding, and a progress `reason` the lead
+speaks.
+
+Worker model requests are append-only so the provider cache stays warm:
+newly loaded tools are appended at the end of the request, not inserted
+into the tool list, and volatile facts (git status, clocks) live in a
+tail segment. A cache-break monitor diffs each request against the
+previous one and records which segment broke the prefix. Cache-hit share
+is `cache_read_input_tokens / (read + creation + input)` from Anthropic
+usage. A failed request retries the same provider endpoint.
 
 Escalation is a structured finding the host turns into a supervisor inbox
 item / `ask_user` `stuck` (T33). Super-agent does not send chat itself.

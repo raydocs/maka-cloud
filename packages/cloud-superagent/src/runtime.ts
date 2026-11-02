@@ -6,8 +6,11 @@ import { overBudget, Safety } from './safety.js';
 import type { SuperagentStore } from './store.js';
 import { MemorySuperagentStore } from './memory-store.js';
 import {
+  DEFAULT_AUTONOMY,
   emptyUsage,
   isLiveState,
+  type AutonomyIncident,
+  type AutonomySettings,
   type NormalizedEvent,
   type WorkerContext,
   type WorkerRecord,
@@ -58,6 +61,7 @@ import {
 import { FakeSandbox, type SandboxPort } from './sandbox.js';
 import { UnconfiguredOrgSecrets } from './secrets.js';
 import { recallMemory, spillMemory } from './spill.js';
+import { AUTONOMY_LEDGER_KIND, autonomyUsage, emptyAutonomy, markApplied } from './autonomy.js';
 import { type StuckCard, stuckCardOf } from './stuck.js';
 import { runWatchdog } from './watchdog.js';
 
@@ -136,6 +140,8 @@ export interface SuperagentOptions {
   liveFacts?: (worker: WorkerRecord) => Promise<Partial<LiveFacts>>;
   /** Phase-change / still / looks-stuck cadence. Quiet otherwise. */
   progress?: Partial<ProgressSettings>;
+  /** Stream silence / repeat / compaction thresholds. */
+  autonomy?: Partial<AutonomySettings>;
 }
 
 export class Superagent {
@@ -167,7 +173,15 @@ export class Superagent {
     this.ids = options.ids ?? defaultIds();
     this.now = options.clock ?? Date.now;
     this.admission = options.admission ?? {};
-    this.watchdogSettings = { ...DEFAULT_WATCHDOG, ...options.watchdog };
+    this.watchdogSettings = {
+      ...DEFAULT_WATCHDOG,
+      ...options.watchdog,
+      autonomy: {
+        ...DEFAULT_AUTONOMY,
+        ...options.watchdog?.autonomy,
+        ...options.autonomy,
+      },
+    };
     this.metering = options.metering ?? { record() {} };
     this.safety = new Safety(this.store, this.ids, this.watchdogSettings.approvalTtlMs);
     this.onEscalate = options.onEscalate;
@@ -346,6 +360,26 @@ export class Superagent {
       at,
     );
     for (const found of findings) {
+      if (
+        found.rule === 'stream_silence' ||
+        found.rule === 'time_limit' ||
+        found.rule === 'empty_turns' ||
+        found.rule === 'repeat_tools'
+      ) {
+        const worker = this.store.worker(found.tenantId, found.workerId);
+        if (worker && (found.action === 'retry' || found.action === 'nudge' || found.action === 'stop')) {
+          await this.surfaceAutonomy(
+            worker,
+            {
+              action: found.action,
+              rule: found.rule,
+              detail: found.detail,
+              at,
+            },
+            at,
+          );
+        }
+      }
       if (found.rule === 'stuck' || found.rule === 'crashed') {
         const worker = this.store.worker(found.tenantId, found.workerId);
         if (worker) await this.speakProgress(worker, 'stuck', at);
@@ -672,6 +706,17 @@ export class Superagent {
     }
     if (result.plan !== undefined) worker.plan = result.plan;
     if (result.progressUpdate) await this.recordProgress(worker, result.progressUpdate, at);
+    if (result.autonomy) worker.autonomy = result.autonomy;
+    if (result.incident) {
+      await this.surfaceAutonomy(worker, result.incident, at);
+      if (result.incident.action === 'stop') {
+        await this.stop(worker, at, result.incident.detail);
+        return true;
+      }
+      if (result.incident.action === 'nudge') {
+        await this.nudge(worker, at, result.incident.detail);
+      }
+    }
     if (result.transcriptPointer !== undefined) worker.transcriptPointer = result.transcriptPointer;
     if (result.workspaceRef !== undefined) worker.workspaceRef = result.workspaceRef;
     if (result.sandboxRef !== undefined) worker.sandboxRef = result.sandboxRef;
@@ -844,10 +889,11 @@ export class Superagent {
   }
 
   private async stop(worker: WorkerRecord, at: number, reason: string): Promise<void> {
-    const current = this.store.worker(worker.tenantId, worker.workerId);
-    if (!current) return;
+    const current = this.store.worker(worker.tenantId, worker.workerId) ?? worker;
     current.state = 'stuck';
     current.updatedAt = at;
+    worker.state = 'stuck';
+    worker.updatedAt = at;
     this.store.putWorker(current);
     this.audit(current.tenantId, current.workerId, 'stopped', at, { reason });
   }
@@ -946,6 +992,42 @@ export class Superagent {
 
   private progressView(worker: WorkerRecord, at: number) {
     return viewOf(worker, at, this.store, this.progressSettings, this.watchdogSettings);
+  }
+
+  private async surfaceAutonomy(
+    worker: WorkerRecord,
+    incident: AutonomyIncident,
+    at: number,
+  ): Promise<void> {
+    const live = this.store.worker(worker.tenantId, worker.workerId) ?? worker;
+    const next = markApplied({
+      ...(live.autonomy ?? worker.autonomy ?? emptyAutonomy()),
+      lastIncident: incident,
+      pending: { ...incident, applied: true },
+    });
+    live.autonomy = next;
+    worker.autonomy = next;
+    const entry = autonomyUsage(live, incident);
+    this.store.appendUsageEvent(entry);
+    this.metering.record(entry);
+    this.audit(live.tenantId, live.workerId, AUTONOMY_LEDGER_KIND[incident.action], at, {
+      rule: incident.rule,
+      detail: incident.detail,
+    });
+    await this.recordProgress(
+      live,
+      {
+        activity: incident.detail,
+        reason: incident.detail,
+      },
+      at,
+    );
+    await this.lead.speak({
+      tenantId: live.tenantId,
+      workerId: live.workerId,
+      text: `Worker ${incident.action}: ${incident.detail}`,
+    });
+    this.store.putWorker(this.store.worker(live.tenantId, live.workerId) ?? live);
   }
 
   private async recordProgress(

@@ -8,6 +8,15 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
+## 2026-11-02 12:00 MST — cursor/superagent-bounded-autonomy-51be
+
+- **PR:** none
+- **What:** Bounded autonomy in the worker loop (Factory Droid 1.0 harness): 4 min stream silence → retry; hard time limit at most 2 attempts; partial responses discarded before retry. 3 empty turns → stop; 3 identical tool calls → nudge, 6 → stop; polls that return new results continue. Every stop/retry/nudge is a ledger event, a watchdog incident (`stream_silence` / `time_limit` / `empty_turns` / `repeat_tools`), and a progress `reason` the lead speaks. Compaction summary budget is 16k tokens (Super-agent had none). Prompt-cache hygiene: worker requests are append-only (new tools appended at the end; git status and other volatile facts stay in the tail). A cache-break monitor names the first changed segment and counts breaks; cache-hit share uses Anthropic `cache_read_input_tokens` / `cache_creation_input_tokens`. Failed requests retry on the same provider endpoint.
+- **Why:** User request (2026-11-02) after the Factory Droid 1.0 writeup: when the agent gets stuck, always have a next step (nudge, retry, summarize, or stop); grow the request by keeping the prompt cache.
+- **Tests:** 146 passed in `@maka-cloud/superagent` (`test:dist`). FakeProvider / FakeSandbox — silence retry, time-limit cap, empty-turn stop, identical-tool nudge/stop, CI-poll new results, ledger+watchdog+progress+lead, 16k compaction, append-only tool load, git-status tail, same-endpoint retry, cache-hit share.
+- **Live:** n/a
+- **Migrations / risk:** none. JSON fields only (`worker.autonomy`). No sqlite `user_version` bump.
+
 ## 2026-11-02 11:06 MST — cursor/superagent-real-loop-51be — 4b2c813e3
 
 - **PR:** [#471](https://github.com/raydocs/maka-cloud/pull/471)

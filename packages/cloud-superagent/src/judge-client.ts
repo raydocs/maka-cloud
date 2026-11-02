@@ -42,10 +42,19 @@ export function parseMessagesUsage(
 ): ModelCompletion['usage'] {
   const usage =
     typeof body === 'object' && body !== null && 'usage' in body
-      ? (body as { usage?: { input_tokens?: unknown; output_tokens?: unknown } }).usage
+      ? (body as {
+          usage?: {
+            input_tokens?: unknown;
+            output_tokens?: unknown;
+            cache_read_input_tokens?: unknown;
+            cache_creation_input_tokens?: unknown;
+          };
+        }).usage
       : undefined;
   const inputTokens = Number(usage?.input_tokens ?? 0);
   const outputTokens = Number(usage?.output_tokens ?? 0);
+  const cacheRead = Number(usage?.cache_read_input_tokens ?? 0);
+  const cacheWrite = Number(usage?.cache_creation_input_tokens ?? 0);
   const input = Number.isFinite(inputTokens) ? inputTokens : 0;
   const output = Number.isFinite(outputTokens) ? outputTokens : 0;
   return {
@@ -55,6 +64,8 @@ export function parseMessagesUsage(
     usdMicros: estimateUsdMicros(input, output),
     wallMs,
     model,
+    cacheReadTokens: Number.isFinite(cacheRead) ? cacheRead : 0,
+    cacheWriteTokens: Number.isFinite(cacheWrite) ? cacheWrite : 0,
   };
 }
 

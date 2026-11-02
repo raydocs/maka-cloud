@@ -141,6 +141,7 @@ export {
 } from './subjects.js';
 export {
   AUTHORITIES,
+  DEFAULT_AUTONOMY,
   DEFAULT_WATCHDOG,
   emptyUsage,
   INTENSITIES,
@@ -152,6 +153,9 @@ export {
   WORKER_STATES,
 } from './types.js';
 export type {
+  AutonomyIncident,
+  AutonomySettings,
+  AutonomyState,
   MemorySpill,
   AdmissionPolicy,
   ApprovalKind,
@@ -281,6 +285,32 @@ export {
   runStatusCli,
   writeProgressResponse,
 } from './status.js';
+export {
+  AUTONOMY_LEDGER_KIND,
+  autonomyOf,
+  autonomyUsage,
+  compactHistory,
+  emptyAutonomy,
+  estimateTokens,
+  evaluateAutonomy,
+  observeStreamSilence,
+  observeTimeLimit,
+  observeToolCall,
+  observeTurn,
+} from './autonomy.js';
+export {
+  appendMessage,
+  buildRequest,
+  cacheHitShare,
+  diffPrefix,
+  loadTool,
+  recordCacheBreak,
+  setTail,
+  toAnthropicBody,
+  workerCacheHitShare,
+  type WorkerRequest,
+} from './prompt-cache.js';
+export { FakeProvider, runWorkerTurn } from './session.js';
 export {
   createWorkspaceStore,
   GitCloneStore,
