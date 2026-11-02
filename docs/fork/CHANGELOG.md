@@ -5,6 +5,8 @@ fork absorbed and any fork-side follow-up.
 
 ## 2026-11-02
 
+- `c120b33b3dce7fec271bb2483bea75ee125dd5bf` — Fix PR #469 `cloud-web`: the task-tree integration test completed the parent before the child. A parent that ends cancels children still running, so the live view could still show the child as `running` while a late replay already had `cancelled`. The leaf now finishes first, and both views wait for the whole tree to succeed before they are compared. The assertion is unchanged. No session migration.
+
 - `1d67216ea0e4896acb28367f38e5dac437f77834` — Fix PR #469 CI: restore `packageManager` to `npm@11.19.0` (the integrity suffix failed `check:product-release-identity`), build `@maka-cloud/maka-engine` before instabox in `deploy/Dockerfile` and the cloud-web/cloud-mobile workflows, and move `@maka/eval` re-exports to `@maka-cloud/maka-engine/eval` so those lanes do not need runtime-host. The boundary scanner now requires that build order. No session migration.
 
 - `dd11583b4609bccb2284e36e84efc888c1eac6fe` — Merge `origin/main` `4f98ef6a2` (PR #467, apache/maka `5d3a0629a`) into `cursor/maka-engine-602e` so PR #469 is not conflicted. Only `docs/fork/CHANGELOG.md` conflicted (add/add). No new `packages/cloud-*` `@maka/*` call sites arrived; the MakaEngine boundary still holds. Assistant-card fields stay optional on session and model-history; `TsInProcessEngine` is unchanged. No session migration.
