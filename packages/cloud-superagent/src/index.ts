@@ -78,6 +78,7 @@ export {
   LayerFsDisabledError,
   LayerFsMountUnsupportedError,
   LayerFsStore,
+  type SnapshotRef,
   type WorkspaceHandle,
   type WorkspaceSpec,
   type WorkspaceStore,

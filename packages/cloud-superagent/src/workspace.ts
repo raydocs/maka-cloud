@@ -142,6 +142,28 @@ export class LayerFsStore implements WorkspaceStore {
     branch.files[path] = content;
   }
 
+  /**
+   * Paths both forks changed away from the shared parent to different
+   * contents. Gate 3: a clash is a conflict, not a silent overwrite.
+   */
+  conflicts(left: WorkspaceHandle, right: WorkspaceHandle): string[] {
+    const a = this.branches.get(left.id);
+    const b = this.branches.get(right.id);
+    if (!a || !b) throw new Error('LayerFS conflict check needs two live branches.');
+    const parentId = a.parent && a.parent === b.parent ? a.parent : undefined;
+    const parent = parentId ? this.branches.get(parentId) : undefined;
+    const paths = new Set([...Object.keys(a.files), ...Object.keys(b.files)]);
+    const out: string[] = [];
+    for (const path of [...paths].sort()) {
+      const leftText = a.files[path];
+      const rightText = b.files[path];
+      if (leftText === undefined || rightText === undefined || leftText === rightText) continue;
+      const base = parent?.files[path];
+      if (leftText !== base && rightText !== base) out.push(path);
+    }
+    return out;
+  }
+
   async release(handle: WorkspaceHandle): Promise<void> {
     this.branches.delete(handle.id);
   }

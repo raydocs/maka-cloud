@@ -771,9 +771,11 @@ from a non-allowed actor does not spawn.
 
 ### P3 — WorkspaceStore in runners + LayerFS spike
 
-Move or re-export `WorkspaceStore` so the coding playbook calls `prepare()`.
-Run §10.1 gates on a disposable Instabox. Keep or delete `LayerFsStore`
-from the result.
+`@maka-cloud/runners` re-exports `WorkspaceStore`; the fleet defaults to
+`GitCloneStore`. The coding playbook calls `prepareHostWorkspace()` for
+host-side prep; sandbox clones stay `CLONE_SCRIPT`. The four-gate harness
+is `packages/cloud-runners/scripts/layerfs-gates.mjs` (`--local` in CI,
+`--live` only on a disposable Instabox). Not run on Instabox in this PR.
 
 ### P4 — paid layer
 
@@ -803,8 +805,8 @@ Filled in by the implementation PR; kept accurate here:
 | Mandate + approval gate + audit | implemented |
 | Tenant scoping | implemented |
 | Metering hooks | implemented (record only) |
-| `WorkspaceStore` + `GitCloneStore` | implemented |
-| `LayerFsStore` | metadata adapter; live mount throws |
+| `WorkspaceStore` + `GitCloneStore` | implemented; runners default; coding playbook `prepareHostWorkspace` |
+| `LayerFsStore` | metadata adapter; live mount throws; gate 3 harness `--local` |
 | `SandboxPort` | interface + fake; no live Instabox |
 | Host / duties / conductor wiring | P2: `startStack` creates one in-process Superagent; duties `readDelivery` is the GitHub Source; watchdog escalations are T33 stuck cards |
 | `#460` follow-up engine | not copied; `FollowUpBridge` only |
