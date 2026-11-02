@@ -10,7 +10,7 @@ a heading time is more than five minutes off that SHA's committer date.
 
 ## 2026-11-02 12:19 MST — cursor/superagent-scheduler-router-51be — 3f12cbe39
 
-- **PR:** none (this branch)
+- **PR:** [#474](https://github.com/raydocs/maka-cloud/pull/474)
 - **What:** Scheduler / admission queue (priority, size, deps, footprint, reserved human slot, aging, async start) and a two-layer tunable Router (Fast Path drops, Slow Path classify + observe/auto/off + feedback). Subscribed threads skip the router model. Recall chain `triggerId → threadId → workerId`. Queue + intake metrics on the progress snapshot. JSON `documents` table, no `user_version` bump.
 - **Why:** User-approved P1 (2 Nov 2026) plus DSH Fast/Slow Path alignment.
 - **Tests:** new scheduler / intake / recall suites; existing routing box/spend caps now expect `queued`. FakeSandbox + FakeJudgeClient.
