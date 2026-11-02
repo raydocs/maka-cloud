@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { test } from 'node:test';
+
+const run = promisify(execFile);
 import {
   createWorkspaceStore,
   GitCloneStore,
@@ -29,6 +33,52 @@ test('GitCloneStore clones a local repo and exports a patch of later edits', asy
   const patch = await store.exportPatch(handle);
   assert.equal(patch.includes('hello world'), true);
   assert.equal(patch.includes('readme.txt'), true);
+  await store.release(handle);
+});
+
+test('GitCloneStore exportPatch includes new untracked files', async () => {
+  const src = await initLocalRepo({ 'readme.txt': 'hello\n' });
+  const dest = await mkdtemp(join(tmpdir(), 'maka-clone-'));
+  const store = new GitCloneStore();
+  const handle = await store.prepare({
+    tenantId: 't',
+    workerId: 'w-untracked',
+    repoUrl: src,
+    workDir: dest,
+  });
+  await writeFile(join(dest, 'extra.ts'), 'export const n = 1;\n');
+  const patch = await store.exportPatch(handle);
+  assert.match(patch, /extra\.ts/);
+  assert.match(patch, /\+export const n = 1;/);
+  await store.release(handle);
+});
+
+test('GitCloneStore snapshot is a worktree tree id, not only HEAD', async () => {
+  const src = await initLocalRepo({ 'readme.txt': 'hello\n' });
+  const dest = await mkdtemp(join(tmpdir(), 'maka-clone-'));
+  const store = new GitCloneStore();
+  const handle = await store.prepare({
+    tenantId: 't',
+    workerId: 'w-snap',
+    repoUrl: src,
+    workDir: dest,
+  });
+  const { stdout: head } = await run('git', ['-C', dest, 'rev-parse', 'HEAD']);
+  const { stdout: headTree } = await run('git', ['-C', dest, 'rev-parse', 'HEAD^{tree}']);
+  const clean = await store.snapshot(handle);
+  assert.equal(clean.id, headTree.trim());
+  assert.notEqual(clean.id, head.trim());
+
+  await writeFile(join(dest, 'readme.txt'), 'changed\n');
+  await writeFile(join(dest, 'new.txt'), 'brand new\n');
+  const dirty = await store.snapshot(handle);
+  assert.notEqual(dirty.id, headTree.trim());
+  const { stdout: kind } = await run('git', ['-C', dest, 'cat-file', '-t', dirty.id]);
+  assert.equal(kind.trim(), 'tree');
+  const { stdout: headAfter } = await run('git', ['-C', dest, 'rev-parse', 'HEAD']);
+  assert.equal(headAfter.trim(), head.trim());
+  const { stdout: staged } = await run('git', ['-C', dest, 'diff', '--cached', '--name-only']);
+  assert.equal(staged.trim(), '');
   await store.release(handle);
 });
 

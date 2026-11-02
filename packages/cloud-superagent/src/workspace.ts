@@ -48,13 +48,14 @@ export class GitCloneStore implements WorkspaceStore {
 
   async snapshot(handle: WorkspaceHandle): Promise<SnapshotRef> {
     if (!handle.dir) throw new Error('GitCloneStore snapshot needs a directory.');
-    const { stdout } = await run('git', ['-C', handle.dir, 'rev-parse', 'HEAD']);
-    return { id: stdout.trim() };
+    return { id: await writeWorktreeTree(handle.dir) };
   }
 
   async exportPatch(handle: WorkspaceHandle): Promise<string> {
     if (!handle.dir) throw new Error('GitCloneStore exportPatch needs a directory.');
-    const { stdout } = await run('git', ['-C', handle.dir, 'diff', 'HEAD']);
+    // Stage first: `git diff HEAD` misses new untracked files.
+    await run('git', ['-C', handle.dir, 'add', '-A']);
+    const { stdout } = await run('git', ['-C', handle.dir, 'diff', '--cached', 'HEAD']);
     return stdout;
   }
 
@@ -172,6 +173,22 @@ export class LayerFsStore implements WorkspaceStore {
 export function createWorkspaceStore(options: { layerfs?: boolean } = {}): WorkspaceStore {
   if (options.layerfs) return new LayerFsStore(true);
   return new GitCloneStore();
+}
+
+/**
+ * Tree of the worktree including untracked files, on a temp index so HEAD
+ * and the real index stay put. `rev-parse HEAD` only names the last commit.
+ */
+async function writeWorktreeTree(dir: string): Promise<string> {
+  const index = join(dir, '.git', `maka-tree-${process.pid}-${Date.now()}`);
+  const env = { ...process.env, GIT_INDEX_FILE: index };
+  try {
+    await run('git', ['-C', dir, 'add', '-A'], { env });
+    const { stdout } = await run('git', ['-C', dir, 'write-tree'], { env });
+    return stdout.trim();
+  } finally {
+    await rm(index, { force: true });
+  }
 }
 
 /** Helper used by git-clone tests to make a local source repo. */

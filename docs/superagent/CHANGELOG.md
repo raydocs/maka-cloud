@@ -6,6 +6,15 @@ in the same commit. `changelog.test.ts` fails the package suite when this
 file is missing from the branch diff, when a later Super-agent commit
 omits it, or when uncommitted Super-agent edits leave it unchanged.
 
+## 2026-11-02 02:44 MST — cursor/superagent-real-loop-51be — 9cd3dcefe
+
+- **PR:** none ([compare](https://github.com/raydocs/maka-cloud/compare/main...cursor/superagent-real-loop-51be))
+- **What:** `GitCloneStore.exportPatch` stages with `git add -A` then `git diff --cached HEAD` so new untracked files are in the patch. `snapshot` writes a worktree tree id (`write-tree` on a temp index) instead of `rev-parse HEAD`.
+- **Why:** Review bug: `git diff HEAD` and HEAD-only snapshots miss untracked files and working-tree edits.
+- **Tests:** 121 passed in `@maka-cloud/superagent` (`test:dist`)
+- **Live:** n/a
+- **Migrations / risk:** none. Snapshot `id` is now a tree SHA, not a commit SHA. No sqlite change.
+
 ## 2026-11-02 02:42 MST — cursor/superagent-real-loop-51be — e5d421ae1
 
 - **PR:** none ([compare](https://github.com/raydocs/maka-cloud/compare/main...cursor/superagent-real-loop-51be))
