@@ -8,6 +8,24 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
+## 2026-11-02 16:00 MST — cursor/superagent-workspaces-51be — 3dc73baac
+
+- **PR:** [#465](https://github.com/raydocs/maka-cloud/pull/465)
+- **What:** Merge `origin/main` `4f54c25dc` (PR #464 Super-agent host) into Super-agent workspaces. Kept T34 P3 (`superagent` before `runners`). `AGENTS.md` T34 wording and CHANGELOG conflicted; ours plus #464's changelog entry kept.
+- **Why:** #464 landed on main; this PR was DIRTY. User asked to merge main up the remaining stack immediately.
+- **Tests:** conflict resolution only; prior head `19bf5136f` already had non-iOS CI green
+- **Live:** n/a
+- **Migrations / risk:** none
+
+## 2026-11-02 13:38 MST — cursor/superagent-workspaces-51be — b10cab40f
+
+- **PR:** [#465](https://github.com/raydocs/maka-cloud/pull/465)
+- **What:** Merge `origin/main` `6682cdc34` (PR #469 MakaEngine) into Super-agent workspaces. Kept MakaEngine (workspace, `build`/`build:eval` after `@maka/eval`, fork-lane/Dockerfile step, import-boundary) and T34 P3 (`superagent` still builds before `runners`). `AGENTS.md` and `package.json` conflicted; both sides kept. `docs/superagent` joins the ASF header exclusion.
+- **Why:** #469 landed on main; this PR was DIRTY. User asked to merge main up the stack and keep MakaEngine.
+- **Tests:** conflict resolution only
+- **Live:** n/a
+- **Migrations / risk:** none. Inherits #469 MakaEngine. No sqlite change.
+
 ## 2026-11-02 13:36 MST — cursor/superagent-host-51be — 6251b7923
 
 - **PR:** [#464](https://github.com/raydocs/maka-cloud/pull/464)

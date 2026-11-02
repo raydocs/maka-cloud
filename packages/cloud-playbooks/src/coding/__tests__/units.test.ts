@@ -120,6 +120,16 @@ test('verify accepts only a manifest the coding runner wrote', () => {
   assert.deepEqual(codingPlaybook.allowedRunners, ['coding']);
 });
 
+test('createCodingRunner keeps going when the fleet has no WorkspaceStore', async () => {
+  const { createCodingRunner } = await import('../wiring.js');
+  const { MemoryCodingDeliveries } = await import('../deliveries.js');
+  const runner = createCodingRunner(
+    { claude: {} as never, codex: {} as never, fleet: {} as never },
+    { deliveries: new MemoryCodingDeliveries() },
+  );
+  assert.equal(runner.options.workspaces, undefined);
+});
+
 test('the coding runner wires onto the T6 runners', async () => {
   const { InstaboxClient } = await import('@maka-cloud/instabox');
   const { createCloudRunners, FixedMachineProvider } = await import('@maka-cloud/runners');
@@ -133,6 +143,23 @@ test('the coding runner wires onto the T6 runners', async () => {
   assert.equal(runner.name, 'coding');
   assert.equal(runner.options.agents['claude-agent-sdk'], cloud.claude);
   assert.equal(runner.options.agents.codex, cloud.codex);
+  assert.equal(runner.options.workspaces?.kind, 'git-clone');
+  const { initLocalRepo } = await import('@maka-cloud/runners');
+  const { mkdtemp } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const src = await initLocalRepo({ 'readme.txt': 'hello\n' });
+  const dest = await mkdtemp(join(tmpdir(), 'coding-ws-'));
+  const handle = await runner.prepareHostWorkspace({
+    tenantId: 'inv_test',
+    taskId: 'tsk_ws',
+    repoUrl: src,
+    workDir: dest,
+  });
+  assert.equal(handle.kind, 'git-clone');
+  const patch = await runner.options.workspaces?.exportPatch(handle);
+  assert.equal(typeof patch, 'string');
+  await runner.options.workspaces?.release(handle);
 });
 
 test('a check is a timeout when the command itself ran for the whole limit', () => {

@@ -61,6 +61,14 @@ test('LayerFS is off by default and refuses a live mount when enabled', async ()
   on.write(forked, 'a.ts', 'three');
   const forkPatch = await on.exportPatch(forked);
   assert.equal(forkPatch.includes('+three'), true);
+  const other = await on.prepare({
+    tenantId: 't',
+    workerId: 'w3',
+    repoUrl: 'x',
+    forkOf: handle.id,
+  });
+  on.write(other, 'a.ts', 'four');
+  assert.deepEqual(on.conflicts(forked, other), ['a.ts']);
   assert.equal(createWorkspaceStore().kind, 'git-clone');
   assert.equal(createWorkspaceStore({ layerfs: true }).kind, 'layerfs');
 });

@@ -1056,9 +1056,10 @@ against the DSH prototype's full-access operator user.
   (`HeuristicJudge` stays default).
 - Persistence: package-local SQLite (`superagent.db` next to the server
   dir), not a `cloud-server` migration.
-- `WorkspaceStore`: git clone default; LayerFS adapter compiled, off,
-  no FUSE/Docker/server. Spike gates stay in
-  `docs/fork/design/layerfs.md` and §10 of the architecture.
+- `WorkspaceStore`: git clone default on the T6 fleet; LayerFS adapter
+  compiled, off, no FUSE/Docker/server. Spike harness:
+  `packages/cloud-runners/scripts/layerfs-gates.mjs` (four gates; `--local`
+  only in CI).
 - Tests (fakes only, no live model or sandbox): pass-through has zero
   judge calls; duplicate Trigger → one worker; sqlite restore resumes
   inbox and plan; looping handler → W3; merge/push/secrets/deploy
