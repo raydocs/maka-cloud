@@ -417,6 +417,25 @@ export {
 } from './sqlite-store.js';
 export type { SuperagentStore } from './store.js';
 export {
+  MemoryOutboxStore,
+  Outbox,
+  outboxBackoffMs,
+  OUTBOX_BASE_DELAY_MS,
+  OUTBOX_MAX_ATTEMPTS,
+  OUTBOX_MAX_DELAY_MS,
+  PermanentOutboxError,
+  SqliteOutboxStore,
+  type DrainResult,
+  type EnqueueInput,
+  type NewOutboxItem,
+  type OutboxFilter,
+  type OutboxHandler,
+  type OutboxItem,
+  type OutboxOptions,
+  type OutboxState,
+  type OutboxStore,
+} from './outbox.js';
+export {
   checkSubject,
   conversationSubject,
   issueSubject,
