@@ -4,6 +4,7 @@ import type {
   InboxItem,
   NormalizedEvent,
   Subscription,
+  TenantBoxRecord,
   Usage,
   UsageEntry,
   WorkerRecord,
@@ -51,6 +52,11 @@ export interface SuperagentStore {
     events: number;
   };
 
+  /** Tenant box JSON. No sqlite schema bump — reserved retired worker row. */
+  putTenantBox(box: TenantBoxRecord): void;
+  tenantBox(tenantId: string): TenantBoxRecord | undefined;
+  allTenantBoxes(): TenantBoxRecord[];
+
   close(): void;
   backupTo?(destination: string): Promise<void>;
 }
@@ -63,8 +69,10 @@ export function cloneWorker(worker: WorkerRecord): WorkerRecord {
       ...worker.mandate,
       scope: { repos: [...worker.mandate.scope.repos], paths: worker.mandate.scope.paths?.slice() },
       budgets: { ...worker.mandate.budgets },
+      box: worker.mandate.box ? { ...worker.mandate.box } : undefined,
     },
     usage: { ...worker.usage },
+    box: worker.box ? cloneTenantBox(worker.box) : undefined,
     evidence: (worker.evidence ?? []).map((block) => ({ ...block })),
     spills: (worker.spills ?? []).map((row) => ({ ...row })),
     reviewReceipts: (worker.reviewReceipts ?? []).map((row) => ({ ...row })),
@@ -88,6 +96,10 @@ export function cloneWorker(worker: WorkerRecord): WorkerRecord {
         }
       : undefined,
   };
+}
+
+export function cloneTenantBox(box: TenantBoxRecord): TenantBoxRecord {
+  return { ...box, activeWorkers: [...box.activeWorkers] };
 }
 
 export const TERMINAL_OR_HELD: readonly WorkerState[] = [

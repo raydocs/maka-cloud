@@ -8,6 +8,15 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
+## 2026-11-02 17:18 MST — cursor/superagent-shared-box-51be — 4bd2c5157
+
+- **PR:** [#472](https://github.com/raydocs/maka-cloud/pull/472)
+- **What:** merge: cursor/superagent-real-loop-51be (#471) into Super-agent shared-box. Keep every CHANGELOG entry, newest first. This branch is now a descendant of #471, #470, and main.
+- **Why:** Linearize the remaining stack so merging #470 → #471 → #472 → #473 cannot re-dirty the next PR. Linux-only gates.
+- **Tests:** conflict resolution only; prior head `46f778a32`
+- **Live:** n/a
+- **Migrations / risk:** none
+
 ## 2026-11-02 17:18 MST — cursor/superagent-real-loop-51be — 76fadef57
 
 - **PR:** [#471](https://github.com/raydocs/maka-cloud/pull/471)
@@ -25,6 +34,15 @@ a heading time is more than five minutes off that SHA's committer date.
 Keep every CHANGELOG entry, newest first.
 - **Why:** Linearize the remaining stack so merging #470 → #471 → #472 → #473 cannot re-dirty the next PR. Linux-only gates.
 - **Tests:** conflict resolution only; prior head `e925c75a8`
+- **Live:** n/a
+- **Migrations / risk:** none
+
+## 2026-11-02 16:53 MST — cursor/superagent-shared-box-51be — fa630a965
+
+- **PR:** [#472](https://github.com/raydocs/maka-cloud/pull/472)
+- **What:** Merge `origin/main` `e83340599` (PR #465 Super-agent workspaces) into Super-agent shared-box. CHANGELOG conflicted; both sides kept, newest first.
+- **Why:** #465 landed on main; remaining stack PRs needed main forwarded. Linux-only gates.
+- **Tests:** conflict resolution only; prior head `e5ad77db4`
 - **Live:** n/a
 - **Migrations / risk:** none
 
@@ -52,6 +70,15 @@ Keep every CHANGELOG entry, newest first.
 - **What:** Merge `origin/main` `e83340599` (PR #465 Super-agent workspaces) into Super-agent ledger. CHANGELOG conflicted; both sides kept, newest first.
 - **Why:** #465 landed on main; this PR was DIRTY. User asked to merge main forward and report Linux-green SHAs.
 - **Tests:** conflict resolution only; prior head `9a9f8ba87` already had Linux CI green or in progress
+- **Live:** n/a
+- **Migrations / risk:** none
+
+## 2026-11-02 16:02 MST — cursor/superagent-shared-box-51be — eda85c026
+
+- **PR:** [#472](https://github.com/raydocs/maka-cloud/pull/472)
+- **What:** Merge `origin/main` `4f54c25dc` (PR #464 Super-agent host) into Super-agent shared-box. Kept T34 P3 (`superagent` before `runners`). `AGENTS.md` T34 wording and CHANGELOG conflicted; ours plus incoming entries kept.
+- **Why:** #464 landed on main. User asked to merge main up the remaining stack immediately.
+- **Tests:** conflict resolution only; prior head `64bf658ec` already had non-iOS CI green
 - **Live:** n/a
 - **Migrations / risk:** none
 
@@ -109,6 +136,15 @@ Keep every CHANGELOG entry, newest first.
 - **Live:** n/a
 - **Migrations / risk:** none. Retry only `unchecked` listings. Production boxes with a real privileged program still refuse immediately.
 
+## 2026-11-02 13:42 MST — cursor/superagent-shared-box-51be — cf89368a5
+
+- **PR:** [#472](https://github.com/raydocs/maka-cloud/pull/472)
+- **What:** Removed leftover `AGENTS.md` conflict markers on the `asf-license-headers` fork-delta row. Kept both `docs/superagent` and `scripts/cloud-maka-engine-boundary.mjs` exclusions.
+- **Why:** The main-merge commit resolved the T34/MakaEngine table but left a second hunk at line 65.
+- **Tests:** none (docs table only)
+- **Live:** n/a
+- **Migrations / risk:** none
+
 ## 2026-11-02 13:42 MST — cursor/superagent-real-loop-51be — 1157d2ea8
 
 - **PR:** [#471](https://github.com/raydocs/maka-cloud/pull/471)
@@ -126,6 +162,15 @@ Keep every CHANGELOG entry, newest first.
 - **Tests:** none (docs table only)
 - **Live:** n/a
 - **Migrations / risk:** none
+
+## 2026-11-02 13:40 MST — cursor/superagent-shared-box-51be — b25a3c7ca
+
+- **PR:** [#472](https://github.com/raydocs/maka-cloud/pull/472)
+- **What:** Merge `origin/main` `6682cdc34` (PR #469 MakaEngine) into Super-agent shared-box. Kept MakaEngine and T34 P3 (`superagent` before `runners`). `AGENTS.md` and `package.json` conflicted; both sides kept.
+- **Why:** #469 landed on main; this PR was DIRTY. User asked to merge main up the stack and keep MakaEngine.
+- **Tests:** conflict resolution only; prior head `e632e765f` already had `test` green
+- **Live:** n/a
+- **Migrations / risk:** none. Inherits #469 MakaEngine. No sqlite change.
 
 ## 2026-11-02 13:39 MST — cursor/superagent-real-loop-51be — 90bb34bd6
 
@@ -172,6 +217,15 @@ Keep every CHANGELOG entry, newest first.
 - **Live:** n/a
 - **Migrations / risk:** none. Inherits #469 MakaEngine. No sqlite change.
 
+## 2026-11-02 12:15 MST — cursor/superagent-shared-box-51be — 285bcb971
+
+- **PR:** [#472](https://github.com/raydocs/maka-cloud/pull/472)
+- **What:** `biome format` on `box-pool.ts` and `box-pool.test.ts`. Merged #471 W2 two-tick host test and #466 `.setup-*` cleanup.
+- **Why:** CI `test` on #472 runs 41502228088 and 41506056381 failed `format:check` (`Found 2 errors`) before workspace tests ran. Same assertions.
+- **Tests:** format check of those two files; host stuck-card and cancel-install come from the merge
+- **Live:** n/a
+- **Migrations / risk:** none. Format only.
+
 ## 2026-11-02 12:13 MST — cursor/superagent-real-loop-51be — b87e48b09
 
 - **PR:** [#471](https://github.com/raydocs/maka-cloud/pull/471)
@@ -180,6 +234,24 @@ Keep every CHANGELOG entry, newest first.
 - **Tests:** cloud-host stack stuck-card; cloud-runners cancel-while-install
 - **Live:** n/a
 - **Migrations / risk:** none. Test-only.
+
+## 2026-11-02 12:01 MST — cursor/superagent-shared-box-51be — 4e52438a1
+
+- **PR:** [#472](https://github.com/raydocs/maka-cloud/pull/472)
+- **What:** One host process per tenant box (`BoxDaemon`). Each worker is a lightweight in-process session (git worktree cwd, own env, own AbortController) instead of one maka process per worker. Isolation and cancel stay per worker. RSS measured here: idle `node` **43 MiB**; eight daemon sessions added **<1 MiB** total (~0.5 KiB/session at the noise floor). Owner-measured idle maka process is **232–278 MiB**, so N workers in one daemon pay that once instead of N times.
+- **Why:** Factory Droid 1.0: several sessions used to mean several ~350 MB processes; they now share the daemon. User request to fold that into BoxPool.
+- **Tests:** 143 passed in `@maka-cloud/superagent` (`test:dist`). FakeSandbox — two sessions, isolated cwd/env, cancel one leaves the other; per-session RSS is far below a per-process baseline.
+- **Live:** n/a
+- **Migrations / risk:** none
+
+## 2026-11-02 11:35 MST — cursor/superagent-shared-box-51be — 59924d4af
+
+- **PR:** [#472](https://github.com/raydocs/maka-cloud/pull/472)
+- **What:** One long-lived Instabox box per tenant (`BoxPool`). Mandate size default 4/8192, up to 4 concurrent workers, git worktrees at `/work/<workerId>` from a cached base clone, shared npm cache, host-side secrets. Activity lease while anyone is active; idle 5 min then suspend; `deleteAfterSeconds` is a 7-day backstop only. Wake reports phase `waking` with measured time. Gone box rebuilds from the base snapshot, else a fresh create. Box JSON in the store (no migration). W-rule `box_stuck` for stuck suspend/resume or a leftover lease. Ledger records create/wake/restore wallMs. LayerFS stays off.
+- **Why:** User request: one box per tenant, many workers, no 30-min kill.
+- **Tests:** 141 passed in `@maka-cloud/superagent` (`test:dist`). FakeSandbox parity — concurrent workers, idle suspend then wake, snapshot rebuild — plus sqlite JSON persist, admission `worker_cap`, watchdog `box_stuck`. Host typecheck clean.
+- **Live:** n/a (Instabox timings separately)
+- **Migrations / risk:** none. JSON fields only. No sqlite `user_version` bump.
 
 ## 2026-11-02 11:06 MST — cursor/superagent-real-loop-51be — 4b2c813e3
 

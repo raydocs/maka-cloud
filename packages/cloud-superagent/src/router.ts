@@ -70,16 +70,31 @@ export function admit(
   return { ok: true, reason: 'admitted' };
 }
 
-/** Spawn-time cap: concurrent Instabox boxes and tenant spend. */
+/** Spawn-time cap: concurrent Instabox boxes / workers-per-box and tenant spend. */
 export function admitSpawn(input: {
   boxedLive: number;
   wouldBox: boolean;
   tenantUsdMicros: number;
-  policy: Pick<AdmissionPolicy, 'maxBoxes' | 'spendCapUsd'>;
+  policy: Pick<AdmissionPolicy, 'maxBoxes' | 'spendCapUsd' | 'maxWorkersPerBox'>;
+  sharedBox?: boolean;
+  tenantBoxWorkers?: number;
+  wouldCreateTenantBox?: boolean;
 }): AdmissionResult {
   if (input.policy.spendCapUsd !== undefined) {
     const cap = Math.round(input.policy.spendCapUsd * 1_000_000);
     if (input.tenantUsdMicros >= cap) return { ok: false, reason: 'spend_cap' };
+  }
+  if (input.sharedBox) {
+    const workerCap = input.policy.maxWorkersPerBox ?? 4;
+    if ((input.tenantBoxWorkers ?? 0) >= workerCap) return { ok: false, reason: 'worker_cap' };
+    if (
+      input.wouldCreateTenantBox &&
+      input.policy.maxBoxes !== undefined &&
+      input.boxedLive >= input.policy.maxBoxes
+    ) {
+      return { ok: false, reason: 'box_cap' };
+    }
+    return { ok: true, reason: 'admitted' };
   }
   if (
     input.wouldBox &&
