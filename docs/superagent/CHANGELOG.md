@@ -8,7 +8,15 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
-## 2026-11-02 18:37 MST — cursor/superagent-wiring-51be
+## 2026-11-03 02:37 MST — superagent/harness-analysis
+
+- **What:** on-demand tool loading and a shared-daemon bench. `tool-loading.ts`: a `ToolCatalog` (core tools plus a client-side `load_tools`), `firstTurnRequest` (turn one carries only core tools; the system prompt ends with a stable index of deferred tools), `toAnthropicTools` (every tool declared in `tools[]` from the first request, deferred ones with `defer_loading: true`, never `cache_control` on them), and `handleLoadTools` (exact names or a keyword query, at most 5; loaded tools go onto `appendedTools` through `loadTool`; the `tool_result` carries `tool_reference` blocks that the API expands inline). It throws if a load would break the cache prefix. `daemon-bench.ts` / `scripts/daemon-bench.mjs` (`npm run daemon-bench`): one `BoxDaemon` process hosting N worker sessions against N processes with one session each; RSS from `/proc` (macOS falls back to `ps -o rss`), cold start, attach, wake and wake-after-reap, p50/p95. Nothing calls either module yet; the coder loop wires the catalog in behind its own flag.
+- **Why:** turn one should not pay for every tool schema, and a mid-session load must not rewrite the `tools` bytes (Anthropic renders tools → system → messages, so a changed tools array drops the whole cache). The bench checks the per-session cost the box daemon is built on.
+- **Tests:** `tool-loading.test` 13, `daemon-bench.test` 4 and `prompt-cache.test` 6 passed (macOS, Node 26). The bench test asserts report shape only, no timing or memory thresholds.
+- **Live:** bench on Linux (Docker Desktop VM, `node:22-bookworm-slim`, Node 22.23.4, kernel 7.0.14-linuxkit aarch64, 12 CPUs, 8 GB), 15 reps, FakeSandbox `exec` as the per-wake work. Total RSS shared vs per-process: N=1 46.2 vs 46.2 MiB, N=4 46.5 vs 185.0, N=8 46.8 vs 369.9, N=16 47.3 vs 739.8 MiB (about 0.07 MiB per extra shared session, about 46 MiB per extra process). Cold start p50 at N=16: shared 18.5 ms, per-process 31.5 ms (all 16 ready: 51.9 ms p50, 94.0 ms p95). Attach to a live daemon 0.1 ms. Wake of a live idle worker about 5 ms in both modes. Wake after reap: shared 1.1 ms p50 (detach, attach, wake), per-process 22.5 ms p50 (respawn). The work is a shell exec, not a model turn; sessions hold no runtime state, so real per-worker heap growth is not measured.
+- **Migrations / risk:** none. No `user_version` bump, no flag turned on, no server or deploy change.
+
+## 2026-11-02 18:37 MST — cursor/superagent-wiring-51be — 303d685eb
 
 - **What:** merge the updated `cursor/superagent-decisions-policy-51be` tip (`3c7049b04`), which already contains scheduler, intake, BYOM, duplex, lessons, and review-verify. Kept decision-card wiring (`recordFromCardResolution`, must-ask rows on `statusSnapshot.decisions`), host flags default off, and `CodingLoopHandler` on `DuplexLoop`. Speculative still runs only after a cross-source merge misses. sqlite `user_version` stays 2.
 - **Why:** The linearized tip moved after the first merge of #480. Bring that tip in with git merge only.

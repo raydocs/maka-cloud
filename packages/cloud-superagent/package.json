@@ -18,6 +18,7 @@
     "live-smoke": "node ./scripts/live-smoke.mjs",
     "real-loop": "node ./scripts/real-loop.mjs",
     "metrics": "node ./scripts/metrics.mjs",
+    "daemon-bench": "node ./scripts/daemon-bench.mjs",
     "status": "node ./scripts/status.mjs"
   },
   "dependencies": {
