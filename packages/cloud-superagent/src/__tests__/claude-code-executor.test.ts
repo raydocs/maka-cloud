@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { chmod, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -912,4 +913,93 @@ test('review fix: host CODEX_HOME never reaches the box; a stored Magpie route f
   assert.equal(ran.terminal.type, 'failed');
   if (ran.terminal.type === 'failed') assert.match(ran.terminal.error, /Magpie route/);
   assert.equal(runner.spawned.length, 0, 'no fallback to the box login');
+});
+
+test('review round 2: the box filter ends on a value inside its own tag, and finds JSON-escaped and multi-line values', async () => {
+  const sandbox = new FakeSandbox();
+  await boxWithRepo(sandbox, 'box-j');
+  const saved = { a: process.env.LOOPY_SECRET_A, b: process.env.ODD_SECRET_B };
+  process.env.LOOPY_SECRET_A = 'LOOPY_SECRET_A';
+  process.env.ODD_SECRET_B = 'pa"ss\\word\nline-two';
+  try {
+    const code = [
+      'console.log(JSON.stringify({ a: process.env.A, b: process.env.B }));',
+      'console.error("raw " + process.env.B);',
+      'process.exit(4);',
+    ].join(' ');
+    const proc = new BoxProcessRunner(sandbox, { pollMs: 20 }).spawn({
+      command: process.execPath,
+      args: ['-e', code],
+      cwd: BOX_REPO,
+      env: {},
+      envFromBox: { A: 'LOOPY_SECRET_A', B: 'ODD_SECRET_B' },
+      machineId: 'box-j',
+    });
+    proc.endInput();
+    const out: string[] = [];
+    const reading = (async () => {
+      for await (const line of proc.lines) out.push(line);
+    })();
+    await Promise.race([
+      reading,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('filter hung')), 10_000)),
+    ]);
+    const exit = await proc.exited;
+    assert.deepEqual(JSON.parse(out.join('')), { a: '[LOOPY_SECRET_A]', b: '[ODD_SECRET_B]' });
+    assert.equal(exit.stderr.includes('line-two'), false);
+    assert.match(exit.stderr, /raw \[ODD_SECRET_B\]/);
+    assert.equal(exit.code, 4, 'the CLI exit code, not the filter one');
+  } finally {
+    for (const [name, value] of [
+      ['LOOPY_SECRET_A', saved.a],
+      ['ODD_SECRET_B', saved.b],
+    ] as const) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});
+
+test('review round 2: a stop during the start request still stops the CLI', async () => {
+  const sandbox = new FakeSandbox();
+  await boxWithRepo(sandbox, 'box-r');
+  const id = '7c1e2a90-4b3d-4f6e-8a1b-0123456789ab';
+  const sent: string[] = [];
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const slow = Object.create(sandbox) as FakeSandbox;
+  slow.exec = async (machineId, request) => {
+    sent.push(request.cmd);
+    if (request.cmd.includes('nohup')) {
+      await gate;
+      const result = await sandbox.exec(machineId, request);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      return result;
+    }
+    return sandbox.exec(machineId, request);
+  };
+  const proc = new BoxProcessRunner(slow, { pollMs: 20 }).spawn({
+    command: process.execPath,
+    args: ['-e', 'setTimeout(() => {}, 20000)', id],
+    cwd: BOX_REPO,
+    env: {},
+    machineId: 'box-r',
+  });
+  proc.endInput();
+  const reading = (async () => {
+    for await (const _line of proc.lines) {
+      // none
+    }
+  })();
+  while (!sent.some((cmd) => cmd.includes('nohup'))) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  proc.kill();
+  release();
+  await reading;
+  const alive = spawnSync('pgrep', ['-f', id]);
+  if (alive.status === 0) spawnSync('pkill', ['-f', id]);
+  assert.notEqual(alive.status, 0, 'no CLI left running');
 });

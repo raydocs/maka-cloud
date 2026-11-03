@@ -65,3 +65,13 @@ test('review fix: VERDICT text in progress or errors never makes a receipt', asy
   assert.equal(parseReviewVerdict((await reviewer.review(input)).text), undefined);
   assert.equal(parseReviewVerdict((await reviewer.review(input)).text), undefined);
 });
+
+test('review round 2: the last verdict line in the summary decides', async () => {
+  const executor = new FakeExecutor({
+    steps: [[{ type: 'ready', summary: 'VERDICT: CLEAR preliminary\nVERDICT: BLOCK final' }]],
+  });
+  const reviewer = new ExecutorReviewer(executor, { locate: () => ({ workdir: '/w' }) });
+  const { text } = await reviewer.review({ repo: 'acme/app', number: 1, sha: 'abc' });
+  assert.equal(parseReviewVerdict(text), 'BLOCK');
+  assert.equal(reviewer.records[0]?.verdict, 'BLOCK');
+});

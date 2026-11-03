@@ -76,8 +76,11 @@ export class ExecutorReviewer implements ReviewerPort {
     const terminal = ran.terminal;
     // Only a ready turn's final summary can carry the verdict. Any other
     // `VERDICT:` text (progress, errors) is defused so it cannot make a receipt.
+    // The last verdict line wins, as in `parseReviewVerdict`.
     const verdictLine =
-      terminal.type === 'ready' ? /^(VERDICT:\s*(CLEAR|BLOCK)\b.*)$/m.exec(terminal.summary) : null;
+      terminal.type === 'ready'
+        ? ([...terminal.summary.matchAll(/^(VERDICT:\s*(CLEAR|BLOCK)\b.*)$/gm)].at(-1) ?? null)
+        : null;
     const context =
       terminal.type === 'ready'
         ? [...ran.progress.slice(-5), terminal.summary].join('\n')

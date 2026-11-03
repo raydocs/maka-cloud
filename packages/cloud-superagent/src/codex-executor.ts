@@ -83,6 +83,8 @@ export function codexStreamEvents(
   const events: ExecutorEvent[] = [];
   if (line.type === 'thread.started' && typeof line.thread_id === 'string') {
     session.vendorSessionId = line.thread_id;
+    // An event, so the coder stores the thread id before anything else happens.
+    events.push({ type: 'progress', text: 'codex thread started' });
     return { events };
   }
   if (line.type === 'turn.started') {

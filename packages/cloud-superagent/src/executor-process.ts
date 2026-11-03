@@ -142,9 +142,10 @@ export class BoxProcessRunner implements ProcessRunner {
     // Box Secret values are known only inside the box, so the box filters
     // them out of the CLI's output before the host reads it.
     const boxSecrets = Object.values(spec.envFromBox ?? {});
-    const filter = boxSecrets.length
-      ? `awk -v names=${shellWord(boxSecrets.join(' '))} 'BEGIN { n = split(names, k, " ") } { for (j = 1; j <= n; j++) { s = ENVIRON[k[j]]; if (length(s) >= 8) while ((i = index($0, s)) > 0) $0 = substr($0, 1, i - 1) "[" k[j] "]" substr($0, i + length(s)) } print; fflush() }'`
-      : '';
+    const filter = (whole: boolean) =>
+      boxSecrets.length
+        ? `awk -v names=${shellWord(boxSecrets.join(' '))}${whole ? ' -v whole=1' : ''} ${shellWord(SCRUB_AWK)}`
+        : '';
     const timed = this.options.timeBin ? [this.options.timeBin, '-f', `${RSS_MARK}%M`] : [];
     const cmd = [...refs, ...[...timed, spec.command, ...spec.args].map(shellWord)].join(' ');
     const sandbox = this.sandbox;
@@ -190,10 +191,12 @@ export class BoxProcessRunner implements ProcessRunner {
           '#!/bin/sh',
           '. "$1/env"',
           'rm -f "$1/env"',
-          ...(filter
+          // A stop that came while the start request ran: never start the CLI.
+          '[ -e "$1/stop" ] && { echo 143 > "$1/code"; exit 0; }',
+          ...(boxSecrets.length
             ? [
-                `{ ${cmd} < "$1/in" 2> "$1/err.raw"; echo $? > "$1/rc"; } | ${filter} > "$1/out"`,
-                `${filter} < "$1/err.raw" > "$1/err"`,
+                `{ ${cmd} < "$1/in" 2> "$1/err.raw"; echo $? > "$1/rc"; } | ${filter(false)} > "$1/out"`,
+                `${filter(true)} < "$1/err.raw" > "$1/err"`,
                 'rm -f "$1/err.raw"',
                 'mv "$1/rc" "$1/code"',
               ]
@@ -219,6 +222,19 @@ export class BoxProcessRunner implements ProcessRunner {
         if (started.exitCode !== 0)
           throw new Error(`box exec start failed: ${started.stderr.slice(-400)}`);
         running = true;
+        // Stopped while the start request ran: the CLI may have started after
+        // kill()'s pkill. Keep stopping it until run.sh reports an exit.
+        if (killed) {
+          for (let tries = 0; tries < 30; tries += 1) {
+            const stopped = await exec({
+              cmd: `touch ${shellWord(`${dir}/stop`)}; ${marker ? `pkill -f -- ${shellWord(marker)}; ` : ''}test -e ${shellWord(`${dir}/code`)} && echo stopped || true`,
+              timeoutSeconds: 30,
+            });
+            if (stopped.stdout.includes('stopped')) break;
+            await new Promise((resolve) => setTimeout(resolve, pollMs));
+          }
+          return;
+        }
         let offset = 0;
         // Sum of RSS over the processes whose argv carries the session id.
         const rssProbe = marker
@@ -319,6 +335,35 @@ export async function signedIn(runner: ProcessRunner, spec: ExecutorProcessSpec)
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'\\''`)}'`;
 }
+
+/**
+ * Replaces each box Secret's value, raw and as JSON escapes it, with
+ * `[NAME]`. The cursor moves past each replacement, so a value that is part
+ * of its own tag cannot loop. With `whole`, the input is one record (stderr
+ * read from a file), so a value that spans lines is still found.
+ */
+const SCRUB_AWK = String.raw`function rep(str, a, b,   out, i) {
+  out = ""
+  while ((i = index(str, a)) > 0) { out = out substr(str, 1, i - 1) b; str = substr(str, i + length(a)) }
+  return out str
+}
+BEGIN {
+  n = split(names, k, " ")
+  for (j = 1; j <= n; j++) {
+    v[j] = ENVIRON[k[j]]
+    e = rep(v[j], "\\", "\\\\"); e = rep(e, "\"", "\\\""); e = rep(e, "\n", "\\n"); e = rep(e, "\r", "\\r"); e = rep(e, "\t", "\\t")
+    w[j] = e
+  }
+  if (whole) { RS = "\001"; ORS = "" }
+}
+{
+  for (j = 1; j <= n; j++) if (length(v[j]) >= 8) {
+    $0 = rep($0, v[j], "[" k[j] "]")
+    if (w[j] != v[j]) $0 = rep($0, w[j], "[" k[j] "]")
+  }
+  print
+  fflush()
+}`;
 
 function shellWord(value: string): string {
   return /^[A-Za-z0-9_./:=@%+-]+$/.test(value) ? value : `'${value.replaceAll("'", `'\\''`)}'`;

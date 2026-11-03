@@ -263,3 +263,32 @@ test('review fix: a stored Codex Magpie session fails closed when Magpie is not 
   assert.equal(ran.terminal.type, 'failed');
   assert.equal(runner.spawned.length, 0);
 });
+
+test('review round 2: thread.started alone stores the thread id', async () => {
+  const dir = await initLocalRepo(scratchFiles());
+  const sessions = new MemoryExecutorSessionStore();
+  const runner = new ScriptedProcessRunner([
+    () => ({ lines: [started, turnStarted, message('ok'), completed], done: true }),
+  ]);
+  let stored: string | undefined;
+  const coder = new ExecutorCoder(new CodexExecutor({ env: ENV, runner }), {
+    sessions,
+    onEvent: async (event) => {
+      if (event.type === 'progress' && event.text === 'codex thread started') {
+        stored = (await sessions.get('w1', 't'))?.vendorSessionId;
+      }
+    },
+  });
+  const worker = {
+    workerId: 'w1',
+    tenantId: 't',
+    mandate: actMandate([]),
+  } as unknown as WorkerRecord;
+  await coder.apply({
+    dir,
+    brief: 'fix',
+    event: { type: 'pr_opened', fields: [] } as unknown as NormalizedEvent,
+    worker,
+  });
+  assert.equal(stored, THREAD);
+});

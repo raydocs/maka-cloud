@@ -8,7 +8,17 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
-## 2026-11-03 04:32 MST — superagent/codex-executor
+## 2026-11-03 04:48 MST — superagent/codex-executor
+
+- **What:** fixes for round 2 of the independent review of #491 (Codex `gpt-6.1-sol`, xhigh: `VERDICT: approve-with-fixes`, five P2 leftovers; it confirmed the round 1 fixes). Default off as before.
+  - **Box filter:** the `awk` scrubber moves past each replacement, so a Secret value that appears in its own `[NAME]` tag no longer loops forever. It also replaces the value as JSON escapes it (quotes, backslashes, newlines), and reads stderr as one record so a value spanning lines is found. Checked with macOS `awk` and Debian `mawk`.
+  - **Stop during the start request:** `run.sh` exits before the CLI when a `stop` file exists. When a stop arrives while the start request runs, the runner writes that file and keeps sending `pkill` until `run.sh` reports an exit.
+  - **Thread id:** `thread.started` now yields a `codex thread started` progress event, so the coder stores the id before anything else happens.
+  - **Verdict:** when the final summary holds more than one `VERDICT:` line, the last one decides, as in `parseReviewVerdict`. Before, an earlier `CLEAR` hid a later `BLOCK`.
+- **Why:** each was reproduced by the reviewer. Round 2 was the last review round; residual risk is listed in the PR.
+- **Tests:** four new `review round 2:` tests, all failing with the source changes stashed (the filter test hangs there) and passing with them. Package suite on macOS: 336 of 338. The failures are `box-daemon` RSS, which needs Linux `/proc`, and the uncommitted-changelog check, which this commit clears.
+
+## 2026-11-03 04:32 MST — superagent/codex-executor — 317d07325
 
 - **What:** fixes for the independent review of #491 (Codex `gpt-6.1-sol`, xhigh, round 1: `VERDICT: block`, one P1 and five P2). Default off as before.
   - **P1, redaction:** both executors now pass every event they yield (progress, summaries, errors) through `redactDeep`, which replaces the Magpie key and the host's gateway values with `[NAME]`. Before, only stderr of a run without a result line was redacted. In the box, when a Secret is selected (`envFromBox`), `run.sh` pipes stdout and stderr through an `awk` filter that replaces each Secret's value, including the outbound proxy's placeholder, with `[SECRET_NAME]` before it is written.
