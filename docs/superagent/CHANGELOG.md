@@ -8,6 +8,15 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
+## 2026-11-02 18:14 MST — cursor/superagent-scheduler-router-51be — 2b177c2d8
+
+- **PR:** [#474](https://github.com/raydocs/maka-cloud/pull/474)
+- **What:** merge: origin/cursor/superagent-scheduler-router-51be format-fix (`5e8282663`) with the local format-fix. Same biome output; both CHANGELOG entries kept.
+- **Why:** Remote landed a parallel format fix; git merge only, no rebase/force-push.
+- **Tests:** format:check clean
+- **Live:** n/a
+- **Migrations / risk:** none
+
 ## 2026-11-02 18:09 MST — cursor/superagent-intake-merge-51be — 5f6a49fae
 
 - **PR:** [#477](https://github.com/raydocs/maka-cloud/pull/477)
@@ -16,6 +25,15 @@ a heading time is more than five minutes off that SHA's committer date.
 - **Tests:** 194 `@maka-cloud/superagent` tests passed after the merge
 - **Live:** n/a
 - **Migrations / risk:** none
+
+## 2026-11-02 18:09 MST — cursor/superagent-scheduler-router-51be — 5e8282663
+
+- **PR:** [#474](https://github.com/raydocs/maka-cloud/pull/474)
+- **What:** Biome format the scheduler / intake / recall / runtime / WorkStatus files so CI `format:check` passes after the main merge.
+- **Why:** CI `test` on `227e6f9c6` failed at Check formatting (10 files).
+- **Tests:** biome check clean on the 10 files
+- **Live:** n/a
+- **Migrations / risk:** none. Format only.
 
 ## 2026-11-02 18:08 MST — cursor/superagent-scheduler-router-51be — 3524bb276
 
