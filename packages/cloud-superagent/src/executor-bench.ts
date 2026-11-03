@@ -1,10 +1,12 @@
 import { rm } from 'node:fs/promises';
 import type { IngestInput } from './events.js';
-import { ExecutorCoder, type ExecutorKind } from './executor.js';
+import { ExecutorCoder, type ExecutorKind, type ExecutorRoute } from './executor.js';
+import { executorTokens, hasListPrice } from './executor-budget.js';
+import { ExecutorReviewer, crossVendorKind } from './executor-review.js';
 import { BoxProcessRunner } from './executor-process.js';
-import { ClaudeCodeExecutor } from './claude-code-executor.js';
 import { sequentialIds } from './ids.js';
 import { BOX_REPO } from './loop-box.js';
+import { createCoderFromEnv, createExecutorFromEnv, gatewayFromEnv } from './loop-coder.js';
 import {
   CodingLoopHandler,
   FakeGitHost,
@@ -106,6 +108,11 @@ export interface BenchRow {
   editMs: number;
   testMs: number;
   peakRssKb: number | null;
+  /** Model and auth route the session ran on (from the stored session). */
+  model?: string;
+  route?: ExecutorRoute;
+  /** The other vendor's review of the green change, when asked for. */
+  review?: { verdict: 'CLEAR' | 'BLOCK' | null; usdMicros: number; tokens: number; ms: number };
   error?: string;
   /** Short evidence (executor summary, usage, test output) for a failed row. */
   detail?: string;
@@ -120,7 +127,9 @@ export interface BenchReport {
     executor: ExecutorKind;
     tasks: number;
     passRate: number;
+    /** Null when a green row's model has no list price (its USD would be a guess). */
     usdPerGreen: number | null;
+    models: string[];
     tokensPerGreen: number | null;
     toGreenMsP50: number | null;
     peakRssKbMax: number | null;
@@ -136,6 +145,8 @@ export interface BenchOptions {
   git?: () => { git: GitHostPort; repo: string };
   budgets?: { usd?: number; tokens?: number; wallMs?: number; turns?: number };
   log?: (line: string) => void;
+  /** Cross-vendor review of each green task (`MAKA_CLOUD_BENCH_REVIEW=cross`). */
+  reviewer?: (box: BenchBox, author: ExecutorKind) => ExecutorReviewer | undefined;
 }
 
 export async function runExecutorBench(options: BenchOptions): Promise<BenchReport> {
@@ -193,6 +204,7 @@ async function runTask(
     row.boxCreateMs = box.createMs;
     dir = await initLocalRepo(task.files);
     const made = executor.coder(box);
+    const reviewer = options.reviewer?.(box, executor.kind);
     const hosted = options.git?.();
     const git = hosted?.git ?? new FakeGitHost();
     const repo = hosted?.repo ?? 'local/bench';
@@ -210,7 +222,7 @@ async function runTask(
       handler,
       sandbox: box.sandbox,
       sandboxRef: box.machineId,
-      reviewer: new FakeReviewer(),
+      reviewer: reviewer ?? new FakeReviewer(),
       judge: {
         async decide() {
           return {
@@ -245,6 +257,11 @@ async function runTask(
       row.editMs = handler.lastTimings.edit;
       row.testMs = handler.lastTimings.test;
       row.peakRssKb = made.peakRssKb?.() ?? null;
+      if (made.coder instanceof ExecutorCoder) {
+        const session = await made.coder.session(opened.workerId, 'bench');
+        if (session?.model) row.model = session.model;
+        if (session?.route) row.route = session.route;
+      }
       const tested = [...(worker?.evidence ?? [])].reverse().find((block) => block.kind === 'test');
       row.green = /^exit=0$/m.test(tested?.body ?? '');
       const pr = handler.lastPr.get(opened.workerId);
@@ -257,6 +274,21 @@ async function runTask(
           const gate = agent.safety.gate(waiting, mergeAction(repo, pr.number, sha), Date.now());
           // Never approved here: a held merge is where the bench stops.
           row.mergeGate = gate.allowed ? 'allowed' : gate.reason === 'held' ? 'held' : 'refused';
+        }
+      }
+      if (reviewer && row.green) {
+        // Unpublished runs have no PR: review the box's working-tree change.
+        if (!hosted) {
+          await reviewer.review({ repo, number: 0, sha: sha ?? 'HEAD' });
+        }
+        const last = reviewer.records.at(-1);
+        if (last) {
+          row.review = {
+            verdict: last.verdict ?? null,
+            usdMicros: last.usage.usdMicros,
+            tokens: executorTokens(last.usage),
+            ms: last.ms,
+          };
         }
       }
       row.ok = row.green && (!hosted || row.mergeGate === 'held');
@@ -325,7 +357,11 @@ export function summarize(rows: readonly BenchRow[]): BenchReport['summary'] {
       tasks: mine.length,
       passRate: mine.length ? green.length / mine.length : 0,
       // Everything spent, failures included, per green task.
-      usdPerGreen: green.length ? spent / 1e6 / green.length : null,
+      usdPerGreen:
+        green.length && mine.every((row) => hasListPrice(row.model))
+          ? spent / 1e6 / green.length
+          : null,
+      models: [...new Set(mine.map((row) => `${row.model ?? '?'} (${row.route ?? '?'})`))],
       tokensPerGreen: green.length ? Math.round(tokens / green.length) : null,
       toGreenMsP50: p50(green.map((row) => row.toGreenMs)),
       peakRssKbMax: rss.length ? Math.max(...rss) : null,
@@ -336,51 +372,50 @@ export function summarize(rows: readonly BenchRow[]): BenchReport['summary'] {
 
 export function formatBenchTable(report: BenchReport): string {
   const lines = [
-    '| executor | tasks | pass | $/green | tokens/green | to-green p50 | peak RSS | workspace start p50 |',
-    '|---|---|---|---|---|---|---|---|',
+    '| executor | model (route) | tasks | pass | $/green | tokens/green | to-green p50 | peak RSS | workspace start p50 |',
+    '|---|---|---|---|---|---|---|---|---|',
   ];
   for (const row of report.summary) {
     lines.push(
-      `| ${row.executor} | ${row.tasks} | ${(row.passRate * 100).toFixed(0)}% | ${row.usdPerGreen === null ? '—' : `$${row.usdPerGreen.toFixed(4)}`} | ${row.tokensPerGreen ?? '—'} | ${row.toGreenMsP50 === null ? '—' : `${(row.toGreenMsP50 / 1000).toFixed(1)} s`} | ${row.peakRssKbMax === null ? '—' : `${(row.peakRssKbMax / 1024).toFixed(0)} MiB`} | ${row.workspaceStartMsP50 ?? '—'} ms |`,
+      `| ${row.executor} | ${row.models.join(', ')} | ${row.tasks} | ${(row.passRate * 100).toFixed(0)}% | ${row.usdPerGreen === null ? 'unpriced' : `$${row.usdPerGreen.toFixed(4)}`} | ${row.tokensPerGreen ?? '—'} | ${row.toGreenMsP50 === null ? '—' : `${(row.toGreenMsP50 / 1000).toFixed(1)} s`} | ${row.peakRssKbMax === null ? '—' : `${(row.peakRssKbMax / 1024).toFixed(0)} MiB`} | ${row.workspaceStartMsP50 ?? '—'} ms |`,
     );
   }
   for (const skip of report.skipped)
-    lines.push(`| ${skip.executor} | skipped: ${skip.reason} |||||||`);
+    lines.push(`| ${skip.executor} | skipped: ${skip.reason} ||||||||`);
   return lines.join('\n');
 }
 
-/** Claude Code inside the box on the box's Secret-backed login. */
-export function claudeCodeBenchExecutor(options: {
-  env: NodeJS.ProcessEnv;
-  model: string;
-  secret?: string;
-  timeBin?: string;
-}): BenchExecutor {
+/**
+ * A CLI executor in the box, built the way `createCoderFromEnv` builds it
+ * (box Secret login, or Magpie per `MAKA_CLOUD_EXECUTOR_GATEWAY`).
+ */
+export function cliBenchExecutor(
+  kind: 'claude-code' | 'codex',
+  env: NodeJS.ProcessEnv,
+  options: { timeBin?: () => string | undefined; skip?: string } = {},
+): BenchExecutor {
   return {
-    kind: 'claude-code',
+    kind,
+    ...(options.skip ? { skip: options.skip } : {}),
     coder(box) {
-      const runner = new BoxProcessRunner(box.sandbox, {
-        ...(options.timeBin ? { timeBin: options.timeBin } : {}),
+      const timeBin = options.timeBin?.();
+      const runner = new BoxProcessRunner(box.sandbox, timeBin ? { timeBin } : {});
+      const made = createCoderFromEnv({ ...env, MAKA_CLOUD_EXECUTOR: kind }, fetch, {
+        sandbox: box.sandbox,
+        runner,
       });
-      const coder = new ExecutorCoder(
-        new ClaudeCodeExecutor({
-          env: options.env,
-          model: options.model,
-          runner,
-          permissionMode: 'bypassPermissions',
-          ...(options.secret ? { boxSecretEnv: { CLAUDE_CODE_OAUTH_TOKEN: options.secret } } : {}),
-        }),
-        { box: { sandbox: box.sandbox, workdir: BOX_REPO } },
-      );
-      return { coder, peakRssKb: () => runner.peakRssKb.get(box.machineId) };
+      return { coder: made.coder, peakRssKb: () => runner.peakRssKb.get(box.machineId) };
     },
   };
 }
 
 /**
- * `npm run executor-bench`: live Instabox boxes (`INSTABOX_API_KEY`), Claude
- * Code on the box Secret named by `MAKA_CLOUD_EXECUTOR_CLAUDE_SECRET`, model
- * `MAKA_CLOUD_EXECUTOR_MODEL` (default Haiku 5.5). `MAKA_CLOUD_BENCH_PUBLISH=1`
+ * `npm run executor-bench`: live Instabox boxes (`INSTABOX_API_KEY`).
+ * `MAKA_CLOUD_BENCH_EXECUTORS` picks executors (default `claude-code,codex`);
+ * `MAKA_CLOUD_BENCH_CLAUDE_MODEL` (default Haiku 5.5) and
+ * `MAKA_CLOUD_BENCH_CODEX_MODEL` set each one's model on its built-in login,
+ * and `MAKA_CLOUD_BENCH_<KIND>_MAGPIE_MODEL` its Magpie model. Auth is as in
+ * `createCoderFromEnv`: box Secrets, else Magpie. `MAKA_CLOUD_BENCH_PUBLISH=1`
  * with `MAKA_GITHUB_TOKEN` and `MAKA_CLOUD_LOOP_REPO` opens real PRs and stops
  * at the held merge. Keys are read from env only and never printed.
  */
@@ -421,41 +456,71 @@ export async function runExecutorBenchCli(env: NodeJS.ProcessEnv = process.env):
       },
     };
   };
-  const model = env.MAKA_CLOUD_EXECUTOR_MODEL?.trim() || 'claude-haiku-5-5';
-  const secret = env.MAKA_CLOUD_EXECUTOR_CLAUDE_SECRET?.trim();
-  const claude = claudeCodeBenchExecutor({ env, model, ...(secret ? { secret } : {}) });
-  const executors: BenchExecutor[] = [
-    {
-      ...claude,
-      coder: (box) =>
-        claudeCodeBenchExecutor({
-          env,
-          model,
-          ...(secret ? { secret } : {}),
-          ...(timeBin ? { timeBin } : {}),
-        }).coder(box),
+  const picked = (env.MAKA_CLOUD_BENCH_EXECUTORS?.trim() || 'claude-code,codex')
+    .split(',')
+    .map((kind) => kind.trim());
+  const { gateway } = gatewayFromEnv(env);
+  const forKind = (kind: 'claude-code' | 'codex'): NodeJS.ProcessEnv => {
+    const tag = kind === 'codex' ? 'CODEX' : 'CLAUDE';
+    const model =
+      env[`MAKA_CLOUD_BENCH_${tag}_MODEL`]?.trim() ||
+      (kind === 'claude-code' ? 'claude-haiku-5-5' : undefined);
+    const magpieModel = env[`MAKA_CLOUD_BENCH_${tag}_MAGPIE_MODEL`]?.trim();
+    const out: NodeJS.ProcessEnv = { ...env };
+    delete out.MAKA_CLOUD_EXECUTOR_MODEL;
+    delete out.MAKA_CLOUD_MAGPIE_MODEL;
+    if (model) out.MAKA_CLOUD_EXECUTOR_MODEL = model;
+    if (magpieModel) out.MAKA_CLOUD_MAGPIE_MODEL = magpieModel;
+    return out;
+  };
+  const executors: BenchExecutor[] = [];
+  for (const kind of ['claude-code', 'codex'] as const) {
+    if (!picked.includes(kind)) continue;
+    const secret =
+      kind === 'codex'
+        ? env.MAKA_CLOUD_EXECUTOR_CODEX_SECRET?.trim()
+        : env.MAKA_CLOUD_EXECUTOR_CLAUDE_SECRET?.trim();
+    const skip =
+      !gateway && !secret
+        ? `no box login (Secret) and no Magpie route (MAKA_CLOUD_MAGPIE_URL / MAKA_CLOUD_MAGPIE_KEY)`
+        : undefined;
+    executors.push(
+      cliBenchExecutor(kind, forKind(kind), {
+        timeBin: () => timeBin || undefined,
+        ...(skip ? { skip } : {}),
+      }),
+    );
+  }
+  executors.push({
+    kind: 'maka',
+    skip: 'the maka engine is not behind the Executor interface yet',
+    coder: () => {
+      throw new Error('maka skipped');
     },
-    {
-      kind: 'codex',
-      skip:
-        env.MAKA_CLOUD_BENCH_CODEX_SKIP?.trim() ||
-        'no CodexExecutor run configured (needs an OpenAI Secret in the Instabox org or the Magpie route)',
-      coder: () => {
-        throw new Error('codex skipped');
-      },
-    },
-    {
-      kind: 'maka',
-      skip: 'the maka engine is not behind the Executor interface yet',
-      coder: () => {
-        throw new Error('maka skipped');
-      },
-    },
-  ];
+  });
   const publish = env.MAKA_CLOUD_BENCH_PUBLISH === '1';
+  const cross = env.MAKA_CLOUD_BENCH_REVIEW === 'cross';
   const report = await runExecutorBench({
     executors,
     newBox,
+    ...(cross
+      ? {
+          reviewer: (box: BenchBox, author: ExecutorKind) => {
+            const kind = crossVendorKind(author);
+            return new ExecutorReviewer(
+              createExecutorFromEnv(kind, forKind(kind), { sandbox: box.sandbox }),
+              {
+                locate: () => ({
+                  workdir: BOX_REPO,
+                  boxId: box.machineId,
+                  // The loop keeps the edits uncommitted in the box checkout.
+                  show: 'git status --short && git diff HEAD',
+                }),
+              },
+            );
+          },
+        }
+      : {}),
     ...(publish
       ? {
           git: () => {

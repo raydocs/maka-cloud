@@ -2,8 +2,9 @@ import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { z } from 'zod';
 import { ClaudeCodeExecutor, type GatewayRoute } from './claude-code-executor.js';
-import { ExecutorCoder, type ExecutorSessionStore } from './executor.js';
-import { BoxProcessRunner } from './executor-process.js';
+import { CodexExecutor } from './codex-executor.js';
+import { ExecutorCoder, type Executor, type ExecutorSessionStore } from './executor.js';
+import { BoxProcessRunner, type ProcessRunner } from './executor-process.js';
 import { BOX_REPO } from './loop-box.js';
 import type { SandboxPort } from './sandbox.js';
 import { CODER_MAX_TOKENS, createJudgeClientFromEnv } from './judge-client.js';
@@ -98,53 +99,48 @@ export const EXECUTOR_ENV = 'MAKA_CLOUD_EXECUTOR';
 export const EXECUTOR_MODEL_ENV = 'MAKA_CLOUD_EXECUTOR_MODEL';
 export const EXECUTOR_GATEWAY_ENV = 'MAKA_CLOUD_EXECUTOR_GATEWAY';
 export const MAGPIE_URL_ENV = 'MAKA_CLOUD_MAGPIE_URL';
-export const MAGPIE_TOKEN_ENV = 'MAKA_CLOUD_MAGPIE_TOKEN';
+export const MAGPIE_KEY_ENV = 'MAKA_CLOUD_MAGPIE_KEY';
+/** Model on the Magpie route (`auto/claude-sonnet-5-5`, `codex/gpt-6-luna`, ...). */
+export const MAGPIE_MODEL_ENV = 'MAKA_CLOUD_MAGPIE_MODEL';
 /** Name of the box variable (an Instabox Secret) that holds Claude Code's token. */
 export const EXECUTOR_CLAUDE_SECRET_ENV = 'MAKA_CLOUD_EXECUTOR_CLAUDE_SECRET';
+/** Name of the box variable (an Instabox Secret) that holds an OpenAI key for Codex. */
+export const EXECUTOR_CODEX_SECRET_ENV = 'MAKA_CLOUD_EXECUTOR_CODEX_SECRET';
 
 /**
- * `MAKA_CLOUD_EXECUTOR=claude-code` runs Claude Code headless as the coder
- * (off by default). With a sandbox it runs inside the worker's box on the
- * box's own signed-in CLI; `MAKA_CLOUD_EXECUTOR_GATEWAY=magpie` routes it
- * through the Magpie gateway instead. Unset or `fake` keeps the coder below.
+ * `MAKA_CLOUD_EXECUTOR=claude-code` or `codex` runs that CLI headless as the
+ * coder (off by default). With a sandbox it runs inside the worker's box.
+ * Auth: the CLI's own login, else Magpie. `MAKA_CLOUD_EXECUTOR_GATEWAY=magpie`
+ * always uses Magpie, `=builtin` never does; unset with a Magpie URL and key,
+ * each box is checked once and Magpie is used only where the CLI is not
+ * signed in. Unset or `fake` keeps the coder below.
  */
 export function createCoderFromEnv(
   env: NodeJS.ProcessEnv = process.env,
   fetchImpl: typeof fetch = fetch,
-  options: { sandbox?: SandboxPort; sessions?: ExecutorSessionStore } = {},
-): { coder: CoderPort; kind: 'fake' | 'model' | 'claude-code' } {
+  options: {
+    sandbox?: SandboxPort;
+    sessions?: ExecutorSessionStore;
+    /** Box runner override (the bench passes one to read its peak RSS). */
+    runner?: ProcessRunner;
+  } = {},
+): { coder: CoderPort; kind: 'fake' | 'model' | 'claude-code' | 'codex' } {
   const executor = env[EXECUTOR_ENV]?.trim();
-  if (executor === 'claude-code') {
-    const model = env[EXECUTOR_MODEL_ENV]?.trim();
-    const gateway = gatewayFromEnv(env);
+  if (executor === 'claude-code' || executor === 'codex') {
     const sandbox = options.sandbox;
-    const secret = env[EXECUTOR_CLAUDE_SECRET_ENV]?.trim();
     return {
-      coder: new ExecutorCoder(
-        new ClaudeCodeExecutor({
-          env,
-          ...(model ? { model } : {}),
-          ...(gateway ? { gateway } : {}),
-          ...(secret ? { boxSecretEnv: { CLAUDE_CODE_OAUTH_TOKEN: secret } } : {}),
-          // The box is the sandbox: the CLI may run tests and commands there.
-          ...(sandbox
-            ? {
-                runner: new BoxProcessRunner(sandbox),
-                permissionMode: 'bypassPermissions' as const,
-              }
-            : {}),
-        }),
-        {
-          ...(sandbox ? { box: { sandbox, workdir: BOX_REPO } } : {}),
-          // A store-backed session store lets a restarted host resume each session.
-          ...(options.sessions ? { sessions: options.sessions } : {}),
-        },
-      ),
-      kind: 'claude-code',
+      coder: new ExecutorCoder(createExecutorFromEnv(executor, env, options), {
+        ...(sandbox ? { box: { sandbox, workdir: BOX_REPO } } : {}),
+        // A store-backed session store lets a restarted host resume each session.
+        ...(options.sessions ? { sessions: options.sessions } : {}),
+      }),
+      kind: executor,
     };
   }
   if (executor && executor !== 'fake') {
-    throw new Error(`${EXECUTOR_ENV}=${executor} is not a known executor (claude-code, fake).`);
+    throw new Error(
+      `${EXECUTOR_ENV}=${executor} is not a known executor (claude-code, codex, fake).`,
+    );
   }
   const live = env.MAKA_CLOUD_LOOP_LIVE === '1';
   const hasKey = Boolean(env.ANTHROPIC_API_KEY?.trim() || env.MAKA_CLOUD_JUDGE_API_KEY?.trim());
@@ -155,21 +151,70 @@ export function createCoderFromEnv(
   return { coder: new HttpCoder((prompt) => detailed(prompt)), kind: 'model' };
 }
 
-/** Magpie fallback route; off unless `MAKA_CLOUD_EXECUTOR_GATEWAY=magpie`. */
-export function gatewayFromEnv(env: NodeJS.ProcessEnv): GatewayRoute | undefined {
+/**
+ * Claude Code or Codex as configured by env: model, box Secret login, Magpie
+ * route (see `createCoderFromEnv`). With a sandbox it runs inside the box,
+ * with the CLI's own permission checks off (the box is the sandbox).
+ */
+export function createExecutorFromEnv(
+  kind: 'claude-code' | 'codex',
+  env: NodeJS.ProcessEnv,
+  options: { sandbox?: SandboxPort; runner?: ProcessRunner } = {},
+): Executor {
+  const model = env[EXECUTOR_MODEL_ENV]?.trim();
+  const gatewayModel = env[MAGPIE_MODEL_ENV]?.trim();
+  const { gateway, gatewayMode } = gatewayFromEnv(env);
+  const sandbox = options.sandbox;
+  const route = {
+    env,
+    ...(model ? { model } : {}),
+    ...(gateway ? { gateway, gatewayMode } : {}),
+    ...(gatewayModel ? { gatewayModel } : {}),
+    ...(sandbox ? { runner: options.runner ?? new BoxProcessRunner(sandbox) } : {}),
+  };
+  if (kind === 'codex') {
+    const secret = env[EXECUTOR_CODEX_SECRET_ENV]?.trim();
+    return new CodexExecutor({
+      ...route,
+      ...(secret ? { boxSecretEnv: { OPENAI_API_KEY: secret } } : {}),
+      ...(sandbox ? { sandbox: 'bypass' as const } : {}),
+    });
+  }
+  const secret = env[EXECUTOR_CLAUDE_SECRET_ENV]?.trim();
+  return new ClaudeCodeExecutor({
+    ...route,
+    ...(secret ? { boxSecretEnv: { CLAUDE_CODE_OAUTH_TOKEN: secret } } : {}),
+    ...(sandbox ? { permissionMode: 'bypassPermissions' as const } : {}),
+  });
+}
+
+/**
+ * Magpie route from env. `MAKA_CLOUD_EXECUTOR_GATEWAY=magpie` → always (needs
+ * `MAKA_CLOUD_MAGPIE_URL` and `MAKA_CLOUD_MAGPIE_KEY`); `=builtin` → never;
+ * unset → fallback when both are set, else none.
+ */
+export function gatewayFromEnv(env: NodeJS.ProcessEnv): {
+  gateway?: GatewayRoute;
+  gatewayMode: 'always' | 'fallback';
+} {
   const picked = env[EXECUTOR_GATEWAY_ENV]?.trim();
-  if (!picked) return undefined;
-  if (picked !== 'magpie') {
-    throw new Error(`${EXECUTOR_GATEWAY_ENV}=${picked} is not a known gateway (magpie).`);
+  if (picked && picked !== 'magpie' && picked !== 'builtin') {
+    throw new Error(`${EXECUTOR_GATEWAY_ENV}=${picked} is not a known gateway (magpie, builtin).`);
   }
   const baseUrl = env[MAGPIE_URL_ENV]?.trim();
-  const token = env[MAGPIE_TOKEN_ENV]?.trim();
-  if (!baseUrl || !token) {
-    throw new Error(
-      `${EXECUTOR_GATEWAY_ENV}=magpie needs ${MAGPIE_URL_ENV} and ${MAGPIE_TOKEN_ENV}.`,
-    );
+  const token = env[MAGPIE_KEY_ENV]?.trim();
+  if (picked === 'builtin') return { gatewayMode: 'always' };
+  if (picked === 'magpie') {
+    if (!baseUrl || !token) {
+      throw new Error(
+        `${EXECUTOR_GATEWAY_ENV}=magpie needs ${MAGPIE_URL_ENV} and ${MAGPIE_KEY_ENV}.`,
+      );
+    }
+    return { gateway: { baseUrl, token }, gatewayMode: 'always' };
   }
-  return { baseUrl, token };
+  return baseUrl && token
+    ? { gateway: { baseUrl, token }, gatewayMode: 'fallback' }
+    : { gatewayMode: 'always' };
 }
 
 async function snapshotFiles(dir: string): Promise<string> {

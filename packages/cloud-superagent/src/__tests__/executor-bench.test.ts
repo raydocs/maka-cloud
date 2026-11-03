@@ -6,6 +6,8 @@ import {
   formatBenchTable,
   runExecutorBench,
 } from '../executor-bench.js';
+import { FakeExecutor } from '../executor.js';
+import { ExecutorReviewer } from '../executor-review.js';
 import { FakeCoder, FakeGitHost } from '../loop.js';
 import { FakeSandbox } from '../sandbox.js';
 
@@ -56,4 +58,45 @@ test('bench: each task runs in its own box to green, the merge stays held, skips
   assert.equal(report.summary[0]?.executor, 'fake');
   assert.match(formatBenchTable(report), /\| fake \|/);
   assert.match(formatBenchTable(report), /codex.*no OpenAI Secret/s);
+});
+
+test('bench: a cross-vendor reviewer runs on the green change in the same box', async () => {
+  const sandbox = new FakeSandbox();
+  const reviewed: string[] = [];
+  const report = await runExecutorBench({
+    tasks: BENCH_TASKS.slice(0, 1),
+    newBox: async () => {
+      const { id } = await sandbox.createMachine({
+        templateId: 'universal',
+        vcpus: 1,
+        memMiB: 512,
+      });
+      return { sandbox, machineId: id, createMs: 1, destroy: async () => undefined };
+    },
+    executors: [{ kind: 'fake', coder: () => ({ coder: new FakeCoder() }) }],
+    reviewer: (box, author) => {
+      reviewed.push(`${author}@${box.machineId}`);
+      return new ExecutorReviewer(
+        new FakeExecutor({
+          steps: [
+            [
+              {
+                type: 'usage',
+                usage: { inputTokens: 50, outputTokens: 5, usdMicros: 70, turns: 1 },
+              },
+              { type: 'ready', summary: 'VERDICT: CLEAR adds a + b, test covers it' },
+            ],
+          ],
+        }),
+        { locate: () => ({ workdir: '/w', boxId: box.machineId, show: 'git diff HEAD' }) },
+      );
+    },
+  });
+  assert.deepEqual(reviewed, ['fake@box_1']);
+  assert.deepEqual(report.rows[0]?.review, {
+    verdict: 'CLEAR',
+    usdMicros: 70,
+    tokens: 55,
+    ms: report.rows[0]?.review?.ms,
+  });
 });

@@ -17,6 +17,11 @@ export interface ExecutorProcessSpec {
    * sees or sends the value.
    */
   envFromBox?: Record<string, string>;
+  /**
+   * Box only: a string that appears in this run's argv, which stop and RSS
+   * sampling find the process by (`pkill -f`). Default: a bare UUID argument.
+   */
+  marker?: string;
 }
 
 export interface ExecutorProcessExit {
@@ -140,7 +145,10 @@ export class BoxProcessRunner implements ProcessRunner {
     const pollMs = this.options.pollMs ?? 2000;
     const deadline = Date.now() + (this.options.timeoutSeconds ?? 3600) * 1000;
     const runId = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
-    const marker = spec.args.find((arg) => UUID_RE.test(arg));
+    const marker =
+      spec.marker && spec.args.some((arg) => arg.includes(spec.marker as string))
+        ? spec.marker
+        : spec.args.find((arg) => UUID_RE.test(arg));
     let stdin = '';
     let accepting = true;
     let killed = false;
@@ -164,15 +172,23 @@ export class BoxProcessRunner implements ProcessRunner {
       let sampledRss = 0;
       let failure: string | undefined;
       try {
+        // Instabox exec drops its `env` field, so variables (a gateway key
+        // among them) reach the box on stdin as a 0600 file that run.sh
+        // sources and deletes before the CLI starts.
+        const envScript = Object.entries(env)
+          .map(([key, value]) => `export ${key}=${shellQuote(value)}`)
+          .join('\n');
         const script = [
           '#!/bin/sh',
+          '. "$1/env"',
+          'rm -f "$1/env"',
           `${cmd} < "$1/in" > "$1/out" 2> "$1/err"`,
           'echo $? > "$1/code"',
           '',
         ].join('\n');
         const setup = await exec({
-          cmd: `mkdir -p .maka-exec/${runId} && cd .maka-exec/${runId} && base64 -d > in && printf %s ${shellWord(Buffer.from(script).toString('base64'))} | base64 -d > run.sh && pwd`,
-          stdin: Buffer.from(stdin).toString('base64'),
+          cmd: `umask 077 && mkdir -p .maka-exec/${runId} && cd .maka-exec/${runId} && read -r e && read -r p && printf %s "$e" | base64 -d > env && printf %s "$p" | base64 -d > in && printf %s ${shellWord(Buffer.from(script).toString('base64'))} | base64 -d > run.sh && pwd`,
+          stdin: `${Buffer.from(envScript).toString('base64')}\n${Buffer.from(stdin).toString('base64')}\n`,
           timeoutSeconds: 60,
         });
         dir = setup.stdout.trim().split('\n').at(-1) ?? '';
@@ -182,7 +198,6 @@ export class BoxProcessRunner implements ProcessRunner {
         const started = await exec({
           cmd: `(nohup sh ${shellWord(`${dir}/run.sh`)} ${shellWord(dir)} > /dev/null 2>&1 < /dev/null &)`,
           cwd: spec.cwd,
-          ...(Object.keys(env).length ? { env } : {}),
           timeoutSeconds: 60,
         });
         if (started.exitCode !== 0)
@@ -259,6 +274,28 @@ export class BoxProcessRunner implements ProcessRunner {
   }
 }
 
+/**
+ * Runs a CLI's login check (`claude auth status`, `codex login status`) and
+ * reports whether it exited 0. Any error counts as not signed in.
+ */
+export async function signedIn(runner: ProcessRunner, spec: ExecutorProcessSpec): Promise<boolean> {
+  try {
+    const proc = runner.spawn(spec);
+    proc.endInput();
+    for await (const _line of proc.lines) {
+      // Drain; the exit code is the answer.
+    }
+    return (await proc.exited).code === 0;
+  } catch {
+    return false;
+  }
+}
+
+/** Always-quoted shell word, for values (an empty value stays an empty string). */
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
 function shellWord(value: string): string {
   return /^[A-Za-z0-9_./:=@%+-]+$/.test(value) ? value : `'${value.replaceAll("'", `'\\''`)}'`;
 }
@@ -323,6 +360,7 @@ export class ScriptedProcessRunner implements ProcessRunner {
     this.spawned.push(row);
     const queue: string[] = [];
     let printed = 0;
+    let stepped = false;
     let finished = false;
     let exit: ExecutorProcessExit = { code: 0, signal: null, stderr: '' };
     let wake: (() => void) | undefined;
@@ -331,6 +369,7 @@ export class ScriptedProcessRunner implements ProcessRunner {
       resolveExit = resolve;
     });
     const step = () => {
+      stepped = true;
       const out = script(row.stdin);
       queue.push(...out.lines.slice(printed));
       printed = out.lines.length;
@@ -341,6 +380,8 @@ export class ScriptedProcessRunner implements ProcessRunner {
       wake?.();
     };
     const finish = () => {
+      // A process that got no stdin (a login check) still runs its script once.
+      if (!stepped) step();
       finished = true;
       wake?.();
     };

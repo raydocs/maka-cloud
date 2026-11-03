@@ -8,7 +8,51 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
-## 2026-11-03 03:50 MST — superagent/executor-recovery
+## 2026-11-03 04:13 MST — superagent/codex-executor
+
+- **What:** CodexExecutor, the Magpie route as tested on 2026-11-03, a login check before each box's first session, and cross-vendor review (Phase 5). Everything is default off.
+  - **`CodexExecutor`** (`MAKA_CLOUD_EXECUTOR=codex`) runs `codex exec --json` with the prompt on stdin. The Mandate prefix opens the thread. Later turns run `codex exec resume <thread id>`; the thread id is taken from `thread.started` and kept on the session as `vendorSessionId`. Events map as follows: commands and file changes become progress; `turn.completed` usage is split into fresh, cached-read and cache-write input and priced; the last agent message is read through the `MAKA_STATUS` line; `turn.failed` becomes `failed`, retryable on 408/429/5xx/timeouts. A `send` during a running turn opens the next turn. Codex keeps its own sandbox (`workspace-write`) on the host and turns it off in the box.
+  - **Magpie, per `executor-decision.md` "Magpie gateway, tested 2026-11-03":**
+    - The key variable is now `MAKA_CLOUD_MAGPIE_KEY`, replacing `_TOKEN`.
+    - Claude Code gets `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` and an empty `ANTHROPIC_API_KEY`, no longer runs with `--bare`, and uses `auto/<model>` ids.
+    - Codex gets Magpie as a custom provider through `-c model_providers.magpie.*` (`wire_api = "responses"`, `env_key = "MAKA_CLOUD_MAGPIE_KEY"`), defaulting to `codex/gpt-6-luna`. Its default `CODEX_HOME` is kept, so resume finds the thread.
+    - `MAKA_CLOUD_MAGPIE_MODEL` sets the Magpie model.
+  - **Login check:** `MAKA_CLOUD_EXECUTOR_GATEWAY=magpie` always uses Magpie and `=builtin` never does. When it is unset and a Magpie URL and key are both present, each box (or the host) is checked once with `claude auth status` / `codex login status`, and Magpie is used only where the CLI is not signed in. The route is kept on the session for later turns and reported on usage events.
+  - **Box env over stdin:** Instabox exec drops its `env` field, so `BoxProcessRunner` sends variables on stdin as a 0600 file that `run.sh` sources and deletes before the CLI starts. Before this, the Magpie key never reached a box CLI.
+  - **Box marker:** a process spec can name a `marker` (Codex's is `maka-codex-<id>`, carried in its `-o` path) for `pkill` and RSS sampling. Codex's first turn has no bare UUID in argv, so stop, budget kill and RSS did not reach it before.
+  - **Cross-vendor review:** `ExecutorReviewer` is a `ReviewerPort` that runs the other vendor's CLI (`crossVendorKind`: Claude Code ↔ Codex) as a fresh read-only session on the checkout holding the change. The `VERDICT: CLEAR|BLOCK` line in its status summary is what the gate reads; no verdict means no receipt. `createExecutorFromEnv` builds either CLI from env.
+  - **Bench:** `MAKA_CLOUD_BENCH_EXECUTORS` picks executors (default `claude-code,codex`), with `MAKA_CLOUD_BENCH_<CLAUDE|CODEX>_MODEL` / `_MAGPIE_MODEL` per executor. `MAKA_CLOUD_BENCH_REVIEW=cross` reviews each green task with the other vendor. Rows record model, route and review. `$/green` shows `unpriced` when a model has no list price; `codex/gpt-6-luna` and the Gemini models have none on record.
+- **Why:** executor-decision.md (Codex as the second executor, cross-vendor review) and the owner's 2026-11-03 Magpie findings: fresh boxes are not signed in, and exec `env` does not reach the command.
+- **Tests:** offline only.
+  - `codex-executor.test` 4 passed:
+    - stream mapping checked against a live `codex exec --json` run;
+    - Magpie flags, the key in env and never in argv;
+    - resume by thread id;
+    - queued send, resume without a thread id, and the per-box login fallback.
+  - `claude-code-executor.test` 17 passed, new:
+    - the Magpie route as tested;
+    - login fallback once per box, with no box Secret on the Magpie route;
+    - box env over stdin, so no exec request has `env` and no command line or raw stdin holds the key;
+    - an explicit marker inside an argument. This assertion fails with the marker disabled.
+  - `executor-review.test` 2 passed.
+  - `executor-bench.test` 2 passed, adding the reviewer on the green change.
+  - Package suite on macOS: 326 of 327. The only failure is `box-daemon` RSS, which reads `/proc` and runs on Linux only.
+- **Live (2026-11-03, Instabox `universal`, no publish, cross-vendor review on):**
+
+  | executor | model (route) | pass | $/green | tokens/green | to-green p50 | peak RSS | workspace start p50 |
+  |---|---|---|---|---|---|---|---|
+  | claude-code | claude-haiku-5-5 (box Secret login) | 3/3 | $0.0556 | 102,708 | 12.7 s | 244 MiB | 389 ms |
+  | codex | codex/gpt-6-luna (Magpie; the box is not signed in) | 3/3 | unpriced | 67,822 | 23.6 s | 188 MiB | 379 ms |
+
+  - **Cross-vendor reviews** (reviewer in the same box):
+    - Codex on Claude Code's changes: CLEAR, CLEAR, BLOCK (`fix-slug`).
+    - Claude Code on Codex's changes: CLEAR, no verdict line, BLOCK (`fix-slug`).
+  - **Review cost:** a Claude review used about 75k tokens. A Codex review used 127k–160k tokens and its `$` is an Opus-price placeholder.
+  - **Earlier run, without review:** Codex 3/3, 77,595 tokens per green task, to-green p50 29.4 s, no RSS before the marker fix.
+  - **Login checks:** these confirmed the owner's finding. Fresh boxes have no Codex login, and Claude Code is signed in only through the selected Secret.
+- **Migrations / risk:** none. No schema change. Every route is behind `MAKA_CLOUD_EXECUTOR`; the Magpie fallback needs both Magpie variables set.
+
+## 2026-11-03 03:50 MST — superagent/executor-recovery — 3f9c2cc71
 
 - **What:** restart recovery and follow-up hand-back for executor sessions (Phase 3b).
   - `StoreExecutorSessionStore` keeps each worker's executor session in the tenant's store document `executor-sessions` (`putDocument`; no schema change). Sessions now carry `tenantId`, and the session store is keyed per tenant.

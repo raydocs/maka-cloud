@@ -91,13 +91,23 @@ const PRICES: Record<string, Price> = {
   'gpt-6.1-sol': { input: 2, output: 10, cacheRead: 0.1 },
 };
 
+function priceKey(model: string | undefined): string | undefined {
+  // Magpie ids carry a vendor prefix: `auto/claude-sonnet-5-5`, `codex/gpt-6.1-sol`.
+  const bare = model?.slice(model.lastIndexOf('/') + 1);
+  return Object.keys(PRICES).find((name) => bare?.startsWith(name));
+}
+
+/** False for models with no list price on record (their USD is the Opus fallback). */
+export function hasListPrice(model: string | undefined): boolean {
+  return priceKey(model) !== undefined;
+}
+
 /** Cache writes cost 1.25× input (five-minute cache). Unknown models price at Opus. */
 export function estimateUsdMicros(
   model: string | undefined,
   usage: Partial<ExecutorUsage>,
 ): number {
-  const key = Object.keys(PRICES).find((name) => model?.startsWith(name));
-  const price = PRICES[key ?? 'claude-opus-5-5'] as Price;
+  const price = PRICES[priceKey(model) ?? 'claude-opus-5-5'] as Price;
   const usd =
     ((usage.inputTokens ?? 0) * price.input +
       (usage.outputTokens ?? 0) * price.output +

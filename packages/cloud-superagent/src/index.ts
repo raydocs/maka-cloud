@@ -513,18 +513,29 @@ export {
   type BoxExecLog,
 } from './loop-box.js';
 export {
+  EXECUTOR_CODEX_SECRET_ENV,
   EXECUTOR_ENV,
   EXECUTOR_GATEWAY_ENV,
   EXECUTOR_MODEL_ENV,
   HttpCoder,
-  MAGPIE_TOKEN_ENV,
+  MAGPIE_KEY_ENV,
+  MAGPIE_MODEL_ENV,
   MAGPIE_URL_ENV,
   createCoderFromEnv,
   gatewayFromEnv,
   parseCoderJson,
 } from './loop-coder.js';
 export {
+  CODEX_MAGPIE_KEY_ENV,
+  CodexExecutor,
+  DEFAULT_CODEX_MODEL,
+  DEFAULT_MAGPIE_CODEX_MODEL,
+  codexStreamEvents,
+  type CodexExecutorOptions,
+} from './codex-executor.js';
+export {
   DEFAULT_CLAUDE_CODE_MODEL,
+  DEFAULT_MAGPIE_CLAUDE_MODEL,
   ClaudeCodeExecutor,
   claudeStreamEvents,
   claudeStreamState,
@@ -539,6 +550,7 @@ export {
   budgetReport,
   checkBudget,
   estimateUsdMicros as estimateExecutorUsdMicros,
+  hasListPrice,
   executorTokens,
   type AssignmentBudget,
   type BudgetCheck,
@@ -550,6 +562,7 @@ export {
   ScriptedProcessRunner,
   executorEnv,
   redactSecrets,
+  signedIn,
   type ExecutorProcess,
   type ExecutorProcessExit,
   type ExecutorProcessSpec,
@@ -557,7 +570,7 @@ export {
 } from './executor-process.js';
 export {
   BENCH_TASKS,
-  claudeCodeBenchExecutor,
+  cliBenchExecutor,
   formatBenchTable,
   runExecutorBench,
   runExecutorBenchCli,

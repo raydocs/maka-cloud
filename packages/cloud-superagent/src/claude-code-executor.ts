@@ -19,13 +19,16 @@ import {
   NodeProcessRunner,
   executorEnv,
   redactSecrets,
+  signedIn,
   type ExecutorProcess,
   type ProcessRunner,
 } from './executor-process.js';
 
 export const DEFAULT_CLAUDE_CODE_MODEL = 'claude-opus-5-5';
+/** Magpie names Anthropic models `auto/<model>`. */
+export const DEFAULT_MAGPIE_CLAUDE_MODEL = 'auto/claude-sonnet-5-5';
 
-/** Magpie gateway route: an Anthropic-compatible base URL and a scoped token. */
+/** Magpie gateway route: its base URL and the Magpie key. */
 export interface GatewayRoute {
   baseUrl: string;
   token: string;
@@ -35,11 +38,20 @@ export interface ClaudeCodeExecutorOptions {
   /** Host env; only PATH-like basics are passed through, never host secrets. */
   env: NodeJS.ProcessEnv;
   /**
-   * Default: the CLI's own built-in login (in Instabox, configured by
-   * Instabox; maka-cloud never sees it). With `gateway`, the run goes through
-   * Magpie in `--bare` mode with the gateway's scoped token instead.
+   * Default: the CLI's own built-in login (in Instabox, a box Secret;
+   * maka-cloud never sees it). With `gateway`, runs go through Magpie with
+   * `ANTHROPIC_AUTH_TOKEN` (docs/superagent/executor-decision.md, "Magpie
+   * gateway, tested 2026-11-03").
    */
   gateway?: GatewayRoute;
+  /**
+   * `always` (default with a gateway): every session uses Magpie.
+   * `fallback`: each box (or the host) is checked once with `claude auth
+   * status`; Magpie is used only where the CLI is not signed in.
+   */
+  gatewayMode?: 'always' | 'fallback';
+  /** Model on the Magpie route. Default: the session model as `auto/<model>`. */
+  gatewayModel?: string;
   /**
    * In the box: CLI auth variables taken from box Secrets, e.g.
    * `{ CLAUDE_CODE_OAUTH_TOKEN: 'CLAUDE_TOKEN_1' }`. Ignored for host runs.
@@ -64,7 +76,7 @@ interface Live {
   pending: number;
 }
 
-const GATEWAY_KEYS = ['ANTHROPIC_API_KEY'] as const;
+const GATEWAY_KEYS = ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'] as const;
 
 /** Parser state for one process run. */
 export interface ClaudeStreamState {
@@ -188,8 +200,8 @@ export function claudeStreamEvents(
  * Claude Code driven headless (`claude -p`, stream-json in and out). One
  * process per turn; `send` during a running turn is written to its stdin
  * when the runner streams (host process), else kept for the next turn (box
- * exec); later turns `--resume` the same session id. The Magpie route runs
- * `--bare`: gateway token only, no login, hooks or CLAUDE.md discovery.
+ * exec); later turns `--resume` the same session id. The route (built-in
+ * login or Magpie) is picked at start and kept for the session.
  */
 export class ClaudeCodeExecutor implements Executor {
   readonly kind = 'claude-code' as const;
@@ -198,31 +210,65 @@ export class ClaudeCodeExecutor implements Executor {
   /** Text sent while a non-streaming turn ran; it opens the next turn. */
   private readonly deferred = new Map<string, string[]>();
   private readonly env: Record<string, string>;
+  private readonly gatewayEnv: Record<string, string> | undefined;
+  /** Default route when no login check runs. */
   readonly route: ExecutorRoute;
+  /** Login check result per box ('' is the host). */
+  private readonly routes = new Map<string, Promise<ExecutorRoute>>();
 
   constructor(private readonly options: ClaudeCodeExecutorOptions) {
     this.runner = options.runner ?? new NodeProcessRunner();
-    this.route = options.gateway ? 'magpie' : 'builtin';
-    this.env = options.gateway
+    this.route = options.gateway && options.gatewayMode !== 'fallback' ? 'magpie' : 'builtin';
+    this.env = executorEnv(options.env, []);
+    // An empty API key keeps a stray host key from winning over the token.
+    this.gatewayEnv = options.gateway
       ? executorEnv(options.env, [], {
           ANTHROPIC_BASE_URL: options.gateway.baseUrl,
-          ANTHROPIC_API_KEY: options.gateway.token,
+          ANTHROPIC_AUTH_TOKEN: options.gateway.token,
+          ANTHROPIC_API_KEY: '',
         })
-      : executorEnv(options.env, []);
+      : undefined;
   }
 
   async start(input: ExecutorStart): Promise<ExecutorTurn> {
+    const route = await this.pickRoute(input.boxId, input.workdir);
+    const model = input.model ?? this.options.model ?? DEFAULT_CLAUDE_CODE_MODEL;
     const session: ExecutorSession = {
       sessionId: randomUUID(),
       kind: 'claude-code',
       workerId: input.workerId,
       workdir: input.workdir,
-      model: input.model ?? this.options.model ?? DEFAULT_CLAUDE_CODE_MODEL,
+      model:
+        route === 'magpie'
+          ? (this.options.gatewayModel ?? (model.includes('/') ? model : `auto/${model}`))
+          : model,
       systemPrompt: input.systemPrompt,
       startedAt: Date.now(),
+      route,
       ...(input.boxId ? { boxId: input.boxId } : {}),
     };
     return this.run(session, ['--session-id', session.sessionId], input.ticket);
+  }
+
+  /** `fallback` mode: Magpie only where `claude auth status` says not signed in. */
+  private pickRoute(boxId: string | undefined, cwd: string): Promise<ExecutorRoute> {
+    if (!this.options.gateway || this.options.gatewayMode !== 'fallback') {
+      return Promise.resolve(this.route);
+    }
+    const key = boxId ?? '';
+    let picked = this.routes.get(key);
+    if (!picked) {
+      picked = signedIn(this.runner, {
+        command: this.options.bin ?? 'claude',
+        args: ['auth', 'status'],
+        cwd,
+        env: this.env,
+        ...(boxId ? { machineId: boxId } : {}),
+        ...(boxId && this.options.boxSecretEnv ? { envFromBox: this.options.boxSecretEnv } : {}),
+      }).then((yes): ExecutorRoute => (yes ? 'builtin' : 'magpie'));
+      this.routes.set(key, picked);
+    }
+    return picked;
   }
 
   async send(session: ExecutorSession, input: ExecutorInput): Promise<ExecutorTurn> {
@@ -255,7 +301,6 @@ export class ClaudeCodeExecutor implements Executor {
   args(session: ExecutorSession, sessionArgs: readonly string[]): string[] {
     const args = [
       '-p',
-      ...(this.options.gateway ? ['--bare'] : []),
       '--verbose',
       '--output-format',
       'stream-json',
@@ -281,13 +326,14 @@ export class ClaudeCodeExecutor implements Executor {
     sessionArgs: readonly string[],
     text: string,
   ): ExecutorTurn {
+    const magpie = (session.route ?? this.route) === 'magpie' && this.gatewayEnv;
     const proc = this.runner.spawn({
       command: this.options.bin ?? 'claude',
       args: this.args(session, sessionArgs),
       cwd: session.workdir,
-      env: this.env,
+      env: magpie ? magpie : this.env,
       ...(session.boxId ? { machineId: session.boxId } : {}),
-      ...(session.boxId && this.options.boxSecretEnv && !this.options.gateway
+      ...(session.boxId && this.options.boxSecretEnv && !magpie
         ? { envFromBox: this.options.boxSecretEnv }
         : {}),
     });
@@ -300,7 +346,7 @@ export class ClaudeCodeExecutor implements Executor {
   }
 
   private async *events(session: ExecutorSession, live: Live): AsyncIterable<ExecutorEvent> {
-    const state = claudeStreamState(session.model, this.route);
+    const state = claudeStreamState(session.model, session.route ?? this.route);
     try {
       for await (const raw of live.proc.lines) {
         let row: unknown;
@@ -320,7 +366,9 @@ export class ClaudeCodeExecutor implements Executor {
         return;
       }
       const exit = await live.proc.exited;
-      const stderr = redactSecrets(exit.stderr, this.env, GATEWAY_KEYS).trim().slice(-800);
+      const stderr = redactSecrets(exit.stderr, this.gatewayEnv ?? this.env, GATEWAY_KEYS)
+        .trim()
+        .slice(-800);
       yield {
         type: 'failed',
         error: `claude exited ${exit.code ?? exit.signal ?? 'unknown'} before a result${stderr ? `: ${stderr}` : ''}`,

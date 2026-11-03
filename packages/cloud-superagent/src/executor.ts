@@ -92,6 +92,10 @@ export interface ExecutorSession {
   boxId?: string;
   /** Tenant of the worker, so stored sessions stay per tenant. */
   tenantId?: string;
+  /** The CLI's own id when it picks one itself (Codex thread id). */
+  vendorSessionId?: string;
+  /** Auth route picked at start; later turns keep it. */
+  route?: ExecutorRoute;
 }
 
 export interface ExecutorStart {
@@ -522,6 +526,11 @@ export class ExecutorCoder implements CoderPort {
     private readonly options: ExecutorCoderOptions = {},
   ) {
     this.sessions = options.sessions ?? new MemoryExecutorSessionStore();
+  }
+
+  /** The worker's stored session (model and route included), if any. */
+  session(workerId: string, tenantId?: string): Promise<ExecutorSession | undefined> {
+    return this.sessions.get(workerId, tenantId);
   }
 
   /** Host executors work in the host checkout; box executors edit the box copy. */

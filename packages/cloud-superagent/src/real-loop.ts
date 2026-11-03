@@ -44,7 +44,7 @@ export interface RealLoopReport {
   prUrl: string | null;
   destroyed: boolean;
   machineId: string | null;
-  coder: 'fake' | 'model' | 'claude-code';
+  coder: 'fake' | 'model' | 'claude-code' | 'codex';
   git: 'fake' | 'github';
   boxed: boolean;
   seeded: boolean;

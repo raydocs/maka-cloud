@@ -244,16 +244,19 @@ test('a process that exits without a result fails, with the key redacted from st
     },
   );
   const spawned = runner.spawned[0];
-  assert.equal(spawned?.args.includes('--bare'), true, 'gateway route runs --bare');
+  // As tested on 2026-11-03: auth token, empty API key, no --bare, `auto/` model ids.
+  assert.equal(spawned?.args.includes('--bare'), false);
   assert.equal(spawned?.env.ANTHROPIC_BASE_URL, 'https://magpie.example/anthropic');
-  assert.equal(spawned?.env.ANTHROPIC_API_KEY, KEY);
+  assert.equal(spawned?.env.ANTHROPIC_AUTH_TOKEN, KEY);
+  assert.equal(spawned?.env.ANTHROPIC_API_KEY, '');
+  assert.equal(spawned?.args[(spawned?.args.indexOf('--model') ?? 0) + 1], 'auto/claude-opus-5-5');
   assert.equal(spawned?.args.join(' ').includes(KEY), false);
   assert.equal(executor.route, 'magpie');
   assert.equal(ran.terminal.type, 'failed');
   if (ran.terminal.type !== 'failed') return;
   assert.match(ran.terminal.error, /claude exited 1 before a result/);
   assert.equal(ran.terminal.error.includes(KEY), false);
-  assert.match(ran.terminal.error, /\[ANTHROPIC_API_KEY\]/);
+  assert.match(ran.terminal.error, /\[ANTHROPIC_AUTH_TOKEN\]/);
 });
 
 test('budget: remaining is Mandate minus earlier usage; worst dimension decides', () => {
@@ -409,14 +412,21 @@ test('MAKA_CLOUD_EXECUTOR picks Claude Code on the built-in login; magpie is opt
         MAKA_CLOUD_EXECUTOR: 'claude-code',
         MAKA_CLOUD_EXECUTOR_GATEWAY: 'magpie',
       }),
-    /needs MAKA_CLOUD_MAGPIE_URL and MAKA_CLOUD_MAGPIE_TOKEN/,
+    /needs MAKA_CLOUD_MAGPIE_URL and MAKA_CLOUD_MAGPIE_KEY/,
   );
-  const gateway = gatewayFromEnv({
-    MAKA_CLOUD_EXECUTOR_GATEWAY: 'magpie',
-    MAKA_CLOUD_MAGPIE_URL: 'https://magpie.example',
-    MAKA_CLOUD_MAGPIE_TOKEN: KEY,
+  const magpie = { MAKA_CLOUD_MAGPIE_URL: 'https://magpie.example', MAKA_CLOUD_MAGPIE_KEY: KEY };
+  assert.deepEqual(gatewayFromEnv({ MAKA_CLOUD_EXECUTOR_GATEWAY: 'magpie', ...magpie }), {
+    gateway: { baseUrl: 'https://magpie.example', token: KEY },
+    gatewayMode: 'always',
   });
-  assert.deepEqual(gateway, { baseUrl: 'https://magpie.example', token: KEY });
+  // A Magpie URL and key without a choice: check the login first, fall back to Magpie.
+  assert.equal(gatewayFromEnv(magpie).gatewayMode, 'fallback');
+  assert.equal(
+    gatewayFromEnv({ MAKA_CLOUD_EXECUTOR_GATEWAY: 'builtin', ...magpie }).gateway,
+    undefined,
+  );
+  assert.deepEqual(gatewayFromEnv({}), { gatewayMode: 'always' });
+  assert.equal(createCoderFromEnv({ MAKA_CLOUD_EXECUTOR: 'codex' }).kind, 'codex');
   const boxed = createCoderFromEnv({ MAKA_CLOUD_EXECUTOR: 'claude-code' }, fetch, {
     sandbox: new FakeSandbox(),
   });
@@ -594,4 +604,133 @@ test('a box run past its deadline is killed and reported as failed', async () =>
   if (ran.terminal.type === 'failed') assert.match(ran.terminal.error, /SIGTERM/);
   // Without GNU time, peak RSS is sampled from the session's processes at each poll.
   assert.ok((runner.peakRssKb.get('box-2') ?? 0) > 0, 'peak RSS sampled while running');
+});
+
+test('fallback: the login check runs once per box; Magpie only where the CLI is not signed in', async () => {
+  const done = () => ({ lines: [init, result('ok')], done: true });
+  const runner = new ScriptedProcessRunner([
+    () => ({ lines: [], done: true, code: 1 }), // box-a: claude auth status → not signed in
+    done,
+    done,
+    () => ({ lines: [], done: true, code: 0 }), // box-b: signed in
+    done,
+  ]);
+  const executor = new ClaudeCodeExecutor({
+    env: ENV,
+    runner,
+    gateway: { baseUrl: 'https://magpie.example', token: KEY },
+    gatewayMode: 'fallback',
+    boxSecretEnv: { CLAUDE_CODE_OAUTH_TOKEN: 'CLAUDE_TOKEN_1' },
+  });
+  const start = (boxId: string) =>
+    executor.start({
+      workerId: boxId,
+      ticket: 't',
+      mandate: actMandate([]),
+      workdir: BOX_REPO,
+      systemPrompt: 'S',
+      boxId,
+    });
+  const a1 = await start('box-a');
+  await driveTurn(a1);
+  await driveTurn(await start('box-a'));
+  const b = await start('box-b');
+  await driveTurn(b);
+  const argv = runner.spawned.map((row) => row.args.slice(0, 2).join(' '));
+  assert.deepEqual(argv, [
+    'auth status',
+    '-p --verbose',
+    '-p --verbose',
+    'auth status',
+    '-p --verbose',
+  ]);
+  assert.equal(a1.session.route, 'magpie');
+  assert.equal(runner.spawned[1]?.env.ANTHROPIC_AUTH_TOKEN, KEY);
+  assert.equal(runner.spawned[1]?.envFromBox, undefined, 'no box Secret on the Magpie route');
+  assert.equal(b.session.route, 'builtin');
+  assert.equal(runner.spawned[4]?.env.ANTHROPIC_AUTH_TOKEN, undefined);
+  assert.deepEqual(runner.spawned[4]?.envFromBox, { CLAUDE_CODE_OAUTH_TOKEN: 'CLAUDE_TOKEN_1' });
+});
+
+test('box exec env goes over stdin, never in the exec request or a command line', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'env-claude-'));
+  const bin = join(dir, 'claude');
+  await writeFile(
+    bin,
+    [
+      '#!/bin/sh',
+      'cat > /dev/null',
+      `printf '%s|%s|%s' "$ANTHROPIC_AUTH_TOKEN" "$ANTHROPIC_BASE_URL" "\${ANTHROPIC_API_KEY-unset}" > ${dir}/seen`,
+      `echo '${init}'`,
+      `echo '${result('ok')}'`,
+      '',
+    ].join('\n'),
+  );
+  await chmod(bin, 0o755);
+  const sandbox = new FakeSandbox();
+  await boxWithRepo(sandbox, 'box-e');
+  const requests: Array<{ cmd: string; env?: unknown; stdin?: string }> = [];
+  const spy = Object.create(sandbox) as FakeSandbox;
+  spy.exec = async (machineId, request) => {
+    requests.push(request);
+    return sandbox.exec(machineId, request);
+  };
+  const executor = new ClaudeCodeExecutor({
+    env: ENV,
+    bin,
+    runner: new BoxProcessRunner(spy, { pollMs: 20 }),
+    gateway: { baseUrl: 'https://magpie.example', token: KEY },
+  });
+  const ran = await driveTurn(
+    await executor.start({
+      workerId: 'w',
+      ticket: 't',
+      mandate: actMandate([]),
+      workdir: BOX_REPO,
+      systemPrompt: 'S',
+      boxId: 'box-e',
+    }),
+  );
+  assert.equal(ran.terminal.type, 'ready');
+  assert.equal(await readFile(join(dir, 'seen'), 'utf8'), `${KEY}|https://magpie.example|`);
+  assert.equal(
+    requests.some((row) => row.env !== undefined),
+    false,
+    'Instabox drops exec env',
+  );
+  assert.equal(
+    requests.some((row) => row.cmd.includes(KEY)),
+    false,
+  );
+  assert.equal(
+    requests.some((row) => row.stdin?.includes(KEY)),
+    false,
+    'stdin carries it encoded',
+  );
+});
+
+test('a box run is found by an explicit marker inside an argument (Codex -o path)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'slow-codex-'));
+  const bin = join(dir, 'codex');
+  await writeFile(bin, '#!/bin/sh\ncat > /dev/null\nsleep 5\n');
+  await chmod(bin, 0o755);
+  const sandbox = new FakeSandbox();
+  await boxWithRepo(sandbox, 'box-m');
+  const runner = new BoxProcessRunner(sandbox, { pollMs: 20, timeoutSeconds: 0.3 });
+  const marker = 'maka-codex-0b9f3c1e-2d4a-4e8b-9c1d-123456789abc';
+  const proc = runner.spawn({
+    command: bin,
+    args: ['exec', '-o', `/tmp/${marker}.txt`, '-'],
+    marker,
+    cwd: BOX_REPO,
+    env: {},
+    machineId: 'box-m',
+  });
+  proc.endInput();
+  for await (const _line of proc.lines) {
+    // no output
+  }
+  assert.equal((await proc.exited).signal, 'SIGTERM');
+  assert.ok(sandbox.commands.some((row) => row.cmd.includes(`pkill -f -- ${marker}`)));
+  assert.ok((runner.peakRssKb.get('box-m') ?? 0) > 0, 'sampled by the marker');
 });
