@@ -99,6 +99,8 @@ export const EXECUTOR_MODEL_ENV = 'MAKA_CLOUD_EXECUTOR_MODEL';
 export const EXECUTOR_GATEWAY_ENV = 'MAKA_CLOUD_EXECUTOR_GATEWAY';
 export const MAGPIE_URL_ENV = 'MAKA_CLOUD_MAGPIE_URL';
 export const MAGPIE_TOKEN_ENV = 'MAKA_CLOUD_MAGPIE_TOKEN';
+/** Name of the box variable (an Instabox Secret) that holds Claude Code's token. */
+export const EXECUTOR_CLAUDE_SECRET_ENV = 'MAKA_CLOUD_EXECUTOR_CLAUDE_SECRET';
 
 /**
  * `MAKA_CLOUD_EXECUTOR=claude-code` runs Claude Code headless as the coder
@@ -116,13 +118,21 @@ export function createCoderFromEnv(
     const model = env[EXECUTOR_MODEL_ENV]?.trim();
     const gateway = gatewayFromEnv(env);
     const sandbox = options.sandbox;
+    const secret = env[EXECUTOR_CLAUDE_SECRET_ENV]?.trim();
     return {
       coder: new ExecutorCoder(
         new ClaudeCodeExecutor({
           env,
           ...(model ? { model } : {}),
           ...(gateway ? { gateway } : {}),
-          ...(sandbox ? { runner: new BoxProcessRunner(sandbox) } : {}),
+          ...(secret ? { boxSecretEnv: { CLAUDE_CODE_OAUTH_TOKEN: secret } } : {}),
+          // The box is the sandbox: the CLI may run tests and commands there.
+          ...(sandbox
+            ? {
+                runner: new BoxProcessRunner(sandbox),
+                permissionMode: 'bypassPermissions' as const,
+              }
+            : {}),
         }),
         sandbox ? { box: { sandbox, workdir: BOX_REPO } } : {},
       ),

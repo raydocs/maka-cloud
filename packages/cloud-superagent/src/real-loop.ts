@@ -129,6 +129,7 @@ export async function runRealLoop(options: RealLoopOptions = {}): Promise<RealLo
         vcpus: SMALLEST_SANDBOX.vcpus,
         memMiB: SMALLEST_SANDBOX.memMiB,
         metadata: { 'maka.purpose': 'real-loop' },
+        ...boxSecretsFromEnv(env),
       });
       const settled =
         created.state === 'succeeded' ? created : await box.waitForOperation(created.id);
@@ -345,6 +346,15 @@ function redactKeys(text: string, env: NodeJS.ProcessEnv): string {
     .map((value) => value?.trim() ?? '')
     .filter(Boolean)
     .reduce((out, secret) => redactSecret(out, secret), text);
+}
+
+/** `MAKA_CLOUD_BOX_SECRETS=A,B`: Instabox Secrets selected on the loop's box. */
+export function boxSecretsFromEnv(env: NodeJS.ProcessEnv): { secrets?: string[] } {
+  const names = (env.MAKA_CLOUD_BOX_SECRETS ?? '')
+    .split(',')
+    .map((name) => name.trim())
+    .filter(Boolean);
+  return names.length ? { secrets: names } : {};
 }
 
 async function liveSandbox(env: NodeJS.ProcessEnv): Promise<HttpSandbox> {

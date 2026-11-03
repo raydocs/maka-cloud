@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { chmod, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import {
   ClaudeCodeExecutor,
@@ -30,7 +33,8 @@ import {
 } from '../executor-process.js';
 import { BOX_REPO } from '../loop-box.js';
 import { createCoderFromEnv, gatewayFromEnv } from '../loop-coder.js';
-import type { SandboxExecRequest } from '../sandbox.js';
+import { boxSecretsFromEnv } from '../real-loop.js';
+import { FakeSandbox } from '../sandbox.js';
 import { actMandate, type NormalizedEvent, type WorkerRecord } from '../types.js';
 
 const KEY = 'sk-ant-test-0123456789abcdef';
@@ -414,60 +418,80 @@ test('MAKA_CLOUD_EXECUTOR picks Claude Code on the built-in login; magpie is opt
   });
   assert.deepEqual(gateway, { baseUrl: 'https://magpie.example', token: KEY });
   const boxed = createCoderFromEnv({ MAKA_CLOUD_EXECUTOR: 'claude-code' }, fetch, {
-    sandbox: new RecordingSandbox(() => ''),
+    sandbox: new FakeSandbox(),
   });
   assert.equal(boxed.coder.wantsWorkdir, false);
 });
 
-/** Records execs; answers `claude` with scripted stream-json and `git status` with a list. */
-class RecordingSandbox {
-  readonly execs: SandboxExecRequest[] = [];
-  constructor(private readonly claudeOut: (request: SandboxExecRequest) => string) {}
-  async ensureRunning(): Promise<void> {}
-  async getMachine(id: string) {
-    return { id, state: 'running' };
-  }
-  async exec(_machine: string, request: SandboxExecRequest) {
-    this.execs.push(request);
-    if (request.cmd.startsWith('claude ')) {
-      return { stdout: this.claudeOut(request), stderr: '', exitCode: 0 };
-    }
-    if (request.cmd.startsWith('git status')) {
-      return { stdout: ' M add.js\0?? notes.md\0', stderr: '', exitCode: 0 };
-    }
-    return { stdout: '', stderr: '', exitCode: 0 };
-  }
-}
-
-test('in the box: claude runs through exec on the checkout; mid-turn text opens the next turn', async () => {
-  const sandbox = new RecordingSandbox(() =>
+/**
+ * A fake `claude` for FakeSandbox (real local shell): records argv, stdin and
+ * the token variable it saw, edits add.js in its cwd, prints scripted lines.
+ */
+async function fakeClaude(lines: string[]): Promise<{ bin: string; dir: string }> {
+  const dir = await mkdtemp(join(tmpdir(), 'fake-claude-'));
+  await writeFile(join(dir, 'out.txt'), `${lines.join('\n')}\n`);
+  const bin = join(dir, 'claude');
+  await writeFile(
+    bin,
     [
-      init,
-      assistant('m1', 'editing'),
-      result(`${STATUS_MARKER} {"status":"ready","summary":"fixed"}`),
+      '#!/bin/sh',
+      `n=$(ls ${dir} | grep -c '^stdin') `,
+      `cat > ${dir}/stdin.$n`,
+      `printf '%s\\n' "$@" > ${dir}/args.$n`,
+      `printf '%s' "$CLAUDE_CODE_OAUTH_TOKEN" > ${dir}/token.$n`,
+      `pwd > ${dir}/cwd.$n`,
+      "printf 'export const add = (a, b) => a + b;\\n' > add.js",
+      `cat ${dir}/out.txt`,
+      '',
     ].join('\n'),
   );
-  const executor = new ClaudeCodeExecutor({ env: ENV, runner: new BoxProcessRunner(sandbox) });
+  await chmod(bin, 0o755);
+  return { bin, dir };
+}
+
+async function boxWithRepo(sandbox: FakeSandbox, machineId: string): Promise<void> {
+  const made = await sandbox.exec(machineId, {
+    cmd: `mkdir -p ${BOX_REPO} && cd ${BOX_REPO} && git init -q && printf 'x' > add.js && git add -A && git -c user.email=t@t -c user.name=t -c commit.gpgsign=false commit -qm init`,
+  });
+  assert.equal(made.exitCode, 0, made.stderr);
+}
+
+test('in the box: claude runs detached on the checkout and is polled; mid-turn text opens the next turn', async () => {
+  const fake = await fakeClaude([
+    init,
+    assistant('m1', 'editing'),
+    result(`${STATUS_MARKER} {"status":"ready","summary":"fixed"}`),
+  ]);
+  const sandbox = new FakeSandbox();
+  await boxWithRepo(sandbox, 'box-7');
+  const runner = new BoxProcessRunner(sandbox, { pollMs: 20 });
+  const executor = new ClaudeCodeExecutor({ env: ENV, runner, bin: fake.bin });
   const coder = new ExecutorCoder(executor, { box: { sandbox, workdir: BOX_REPO } });
   const boxed = { ...worker({ tokens: 10_000 }), sandboxRef: 'box-7' } as WorkerRecord;
   const first = await coder.apply({ brief: 'fix add', event, worker: boxed });
   assert.equal(first.summary, 'fixed');
-  assert.deepEqual(first.changed, ['add.js', 'notes.md']);
+  assert.deepEqual(first.changed, ['add.js']);
   assert.deepEqual(first.files, {}, 'edits stay in the box checkout');
-  const run = sandbox.execs.find((row) => row.cmd.startsWith('claude '));
-  assert.ok(run);
-  assert.equal(run.cwd, BOX_REPO);
-  assert.match(
-    run.cmd,
-    /^claude -p --verbose --output-format stream-json --input-format stream-json --session-id [0-9a-f-]{36} /,
+  const args = (await readFile(join(fake.dir, 'args.0'), 'utf8')).split('\n');
+  assert.deepEqual(args.slice(0, 6), [
+    '-p',
+    '--verbose',
+    '--output-format',
+    'stream-json',
+    '--input-format',
+    'stream-json',
+  ]);
+  assert.equal(args[args.indexOf('--permission-mode') + 1], 'acceptEdits');
+  assert.match(await readFile(join(fake.dir, 'cwd.0'), 'utf8'), /maka-loop\/repo\n$/);
+  const stdin = await readFile(join(fake.dir, 'stdin.0'), 'utf8');
+  assert.equal(JSON.parse(stdin.trim()).message.content[0].text, 'fix add');
+  assert.equal(
+    sandbox.commands.some((row) => row.cmd.includes('/home/x')),
+    false,
+    'no host HOME goes into the box',
   );
-  assert.equal(JSON.parse((run.stdin ?? '').trim()).message.content[0].text, 'fix add');
-  assert.equal(run.env, undefined, 'no host env is sent into the box on the built-in route');
 
-  // A wrap-up sent while the box exec runs cannot reach its stdin; it opens the next turn.
-  const session = await (
-    coder as unknown as { sessions: { get(id: string): Promise<ExecutorSession> } }
-  ).sessions.get('w1');
+  // A wrap-up sent once the box run started cannot reach its stdin; it opens the next turn.
   const live = await executor.start({
     workerId: 'w9',
     ticket: 'x',
@@ -482,11 +506,92 @@ test('in the box: claude runs through exec on the checkout; mid-turn text opens 
   });
   assert.equal(queued?.queued, true);
   await driveTurn(await executor.send(live.session, { kind: 'ci', text: 'CI failed' }));
-  const resumed = sandbox.execs.filter((row) => row.cmd.startsWith('claude ')).at(-1);
-  assert.match(resumed?.cmd ?? '', new RegExp(`--resume ${live.session.sessionId}`));
+  const resumedArgs = (await readFile(join(fake.dir, 'args.2'), 'utf8')).split('\n');
+  assert.equal(resumedArgs[resumedArgs.indexOf('--resume') + 1], live.session.sessionId);
+  const resumedStdin = await readFile(join(fake.dir, 'stdin.2'), 'utf8');
   assert.equal(
-    JSON.parse((resumed?.stdin ?? '').trim()).message.content[0].text,
+    JSON.parse(resumedStdin.trim()).message.content[0].text,
     `${WRAP_UP_TEXT}\n\nCI failed`,
   );
-  assert.equal(session.boxId, 'box-7');
+});
+
+test('box auth comes from a box Secret variable; the host never sends a value', async () => {
+  const fake = await fakeClaude([init, result('ok')]);
+  const sandbox = new FakeSandbox();
+  await boxWithRepo(sandbox, 'box-1');
+  const before = process.env.CLAUDE_TOKEN_1;
+  process.env.CLAUDE_TOKEN_1 = 'placeholder-from-box';
+  try {
+    const executor = new ClaudeCodeExecutor({
+      env: ENV,
+      bin: fake.bin,
+      runner: new BoxProcessRunner(sandbox, { pollMs: 20 }),
+      boxSecretEnv: { CLAUDE_CODE_OAUTH_TOKEN: 'CLAUDE_TOKEN_1' },
+    });
+    const ran = await driveTurn(
+      await executor.start({
+        workerId: 'w',
+        ticket: 't',
+        mandate: actMandate([]),
+        workdir: BOX_REPO,
+        systemPrompt: 'S',
+        boxId: 'box-1',
+      }),
+    );
+    assert.equal(ran.terminal.type, 'ready');
+    // The turn ends at the result line; the run directory still goes away.
+    assert.ok(
+      sandbox.commands.some((row) => /rm -rf \S*\.maka-exec\//.test(row.cmd)),
+      'run directory removed after an early stop',
+    );
+    assert.equal(await readFile(join(fake.dir, 'token.0'), 'utf8'), 'placeholder-from-box');
+    assert.equal(
+      sandbox.commands.some((row) => row.cmd.includes('placeholder-from-box')),
+      false,
+    );
+  } finally {
+    if (before === undefined) delete process.env.CLAUDE_TOKEN_1;
+    else process.env.CLAUDE_TOKEN_1 = before;
+  }
+  assert.throws(
+    () =>
+      new BoxProcessRunner(sandbox).spawn({
+        command: 'claude',
+        args: [],
+        cwd: BOX_REPO,
+        env: {},
+        machineId: 'box-1',
+        envFromBox: { 'X;rm -rf': 'Y' },
+      }),
+    /bad variable name/,
+  );
+  assert.deepEqual(boxSecretsFromEnv({ MAKA_CLOUD_BOX_SECRETS: ' CLAUDE_TOKEN_1, B ' }), {
+    secrets: ['CLAUDE_TOKEN_1', 'B'],
+  });
+  assert.deepEqual(boxSecretsFromEnv({}), {});
+});
+
+test('a box run past its deadline is killed and reported as failed', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'slow-claude-'));
+  const bin = join(dir, 'claude');
+  await writeFile(bin, '#!/bin/sh\ncat > /dev/null\nsleep 5\n');
+  await chmod(bin, 0o755);
+  const sandbox = new FakeSandbox();
+  await boxWithRepo(sandbox, 'box-2');
+  const runner = new BoxProcessRunner(sandbox, { pollMs: 20, timeoutSeconds: 0.2 });
+  const executor = new ClaudeCodeExecutor({ env: ENV, bin, runner });
+  const ran = await driveTurn(
+    await executor.start({
+      workerId: 'w',
+      ticket: 't',
+      mandate: actMandate([]),
+      workdir: BOX_REPO,
+      systemPrompt: 'S',
+      boxId: 'box-2',
+    }),
+  );
+  assert.equal(ran.terminal.type, 'failed');
+  if (ran.terminal.type === 'failed') assert.match(ran.terminal.error, /SIGTERM/);
+  // Without GNU time, peak RSS is sampled from the session's processes at each poll.
+  assert.ok((runner.peakRssKb.get('box-2') ?? 0) > 0, 'peak RSS sampled while running');
 });

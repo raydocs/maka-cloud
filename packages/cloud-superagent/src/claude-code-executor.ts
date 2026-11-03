@@ -40,6 +40,11 @@ export interface ClaudeCodeExecutorOptions {
    * Magpie in `--bare` mode with the gateway's scoped token instead.
    */
   gateway?: GatewayRoute;
+  /**
+   * In the box: CLI auth variables taken from box Secrets, e.g.
+   * `{ CLAUDE_CODE_OAUTH_TOKEN: 'CLAUDE_TOKEN_1' }`. Ignored for host runs.
+   */
+  boxSecretEnv?: Record<string, string>;
   runner?: ProcessRunner;
   bin?: string;
   model?: string;
@@ -282,6 +287,9 @@ export class ClaudeCodeExecutor implements Executor {
       cwd: session.workdir,
       env: this.env,
       ...(session.boxId ? { machineId: session.boxId } : {}),
+      ...(session.boxId && this.options.boxSecretEnv && !this.options.gateway
+        ? { envFromBox: this.options.boxSecretEnv }
+        : {}),
     });
     const live: Live = { proc, pending: 1 };
     this.live.set(session.sessionId, live);

@@ -47,9 +47,12 @@ export function safeRelPath(rel: string): string {
 }
 
 export async function packTar(dir: string): Promise<Buffer> {
-  const { stdout } = await run('tar', ['-czf', '-', '-C', dir, '.'], {
+  const { stdout } = await run('tar', ['--no-xattrs', '-czf', '-', '-C', dir, '.'], {
     encoding: 'buffer',
     maxBuffer: 20 * 1024 * 1024,
+    // macOS tar otherwise adds AppleDouble `._*` files for extended
+    // attributes; they show up as binary files in the box diff.
+    env: { ...process.env, COPYFILE_DISABLE: '1' },
   });
   return stdout;
 }
