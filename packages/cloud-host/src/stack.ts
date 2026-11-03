@@ -407,6 +407,7 @@ export async function startStack(
     const wiredSuperagent = {
       ...featureOptions,
       ...agentOpts,
+      sharedBox: agentOpts.sharedBox ?? true,
       sandbox:
         agentOpts.sandbox ??
         (instaboxClient === undefined ? undefined : instaboxSandboxPort(instaboxClient)),

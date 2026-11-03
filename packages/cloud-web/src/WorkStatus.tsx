@@ -93,7 +93,8 @@ export function SuperagentProgress({ client }: { client: CloudClient }) {
       {queue.map((row) => (
         <p key={row.taskId} className="muted" data-testid="superagent-queue-row">
           {row.state}
-          {row.reason ? `: ${row.reason}` : ''} · wait {Math.round(row.waitMs / 1000)}s · {row.title}
+          {row.reason ? `: ${row.reason}` : ''} · wait {Math.round(row.waitMs / 1000)}s ·{' '}
+          {row.title}
         </p>
       ))}
     </section>

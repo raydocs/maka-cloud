@@ -11,6 +11,7 @@ import {
   asAgent,
   assertAgentChannel,
   checkAgentIsolation,
+  isolationListingUnfinished,
 } from '../agent-user.js';
 import { INPUT_APPEND_SCRIPT } from '../process-channel.js';
 import { buildRunScript } from '../scripts.js';
@@ -80,6 +81,69 @@ test('a box passes only when every fact of the probe is as the channel needs it'
   for (const [output, expected] of cases) {
     assert.match(agentIsolationProblems(output).join('; '), expected, output);
   }
+});
+
+test('an unfinished filecap or setid listing is retried; a finding is not', async () => {
+  assert.equal(isolationListingUnfinished(GOOD.join('\n')), false);
+  assert.equal(isolationListingUnfinished(without('agent_filecaps', 'unchecked')), true);
+  assert.equal(isolationListingUnfinished(without('agent_setid', 'unchecked')), true);
+  assert.equal(isolationListingUnfinished(without('agent_filecaps', 'found')), false);
+  assert.equal(isolationListingUnfinished(without('agent_setid', 'found')), false);
+  assert.equal(isolationListingUnfinished(without('agent_sudo', 'yes')), false);
+  assert.equal(isolationListingUnfinished(without('agent_filecaps')), false);
+  assert.equal(isolationListingUnfinished(without('agent_setid')), false);
+  assert.equal(
+    isolationListingUnfinished(
+      without('agent_filecaps', 'unchecked').replace('FACT agent_sudo=no', 'FACT agent_sudo=yes'),
+    ),
+    false,
+  );
+
+  const channel = { user: 'maka-agent', group: 'maka' };
+  let n = 0;
+  await checkAgentIsolation(
+    {
+      root: '/tmp/iso',
+      execOk: async () => {
+        n += 1;
+        return n === 1 ? without('agent_setid', 'unchecked') : GOOD.join('\n');
+      },
+    } as never,
+    channel,
+  );
+  assert.equal(n, 2);
+
+  n = 0;
+  await assert.rejects(
+    checkAgentIsolation(
+      {
+        root: '/tmp/iso',
+        execOk: async () => {
+          n += 1;
+          return without('agent_filecaps', 'found');
+        },
+      } as never,
+      channel,
+    ),
+    /file capabilities/u,
+  );
+  assert.equal(n, 1);
+
+  n = 0;
+  await assert.rejects(
+    checkAgentIsolation(
+      {
+        root: '/tmp/iso',
+        execOk: async () => {
+          n += 1;
+          return without('agent_filecaps', 'unchecked');
+        },
+      } as never,
+      channel,
+    ),
+    /file capabilities/u,
+  );
+  assert.equal(n, 3);
 });
 
 test('account names that could change the command are refused', () => {

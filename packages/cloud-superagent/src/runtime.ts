@@ -108,9 +108,13 @@ import type { SuperagentStore } from './store.js';
 import { MemorySuperagentStore } from './memory-store.js';
 import {
   actMandate,
+  DEFAULT_AUTONOMY,
   emptyUsage,
   isLiveState,
   observeMandate,
+  tenantBoxAsWorker,
+  type AutonomyIncident,
+  type AutonomySettings,
   type NormalizedEvent,
   type WorkerContext,
   type WorkerRecord,
@@ -158,6 +162,7 @@ import {
   type ReviewReceipt,
   type ReviewerPort,
 } from './review.js';
+import { BoxPool } from './box-pool.js';
 import { FakeSandbox, type SandboxPort } from './sandbox.js';
 import { UnconfiguredOrgSecrets } from './secrets.js';
 import {
@@ -180,6 +185,8 @@ import {
   type SpeculativeCleanup,
   type SpeculativeSettings,
 } from './speculative.js';
+import { AUTONOMY_LEDGER_KIND, autonomyUsage, emptyAutonomy, markApplied } from './autonomy.js';
+
 import { type StuckCard, stuckCardOf } from './stuck.js';
 import { DUPLEX_ACK, isPreemptEvent, rememberEventIds } from './duplex.js';
 import { runWatchdog } from './watchdog.js';
@@ -387,6 +394,14 @@ export interface SuperagentOptions {
   targets?: ExecutionTargetResolver;
   /** Cheap watchdog narrator. Absent → deterministic fallback. */
   watchdogNarrator?: WatchdogNarrator;
+  /** Standing human decisions. Default empty; hydrates from audit. */
+  decisions?: DecisionBook;
+  /** Must-ask whitelist. Tenant overlay can only tighten. */
+  mustAsk?: MustAskPolicy;
+  mustAskOverlay?: TenantMustAskOverlay;
+  /** Declarative routing rules. Miss falls through to the existing Router. */
+  rules?: RulesEngine;
+  rulesPath?: string;
   /**
    * Mistake book. Default off. Host passes this; the constructor never
    * reads environment variables.
@@ -407,14 +422,14 @@ export interface SuperagentOptions {
    * The constructor never reads environment variables.
    */
   sweep?: Partial<SweepSettings> | SweepSettings;
-  /** Standing human decisions. Default empty; hydrates from audit. */
-  decisions?: DecisionBook;
-  /** Must-ask whitelist. Tenant overlay can only tighten. */
-  mustAsk?: MustAskPolicy;
-  mustAskOverlay?: TenantMustAskOverlay;
-  /** Declarative routing rules. Miss falls through to the existing Router. */
-  rules?: RulesEngine;
-  rulesPath?: string;
+  /** Stream silence / repeat / compaction thresholds. */
+  autonomy?: Partial<AutonomySettings>;
+  /**
+   * One long-lived box per tenant, many workers via git worktrees.
+   * Off by default so existing one-ref tests stay on the old suspend path.
+   */
+  sharedBox?: boolean;
+  boxPool?: BoxPool;
 }
 
 export class Superagent {
@@ -428,6 +443,7 @@ export class Superagent {
   readonly safety: Safety;
   readonly orgSecrets: OrgSecretPort;
   readonly sandbox: SandboxPort;
+  readonly boxPool: BoxPool | undefined;
   readonly lead: LeadPort;
   readonly reviewer: ReviewerPort | undefined;
   readonly doneWorld: DoneWorld;
@@ -471,13 +487,36 @@ export class Superagent {
     this.ids = options.ids ?? defaultIds();
     this.now = options.clock ?? Date.now;
     this.admission = options.admission ?? {};
-    this.watchdogSettings = { ...DEFAULT_WATCHDOG, ...options.watchdog };
+    this.watchdogSettings = {
+      ...DEFAULT_WATCHDOG,
+      ...options.watchdog,
+      autonomy: {
+        ...DEFAULT_AUTONOMY,
+        ...options.watchdog?.autonomy,
+        ...options.autonomy,
+      },
+    };
     this.metering = options.metering ?? { record() {} };
     this.safety = new Safety(this.store, this.ids, this.watchdogSettings.approvalTtlMs);
     this.onEscalate = options.onEscalate;
     this.orgSecrets = options.orgSecrets ?? new UnconfiguredOrgSecrets();
     this.sandbox = options.sandbox ?? new FakeSandbox();
     this.defaultSandboxRef = options.sandboxRef ?? null;
+    this.boxPool =
+      options.boxPool ??
+      (options.sharedBox
+        ? new BoxPool({
+            sandbox: this.sandbox,
+            store: this.store,
+            now: this.now,
+            maxWorkers: this.admission.maxWorkersPerBox,
+            recordUsage: (entry) => this.metering.record(entry),
+          })
+        : undefined);
+    this.boxPool?.setProgressReporter(async (tenantId, workerId, patch) => {
+      const worker = this.store.worker(tenantId, workerId);
+      if (worker) await this.recordProgress(worker, patch, this.now());
+    });
     this.lead = options.lead ?? new SilentLead();
     this.reviewer = options.reviewer;
     this.doneWorld = defaultDoneWorld(options.doneWorld ?? {});
@@ -935,9 +974,32 @@ export class Superagent {
       };
     }
 
+    const boxedLive = this.boxPool
+      ? this.store.allTenantBoxes().length
+      : this.store.allWorkers().filter((row) => isLiveState(row.state) && row.sandboxRef).length;
+    const spawnGate = admitSpawn({
+      boxedLive,
+      wouldBox: Boolean(this.boxPool || this.defaultSandboxRef),
+      tenantUsdMicros: this.store.tenantUsage(event.tenantId).usdMicros,
+      policy: this.admission,
+      sharedBox: Boolean(this.boxPool),
+      tenantBoxWorkers: this.store
+        .workers(event.tenantId)
+        .filter((row) => isLiveState(row.state) && row.sandboxRef).length,
+      wouldCreateTenantBox: this.store.tenantBox(event.tenantId) === undefined,
+    });
+    if (!spawnGate.ok && spawnGate.reason === 'worker_cap') {
+      return {
+        result: 'ignored',
+        reason: spawnGate.reason,
+        eventId: event.eventId,
+        judgeCalls: 1,
+      };
+    }
     const reserved = isHumanEvent(event);
     const task = this.scheduler.enqueue({
       tenantId: event.tenantId,
+
       eventId: event.eventId,
       subject: event.subject,
       title: decision.title,
@@ -1565,12 +1627,44 @@ export class Superagent {
     );
     for (const found of findings) this.incidents.push(found);
     if (this.incidents.length > 200) this.incidents.splice(0, this.incidents.length - 200);
+    if (this.boxPool) await this.boxPool.tick(at);
     for (const found of findings) {
+      if (
+        found.rule === 'stream_silence' ||
+        found.rule === 'time_limit' ||
+        found.rule === 'empty_turns' ||
+        found.rule === 'repeat_tools'
+      ) {
+        const worker = this.store.worker(found.tenantId, found.workerId);
+        if (
+          worker &&
+          (found.action === 'retry' || found.action === 'nudge' || found.action === 'stop')
+        ) {
+          await this.surfaceAutonomy(
+            worker,
+            {
+              action: found.action,
+              rule: found.rule,
+              detail: found.detail,
+              at,
+            },
+            at,
+          );
+        }
+      }
       if (found.rule === 'stuck' || found.rule === 'crashed') {
         const worker = this.store.worker(found.tenantId, found.workerId);
         if (worker) await this.speakProgress(worker, 'stuck', at);
       }
       if (found.action !== 'escalate' && found.action !== 'stop') continue;
+      if (found.rule === 'box_stuck') {
+        const box = this.store.tenantBox(found.tenantId);
+        if (!box) continue;
+        const card = stuckCardOf(tenantBoxAsWorker(box), found, at);
+        this.escalations.push(card);
+        this.onEscalate?.(card);
+        continue;
+      }
       const worker = this.store.worker(found.tenantId, found.workerId);
       if (!worker) continue;
       const card = stuckCardOf(worker, found, at);
@@ -1954,9 +2048,10 @@ export class Superagent {
 
   private admitContext(tenantId: string) {
     return {
-      boxedLive: this.store.allWorkers().filter((row) => isLiveState(row.state) && row.sandboxRef)
-        .length,
-      wouldBox: Boolean(this.defaultSandboxRef),
+      boxedLive: this.boxPool
+        ? this.store.allTenantBoxes().length
+        : this.store.allWorkers().filter((row) => isLiveState(row.state) && row.sandboxRef).length,
+      wouldBox: Boolean(this.boxPool || this.defaultSandboxRef),
       tenantUsage: this.store.tenantUsage(tenantId),
       usageEvents: this.store.usageEvents(tenantId),
       policy: this.admission,
@@ -2629,6 +2724,17 @@ export class Superagent {
     }
     if (result.plan !== undefined) worker.plan = result.plan;
     if (result.progressUpdate) await this.recordProgress(worker, result.progressUpdate, at);
+    if (result.autonomy) worker.autonomy = result.autonomy;
+    if (result.incident) {
+      await this.surfaceAutonomy(worker, result.incident, at);
+      if (result.incident.action === 'stop') {
+        await this.stop(worker, at, result.incident.detail);
+        return true;
+      }
+      if (result.incident.action === 'nudge') {
+        await this.nudge(worker, at, result.incident.detail);
+      }
+    }
     if (result.transcriptPointer !== undefined) worker.transcriptPointer = result.transcriptPointer;
     if (result.workspaceRef !== undefined) worker.workspaceRef = result.workspaceRef;
     if (result.sandboxRef !== undefined) worker.sandboxRef = result.sandboxRef;
@@ -2785,10 +2891,11 @@ export class Superagent {
   }
 
   private async stop(worker: WorkerRecord, at: number, reason: string): Promise<void> {
-    const current = this.store.worker(worker.tenantId, worker.workerId);
-    if (!current) return;
+    const current = this.store.worker(worker.tenantId, worker.workerId) ?? worker;
     current.state = 'stuck';
     current.updatedAt = at;
+    worker.state = 'stuck';
+    worker.updatedAt = at;
     this.store.putWorker(current);
     this.audit(current.tenantId, current.workerId, 'stopped', at, { reason });
     this.recordWatchdogLesson(current, 'stop', reason, at);
@@ -2977,6 +3084,42 @@ export class Superagent {
     return viewOf(worker, at, this.store, this.progressSettings, this.watchdogSettings);
   }
 
+  private async surfaceAutonomy(
+    worker: WorkerRecord,
+    incident: AutonomyIncident,
+    at: number,
+  ): Promise<void> {
+    const live = this.store.worker(worker.tenantId, worker.workerId) ?? worker;
+    const next = markApplied({
+      ...(live.autonomy ?? worker.autonomy ?? emptyAutonomy()),
+      lastIncident: incident,
+      pending: { ...incident, applied: true },
+    });
+    live.autonomy = next;
+    worker.autonomy = next;
+    const entry = autonomyUsage(live, incident);
+    this.store.appendUsageEvent(entry);
+    this.metering.record(entry);
+    this.audit(live.tenantId, live.workerId, AUTONOMY_LEDGER_KIND[incident.action], at, {
+      rule: incident.rule,
+      detail: incident.detail,
+    });
+    await this.recordProgress(
+      live,
+      {
+        activity: incident.detail,
+        reason: incident.detail,
+      },
+      at,
+    );
+    await this.lead.speak({
+      tenantId: live.tenantId,
+      workerId: live.workerId,
+      text: `Worker ${incident.action}: ${incident.detail}`,
+    });
+    this.store.putWorker(this.store.worker(live.tenantId, live.workerId) ?? live);
+  }
+
   private async recordProgress(
     worker: WorkerRecord,
     patch: ProgressPatch,
@@ -3040,6 +3183,23 @@ export class Superagent {
       );
       return 'wait';
     }
+    if (this.boxPool) {
+      try {
+        setState(worker, 'waking');
+        this.store.putWorker(worker);
+        const slot = await this.boxPool.wake(worker.tenantId, worker.workerId, worker.mandate);
+        const live = this.store.worker(worker.tenantId, worker.workerId);
+        worker.sandboxRef = slot.boxId;
+        worker.workspaceRef = slot.workDir;
+        if (live?.progress) worker.progress = live.progress;
+        this.store.putWorker(worker);
+      } catch (error) {
+        this.audit(worker.tenantId, worker.workerId, 'sandbox_wake_failed', this.now(), {
+          message: error instanceof Error ? error.message : 'shared box wake',
+        });
+      }
+      return 'ready';
+    }
     if (!worker.sandboxRef) return 'ready';
     const box = this.sandboxFor(worker);
     try {
@@ -3096,6 +3256,10 @@ export class Superagent {
   }
 
   private async suspendBox(worker: WorkerRecord): Promise<void> {
+    if (this.boxPool) {
+      await this.boxPool.release(worker.tenantId, worker.workerId);
+      return;
+    }
     if (!worker.sandboxRef || this.sandbox.suspend === undefined) return;
     try {
       await this.sandbox.suspend(worker.sandboxRef);
@@ -3706,10 +3870,6 @@ export class Superagent {
   }
 }
 
-function fieldLabel(event: NormalizedEvent, label: string): string {
-  return event.fields.find(([name]) => name === label)?.[1] ?? '';
-}
-
 function ruleMeta(rule: RoutingRule | undefined, objectId: string): WorkerRecord['routeRule'] {
   if (!rule) return undefined;
   return {
@@ -3719,4 +3879,8 @@ function ruleMeta(rule: RoutingRule | undefined, objectId: string): WorkerRecord
     ...(rule.skills ? { skills: [...rule.skills] } : {}),
     objectId,
   };
+}
+
+function fieldLabel(event: NormalizedEvent, label: string): string {
+  return event.fields.find(([name]) => name === label)?.[1] ?? '';
 }

@@ -1,15 +1,16 @@
-import { cloneWorker, type SuperagentStore } from './store.js';
+import { cloneTenantBox, cloneWorker, type SuperagentStore } from './store.js';
 import type {
   ApprovalRecord,
   AuditRecord,
   InboxItem,
   NormalizedEvent,
   Subscription,
+  TenantBoxRecord,
   Usage,
   UsageEntry,
   WorkerRecord,
 } from './types.js';
-import { emptyUsage, isLiveState } from './types.js';
+import { emptyUsage, isLiveState, isTenantBoxWorkerId } from './types.js';
 
 function documentKey(kind: string, tenantId: string): string {
   return `${kind}::${tenantId}`;
@@ -39,6 +40,7 @@ export class MemorySuperagentStore implements SuperagentStore {
   private readonly usageRows = new Map<string, Usage>();
   private readonly usageEventRows: UsageEntry[] = [];
   private readonly documents = new Map<string, string>();
+  private readonly boxRows = new Map<string, TenantBoxRecord>();
 
   putEvent(event: NormalizedEvent): 'stored' | 'duplicate' {
     const idem = `${event.tenantId}:${event.idempotencyKey}`;
@@ -66,6 +68,9 @@ export class MemorySuperagentStore implements SuperagentStore {
 
   putWorker(worker: WorkerRecord): void {
     this.workerRows.set(worker.workerId, cloneWorker(worker));
+    if (worker.box && isTenantBoxWorkerId(worker.workerId)) {
+      this.boxRows.set(worker.tenantId, cloneTenantBox(worker.box));
+    }
   }
 
   worker(tenantId: string, workerId: string): WorkerRecord | undefined {
@@ -84,12 +89,14 @@ export class MemorySuperagentStore implements SuperagentStore {
 
   workers(tenantId: string): WorkerRecord[] {
     return [...this.workerRows.values()]
-      .filter((row) => row.tenantId === tenantId)
+      .filter((row) => row.tenantId === tenantId && !isTenantBoxWorkerId(row.workerId))
       .map(cloneWorker);
   }
 
   allWorkers(): WorkerRecord[] {
-    return [...this.workerRows.values()].map(cloneWorker);
+    return [...this.workerRows.values()]
+      .filter((row) => !isTenantBoxWorkerId(row.workerId))
+      .map(cloneWorker);
   }
 
   putSubscription(sub: Subscription): void {
@@ -219,9 +226,23 @@ export class MemorySuperagentStore implements SuperagentStore {
     return [...ids];
   }
 
+  putTenantBox(box: TenantBoxRecord): void {
+    this.boxRows.set(box.tenantId, cloneTenantBox(box));
+  }
+
+  tenantBox(tenantId: string): TenantBoxRecord | undefined {
+    const row = this.boxRows.get(tenantId);
+    return row ? cloneTenantBox(row) : undefined;
+  }
+
+  allTenantBoxes(): TenantBoxRecord[] {
+    return [...this.boxRows.values()].map(cloneTenantBox);
+  }
+
   close(): void {
     this.events.clear();
     this.workerRows.clear();
     this.documents.clear();
+    this.boxRows.clear();
   }
 }
