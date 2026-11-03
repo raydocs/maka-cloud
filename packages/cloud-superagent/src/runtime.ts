@@ -287,7 +287,10 @@ export class Superagent {
     this.doneWorld = defaultDoneWorld(options.doneWorld ?? {});
     this.progressSettings = { ...DEFAULT_PROGRESS, ...options.progress };
     this.liveFacts = options.liveFacts;
-    this.routerDefaults = { mode: options.router?.mode ?? 'auto', sensitivity: options.router?.sensitivity };
+    this.routerDefaults = {
+      mode: options.router?.mode ?? 'auto',
+      sensitivity: options.router?.sensitivity,
+    };
     this.intakeLimits = { ...options.intake };
     this.scheduler = new Scheduler(
       this.store,
@@ -316,18 +319,31 @@ export class Superagent {
     const stored = this.store.putEvent(event);
     if (stored === 'duplicate') {
       const existing = this.store.eventByIdempotency(event.tenantId, event.idempotencyKey);
-      this.recordIntake(event.tenantId, {
+      this.recordIntake(
+        event.tenantId,
+        {
+          layer: 'fast',
+          reason: 'duplicate',
+          kind: 'drop',
+        },
+        [event.idempotencyKey],
+        at,
+      );
+      this.audit(event.tenantId, null, 'duplicate', at, {
+        key: event.idempotencyKey,
         layer: 'fast',
-        reason: 'duplicate',
-        kind: 'drop',
-      }, [event.idempotencyKey], at);
-      this.audit(event.tenantId, null, 'duplicate', at, { key: event.idempotencyKey, layer: 'fast' });
+      });
       return { result: 'duplicate', eventId: existing?.eventId ?? event.eventId, judgeCalls: 0 };
     }
     this.scheduler.noteEvent(event);
     if (event.type === 'ping' || event.subject === null) {
       const reason = event.type === 'ping' ? 'ping' : 'no_subject';
-      this.recordIntake(event.tenantId, { layer: 'fast', reason, kind: 'drop' }, handledIdsOf(event), at);
+      this.recordIntake(
+        event.tenantId,
+        { layer: 'fast', reason, kind: 'drop' },
+        handledIdsOf(event),
+        at,
+      );
       this.audit(event.tenantId, null, 'ignored', at, { reason, layer: 'fast' });
       return { result: 'ignored', reason, eventId: event.eventId, judgeCalls: 0 };
     }
@@ -464,7 +480,12 @@ export class Superagent {
         layer: 'slow',
         decisionId,
       });
-      return { result: 'ignored', reason: classified.reason, eventId: event.eventId, judgeCalls: 1 };
+      return {
+        result: 'ignored',
+        reason: classified.reason,
+        eventId: event.eventId,
+        judgeCalls: 1,
+      };
     }
     if (decision.action === 'answer') {
       this.rememberDecision(event.tenantId, {
@@ -506,7 +527,12 @@ export class Superagent {
         layer: 'slow',
         decisionId,
       });
-      return { result: 'ignored', reason: 'below_sensitivity', eventId: event.eventId, judgeCalls: 1 };
+      return {
+        result: 'ignored',
+        reason: 'below_sensitivity',
+        eventId: event.eventId,
+        judgeCalls: 1,
+      };
     }
 
     if (this.effectiveRouterMode(event.tenantId) === 'observe') {
@@ -1109,10 +1135,7 @@ export class Superagent {
     this.store.putDocument(tenantId, INTAKE_DOCUMENT, JSON.stringify(next), at);
   }
 
-  private rememberDecision(
-    tenantId: string,
-    row: Parameters<typeof recordDecision>[1],
-  ): void {
+  private rememberDecision(tenantId: string, row: Parameters<typeof recordDecision>[1]): void {
     const stored = this.store.getDocument(tenantId, ROUTER_DOCUMENT);
     const base = stored
       ? parseRouterConfig(stored, tenantId)
