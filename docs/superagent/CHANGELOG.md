@@ -8,7 +8,15 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
-## 2026-11-02 18:37 MST — cursor/superagent-wiring-51be
+## 2026-11-03 03:03 MST — superagent/outbox
+
+- **What:** Add a persisted outbox (`src/outbox.ts`, exported from the package index). Outside actions (GitHub comment, push, PR open, notification, message to an executor session) are stored as `OutboxItem` rows before they run. `Outbox.enqueue` returns the existing row when `(tenantId, idempotencyKey)` was seen. `Outbox.drain(handlers, now)` delivers, per session, the oldest pending item once its `nextAt` is due; a failing head blocks later items of the same session only. Failure sets `attempts + 1` and `nextAt = now + backoff` (1 s base, factor 2, 5 min cap, jitter from an injectable `random`). After `maxAttempts` (default 8), or on a `PermanentOutboxError`, the item turns `dead` and `onDead` fires so the caller can raise a needs-person card; a dead head no longer blocks its session. A kind without a handler stays pending. `MemoryOutboxStore` and `SqliteOutboxStore` (takes a `DatabaseSync`) back it. Clock, random and id source are injected; the constructor reads no env. Nothing calls it yet.
+- **Why:** Outside actions must survive a restart, retry without duplicating, and stay in order per session (the "stored work" idea from dsh-superagent-prototype). A later PR wires it into the runtime.
+- **Tests:** `outbox.test.ts` (14): idempotent enqueue, per-session order, a failing head blocking only its session, exact backoff times and the cap, dead after max attempts and on a permanent error, sqlite restart survival, done items never redelivered.
+- **Live:** n/a
+- **Migrations / risk:** new table `outbox` and two indexes, created with `CREATE ... IF NOT EXISTS` when `SqliteOutboxStore` is constructed. No `user_version` bump; databases that never construct it are unchanged. Not wired into the runtime, so no behavior change.
+
+## 2026-11-02 18:37 MST — cursor/superagent-wiring-51be — 303d685eb
 
 - **What:** merge the updated `cursor/superagent-decisions-policy-51be` tip (`3c7049b04`), which already contains scheduler, intake, BYOM, duplex, lessons, and review-verify. Kept decision-card wiring (`recordFromCardResolution`, must-ask rows on `statusSnapshot.decisions`), host flags default off, and `CodingLoopHandler` on `DuplexLoop`. Speculative still runs only after a cross-source merge misses. sqlite `user_version` stays 2.
 - **Why:** The linearized tip moved after the first merge of #480. Bring that tip in with git merge only.
