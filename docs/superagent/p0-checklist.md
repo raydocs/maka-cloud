@@ -132,6 +132,8 @@ listener is for laptop replay only.
 - Pricing tables beyond the existing gateway prices.
 - Instabox org-secret proxy injection (local `EnvOrgSecrets` only).
 - P5 hi-device worker — interface only; see [p5-hi-device.md](p5-hi-device.md).
+- BYOM and speculative execution — implemented, default off; see
+  [byom.md](byom.md) and [speculative.md](speculative.md).
 - boat.dev (`#452` / `#453`) stays parked.
 
 ## Migrations

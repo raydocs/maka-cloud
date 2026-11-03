@@ -1,6 +1,7 @@
 import type { SuperagentStore } from './store.js';
 import { parseMergeBound } from './loop.js';
 import { hasClearReceipt, prRef } from './review.js';
+import { speculativeBlocksOutbound } from './speculative.js';
 import type {
   ApprovalKind,
   ApprovalRecord,
@@ -22,6 +23,7 @@ export type GateResult =
   | { allowed: true }
   | { allowed: false; reason: 'intensity_observe' }
   | { allowed: false; reason: 'review_required' }
+  | { allowed: false; reason: 'speculative_blocked' }
   | { allowed: false; reason: 'held'; approvalId: string };
 
 export function isRisky(kind: ApprovalKind): boolean {
@@ -46,6 +48,9 @@ export class Safety {
   ) {}
 
   gate(worker: WorkerRecord, action: ProposedAction, at: number): GateResult {
+    if (speculativeBlocksOutbound(worker, action)) {
+      return { allowed: false, reason: 'speculative_blocked' };
+    }
     if (!isRisky(action.kind)) return { allowed: true };
     if (worker.mandate.intensity === 'observe') {
       return { allowed: false, reason: 'intensity_observe' };

@@ -1,4 +1,4 @@
-import type { JsonObject } from '@maka/eval';
+import type { JsonObject } from '@maka-cloud/maka-engine/eval';
 
 /**
  * What the playbook's own record (`verification.json`) says about a change it handed over: the

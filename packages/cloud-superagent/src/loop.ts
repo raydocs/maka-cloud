@@ -32,6 +32,7 @@ export function workerBranch(workerId: string): string {
 }
 
 export function mayPush(worker: WorkerRecord): boolean {
+  if (worker.speculative && worker.speculative.status !== 'accepted') return false;
   return worker.mandate.intensity !== 'observe' && worker.mandate.authority !== 'read-only';
 }
 
