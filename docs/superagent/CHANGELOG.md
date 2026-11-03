@@ -8,7 +8,66 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
-## 2026-11-02 18:37 MST — cursor/superagent-wiring-51be
+## 2026-11-03 03:47 MST — superagent/executor-bench
+
+- **What:** `npm run executor-bench` (`executor-bench.ts`) runs the Phase 6 benchmark with the same small task set for each executor: `fix-add`, `new-sub` and `fix-slug`, three Node repos with a failing test.
+  - Each task gets a fresh Instabox and its own Super-agent. The act Mandate has budgets of $1, 2M tokens, 15 min and 60 turns, and the coding loop uploads the repo to the box.
+  - Each row records pass, USD, tokens, time to green, box create time, workspace start (materialize), edit and test time, and peak RSS.
+  - With `MAKA_CLOUD_BENCH_PUBLISH=1` it opens a real PR through `MAKA_GITHUB_TOKEN` / `MAKA_CLOUD_LOOP_REPO`, has the review pass, and reads the merge gate. It records `held` and never approves or merges.
+  - Executors that cannot run are listed with the reason. Codex is listed because CodexExecutor is not built and the Instabox org has no OpenAI Secret; maka is listed because it is not behind the Executor interface.
+  - Keys are read from env and never printed.
+- **Why:** executor-decision.md: the maka engine becomes the default only if it wins on the same benchmark. Measurements come before routing.
+- **Tests:** `executor-bench.test` passes offline. It uses a fake executor, a fake box and a fake git host. It checks that the task goes green in its own box, the PR is opened, the merge stays `held`, usage is counted and the box is destroyed, and that skips are reported and never built. Package suite on macOS: 314 of 315. The only failure is `box-daemon` RSS, which reads `/proc` and runs on Linux only.
+- **Live (2026-11-03, Instabox `universal`, Claude Code 2.1.288 on Haiku 5.5, built-in login through the org Secret, no publish):**
+
+  | executor | tasks | pass | $/green | tokens/green | to-green p50 | peak RSS | workspace start p50 | box create |
+  |---|---|---|---|---|---|---|---|---|
+  | claude-code | 3 | 3/3 | $0.0585 | 113,277 | 15.3 s | 255 MiB | 548 ms | ~7 s |
+  | codex | skipped: no CodexExecutor yet, and no OpenAI Secret in the Instabox org | | | | | | | |
+  | maka | skipped: not behind the Executor interface | | | | | | | |
+
+  An earlier run without RSS was also 3/3: $0.0531 and 92,130 tokens per green task, to-green p50 13.3 s, workspace start p50 441 ms. Publish was not run. `MAKA_GITHUB_TOKEN` gets 403 "Resource not accessible by personal access token" on `POST git/blobs` in raydocs/maka-loop-scratch. It needs Contents and Pull requests read/write there.
+- **Migrations / risk:** none. A script only. Nothing runs it in CI.
+
+## 2026-11-03 03:46 MST — superagent/claude-code-executor — 06f9a50f4
+
+- **What:** Claude Code now runs inside a live Instabox on the box's own sign-in. Box auth comes from an Instabox org Secret. `MAKA_CLOUD_BOX_SECRETS` (comma list) is sent as `secrets` on `POST /v1/machines`. `MAKA_CLOUD_EXECUTOR_CLAUDE_SECRET` names the variable the CLI reads, so the box runs `CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_TOKEN_1" claude ...`. The box holds only a placeholder that its outbound proxy swaps, and the host never sends a value. Instabox `exec` caps `timeoutSeconds` at 600, so `BoxProcessRunner` changes how it runs the CLI:
+  - It writes stdin and a `run.sh` under `.maka-exec/<run>` and starts the CLI detached with `nohup`.
+  - It polls the output file every 2 s, counting whole lines only.
+  - It kills with `pkill -f <session id>` and stops a run at its deadline as SIGTERM.
+  - Peak RSS comes from GNU time when the box has it. Otherwise it is the largest sum of the session's processes seen at a poll. The `universal` template has no `/usr/bin/time`.
+  - The run directory, which holds the prompt, is removed in a `finally`, so it also goes when the reader stops at the result line.
+
+  `packTar` now packs with `COPYFILE_DISABLE=1` and `--no-xattrs`. Before this, macOS added AppleDouble `._*` entries, and the host's `git apply` of the box diff failed after a green test.
+- **Why:** executor-decision.md, Auth: by default the executor uses the box's built-in login, and it must survive runs longer than one 600 s exec.
+- **Tests:** `claude-code-executor.test` 13 passed, adding:
+  - the Secret placeholder reaches the CLI while no value appears in any box command;
+  - bad variable names are refused;
+  - `MAKA_CLOUD_BOX_SECRETS` parsing;
+  - a run past its deadline is killed as failed, with RSS sampled while it ran;
+  - the run directory is removed after an early stop. This assertion fails with the `rm` taken out.
+
+  `loop-box-pack.test` checks the raw gunzipped archive has no `._add.js` and no `LIBARCHIVE.xattr`; it fails on the old `packTar`. Package suite on macOS: 313 of 315. The two failures are this entry's own check before it was written, and `box-daemon` RSS, which reads `/proc` and runs on Linux only.
+- **Live:** see the executor-bench entry. Three tasks were green in Instabox on Claude Code with Haiku 5.5.
+- **Migrations / risk:** none. Default off. `secrets` is sent only when `MAKA_CLOUD_BOX_SECRETS` is set.
+
+## 2026-11-03 03:16 MST — superagent/claude-code-executor — 3e4609985
+
+- **What:** `ClaudeCodeExecutor` behind `MAKA_CLOUD_EXECUTOR=claude-code` (default off; unset or `fake` keeps today's coder), plus per-Assignment budgets. It runs `claude -p --verbose --output-format stream-json --input-format stream-json` with `--session-id <uuid>` on `start` and `--resume <uuid>` on later turns, the Mandate system prompt through `--append-system-prompt`, `--permission-mode acceptEdits` by default, and `MAKA_CLOUD_EXECUTOR_MODEL` as `--model` (default `claude-opus-5-5`). `claudeStreamEvents` maps stream-json to executor events: tool and text progress, usage once per assistant message id (priced from the gateway list prices), the `result` line reconciled to its `total_cost_usd` and `duration_ms`, and the final text through the `MAKA_STATUS` line (no line → ready; an error subtype → failed). Auth follows the decision's Auth section: by default the CLI's own built-in login, with no host key passed; `MAKA_CLOUD_EXECUTOR_GATEWAY=magpie` (needs `MAKA_CLOUD_MAGPIE_URL` and `MAKA_CLOUD_MAGPIE_TOKEN`) runs `--bare` through the Magpie gateway instead. Usage events carry `route: builtin | magpie`. Processes get an env allowlist (PATH, HOME, locale) and never the host's GitHub or Instabox tokens; stderr kept on failure has the gateway token redacted. With a live Instabox (`real-loop`), `BoxProcessRunner` runs the CLI through Instabox `exec` on the box checkout (`maka-loop/repo`), where it is installed and signed in, sends no host PATH/HOME into the box, and `ExecutorCoder` reads the changed paths from `git status` in the box (edits stay there; the loop tests and pulls the diff as before). Budgets (`executor-budget.ts`): remaining = Mandate `budgets` (tokens, USD, wall time, and the new `turns`) minus the worker's usage and the session's earlier turns; at 80% of any dimension the session gets one wrap-up notice through `send` (into the running turn's stdin, or the next turn for a box exec), at 100% it is stopped (`kill`, or `pkill -f <session id>` in the box) and the run ends as `needs-person` with a short report. Wall time also has timers, so a silent executor is stopped too. Also fills the Phase 1 heading SHA (`4f9f76001`) and adds `PROGRESS.md` for this run (`862fb4571`).
+- **Why:** executor-decision.md (Claude Code is an executor, signed in inside the box) and efficiency.md §3 (budgets per Assignment).
+- **Tests:** `claude-code-executor.test` 11 passed: stream parsing (usage once per message id, cost reconcile, status line, error subtype), env allowlist and redaction, argv on the built-in route (no `--bare`, no key) and session resume, a message queued into a running turn waiting for its second result, exit without a result on the Magpie route (`--bare`, gateway env, token redacted), budget arithmetic, 80% wrap-up then 100% stop as needs-person, turn budget across turns, a silent executor stopped by wall time, env selection, and the box path through a recording sandbox (exec argv, cwd, stdin, no env, changed paths from the box, a mid-turn notice opening the next turn). Package suite on macOS: 310 of 311 after this entry; `box-daemon` RSS reads `/proc` (Linux only).
+- **Live:** not run in this commit (see the Phase 6 entry).
+- **Migrations / risk:** none. Default off; no store change, no `user_version` bump. `Mandate.budgets.turns` is optional.
+
+## 2026-11-03 03:06 MST — superagent/executor — 4f9f76001
+
+- **What:** the executor seam from `executor-decision.md`. `executor.ts` defines `Executor` (`start` / `send` / `resume` / `stop`, each turn an async stream of normalised events: `progress`, `usage` deltas, and one terminal `ready` / `needs-person` (structured question with options and reason) / `blocked` / `failed`), the `ExecutorSession` record the host keeps, `executorSystemPrompt` (Mandate and team rules as a byte-stable prefix, plus the `MAKA_STATUS {json}` status-line contract and `parseStatusLine`), `FakeExecutor` (scripted events per turn, or write known files and report ready) and `ExecutorCoder`, which runs any executor behind the loop's `CoderPort`: the first event of a worker starts a session, later ones (`ci_failed` → `ci`, `review_*` → `review`, else `follow-up`) go to the same session through `send`. `FakeCoder` is now `ExecutorCoder` over `FakeExecutor` (same files, summary and usage as before). `CodingLoopHandler` hands executors the host checkout even when tests run in the box (`CoderPort.wantsWorkdir`), and when the executor ends with `needs-person` or `blocked` it records the question as evidence and waits on a human (`review-wait`, waiting `human`) without testing or pushing; `failed` reports no progress so the watchdog retries. Also fills the missing SHA on the 2026-11-02 18:37 heading (`303d685eb`).
+- **Why:** Super-agent schedules and authorizes; Claude Code and Codex do the coding behind one interface, and CI stays offline through the fake executor.
+- **Tests:** `executor.test` 8 passed (status-line parsing, stable system prompt, turn without a result → failed, `gitChanged`, session reuse through `send` with the right input kinds, one session per worker, needs-person / blocked / failed in the loop without push). Package suite on macOS: 299 of 300; the one failure is `box-daemon` RSS, which reads `/proc` (Linux only).
+- **Live:** n/a (fake executor only).
+- **Migrations / risk:** none. No flag, no store change, no `user_version` bump. The default coder path is unchanged apart from `FakeCoder` now writing through `FakeExecutor`.
+
+## 2026-11-02 18:37 MST — cursor/superagent-wiring-51be — 303d685eb
 
 - **What:** merge the updated `cursor/superagent-decisions-policy-51be` tip (`3c7049b04`), which already contains scheduler, intake, BYOM, duplex, lessons, and review-verify. Kept decision-card wiring (`recordFromCardResolution`, must-ask rows on `statusSnapshot.decisions`), host flags default off, and `CodingLoopHandler` on `DuplexLoop`. Speculative still runs only after a cross-source merge misses. sqlite `user_version` stays 2.
 - **Why:** The linearized tip moved after the first merge of #480. Bring that tip in with git merge only.
