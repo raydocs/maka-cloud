@@ -394,7 +394,6 @@ export interface SuperagentOptions {
    */
   sharedBox?: boolean;
   boxPool?: BoxPool;
->>>>>>> cursor/superagent-learning-review-51be
 }
 
 export class Superagent {

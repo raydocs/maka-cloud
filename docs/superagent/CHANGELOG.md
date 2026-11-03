@@ -8,6 +8,15 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
+## 2026-11-02 17:53 MST — cursor/superagent-review-verify-51be — d2f66c8f1
+
+- **PR:** [#479](https://github.com/raydocs/maka-cloud/pull/479)
+- **What:** merge: cursor/superagent-learning-review-51be (#478) into Super-agent review-verify. Kept review hardening / release-verify / sweep (default off) and every earlier stack hook. Keep every CHANGELOG entry, newest first. This branch is now a descendant of #478 and below.
+- **Why:** One-pass linearization so #474 → #477 → #475 → #476 → #478 → #479 → #480 can merge in order without re-conflicts.
+- **Tests:** 263 `@maka-cloud/superagent` tests after dropping a leftover merge marker
+- **Live:** n/a
+- **Migrations / risk:** none. JSON fields only. New features stay default-off.
+
 ## 2026-11-02 17:52 MST — cursor/superagent-learning-review-51be — 1fc322d53
 
 - **PR:** [#478](https://github.com/raydocs/maka-cloud/pull/478)
