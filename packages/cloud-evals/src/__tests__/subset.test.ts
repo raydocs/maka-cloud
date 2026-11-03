@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { parseExperimentSpec } from '@maka/eval';
+import { parseExperimentSpec } from '@maka-cloud/maka-engine/eval';
 import { runCloudEvalsCli } from '../cli.js';
 import { tempDir } from './fixtures.js';
 

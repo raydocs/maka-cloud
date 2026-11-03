@@ -10,7 +10,7 @@ import {
   type ModesConfig,
   withModeLine,
 } from '@maka-cloud/modes';
-import type { MakaTool, MakaToolContext } from '@maka/runtime/tool-runtime';
+import type { MakaTool, MakaToolContext } from '@maka-cloud/maka-engine';
 import { z } from 'zod';
 import type { ConductorLimits } from './config.js';
 import {

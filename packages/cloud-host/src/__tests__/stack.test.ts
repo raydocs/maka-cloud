@@ -1922,9 +1922,21 @@ test('the stack always starts Super-agent in process and a stalled worker is a s
     lastHeartbeatAt: now,
   });
   now += 2_000;
+  const nudged = await stack.superagent.tick();
+  assert.equal(
+    nudged.some(
+      (row) => row.rule === 'stuck' && row.action === 'nudge' && row.workerId === spawned.workerId,
+    ),
+    true,
+  );
+  assert.equal(stack.superagent.cards.length, 0, 'W2 nudges once before the stuck card');
+  now += 2_000;
   const findings = await stack.superagent.tick();
   assert.equal(
-    findings.some((row) => row.rule === 'stuck' && row.workerId === spawned.workerId),
+    findings.some(
+      (row) =>
+        row.rule === 'stuck' && row.action === 'escalate' && row.workerId === spawned.workerId,
+    ),
     true,
   );
   assert.equal(stack.superagent.cards.length, 1);

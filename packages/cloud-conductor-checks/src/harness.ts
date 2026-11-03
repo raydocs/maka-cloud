@@ -1,23 +1,22 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { SessionEvent } from '@maka/core/events';
-import type { LlmConnection } from '@maka/core/llm-connections';
-import type { ThinkingLevel } from '@maka/core/model-thinking';
-import { AiSdkBackend } from '@maka/runtime/ai-sdk-backend';
-import { buildDefaultContextBudgetPolicy } from '@maka/runtime/context-budget-policy';
-import { buildLlmHistorySummarizer } from '@maka/runtime/history-compact-summarizer';
-import { buildProviderOptions, getAIModel } from '@maka/runtime/model-factory';
 import {
-  BackendRegistry,
-  SessionManager,
+  AiSdkBackend,
   type BackendFactoryContext,
-} from '@maka/runtime/session-manager';
-import { createToolResultArchiveCapability } from '@maka/runtime/tool-result-archive-capability';
-import type { MakaTool } from '@maka/runtime/tool-runtime';
-import { createSqliteAgentRunStore } from '@maka/storage/agent-run-store';
-import { createWorkspaceRuntimeStore } from '@maka/storage/runtime-event-persistence';
-import { createSessionStore } from '@maka/storage/session-store';
+  type LlmConnection,
+  type MakaEngine,
+  type MakaSessionRuntime,
+  type MakaTool,
+  type SessionEvent,
+  type ThinkingLevel,
+  TsInProcessEngine,
+  buildDefaultContextBudgetPolicy,
+  buildLlmHistorySummarizer,
+  buildProviderOptions,
+  createToolResultArchiveCapability,
+  getAIModel,
+} from '@maka-cloud/maka-engine';
 
 export const MODEL_ID = 'claude-opus-5-5';
 export const CONNECTION_SLUG = 'anthropic-check';
@@ -52,6 +51,8 @@ export interface HarnessInput {
   readonly settings: HarnessSettings;
   /** Defaults to a fresh temp directory, removed on close. */
   readonly root?: string;
+  /** Defaults to `TsInProcessEngine`. */
+  readonly engine?: MakaEngine;
 }
 
 export interface TurnOutcome {
@@ -109,10 +110,6 @@ export async function startHarness(input: HarnessInput): Promise<Harness> {
   const newId = () => `hc-${++ids}`;
   let clock = Date.UTC(2026, 9, 18);
   const now = () => (clock += 1);
-
-  const sessionStore = createSessionStore(root);
-  const runStore = createSqliteAgentRunStore(root);
-  const runtimeEventStore = createWorkspaceRuntimeStore(root);
 
   const buildBackend = (ctx: BackendFactoryContext): AiSdkBackend => {
     const providerOptions = buildProviderOptions(connection, MODEL_ID, ctx.header.thinkingLevel);
@@ -199,28 +196,21 @@ export async function startHarness(input: HarnessInput): Promise<Harness> {
     });
   };
 
-  const createManager = () => {
-    const backends = new BackendRegistry();
-    // Registered as a prepared factory so every invocation carries the route
-    // identity, which prior-turn thinking replay is admitted against.
-    backends.register('ai-sdk', {
+  const engine = input.engine ?? new TsInProcessEngine();
+  // Prepared factory so every invocation carries the route identity, which
+  // prior-turn thinking replay is admitted against.
+  const runtime: MakaSessionRuntime = engine.openSessionRuntime({
+    root,
+    newId,
+    now,
+    backend: {
       prepare: async () => ({
         providerStateIdentity: PROVIDER_STATE_IDENTITY,
         build: buildBackend,
       }),
-    });
-    return new SessionManager({
-      store: sessionStore,
-      runStore,
-      runtimeEventStore,
-      backends,
-      newId,
-      now,
-    });
-  };
-
-  let manager = createManager();
-  const session = await manager.createSession({
+    },
+  });
+  const session = await runtime.createSession({
     cwd: root,
     ...(input.settings.omitConnectionId ? {} : { llmConnectionId: CONNECTION_ID }),
     llmConnectionSlug: CONNECTION_SLUG,
@@ -241,23 +231,22 @@ export async function startHarness(input: HarnessInput): Promise<Harness> {
     return { events, errors, ...(stopReason ? { stopReason } : {}) };
   };
 
-  const stopManager = async () => {
-    await manager.stopSession(session.id).catch(() => undefined);
+  const stopRuntime = async () => {
+    await runtime.stopSession(session.id).catch(() => undefined);
   };
 
   return {
     root,
     sessionId: session.id,
     archiveWrites,
-    send: (turnId, text) => drain(manager.sendMessage(session.id, { turnId, text })),
-    compact: () => drain(manager.compactSession(session.id)),
+    send: (turnId, text) => drain(runtime.sendMessage(session.id, { turnId, text })),
+    compact: () => drain(runtime.compactSession(session.id)),
     restart: async () => {
-      await stopManager();
-      manager = createManager();
+      await runtime.restart(session.id);
     },
     close: async () => {
-      await stopManager();
-      await runStore.close?.();
+      await stopRuntime();
+      await runtime.close();
       if (ownsRoot) await rm(root, { recursive: true, force: true });
     },
   };
