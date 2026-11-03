@@ -8,12 +8,30 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
+## 2026-11-02 18:14 MST — cursor/superagent-intake-merge-51be — 841f5bae1
+
+- **PR:** [#477](https://github.com/raydocs/maka-cloud/pull/477)
+- **What:** merge: scheduler-router format-fix (including remote #474) into Super-agent intake-merge. Biome format now clean. Keep every CHANGELOG entry, newest first.
+- **Why:** Carry the Linux format:check fix through the linearized stack without rebase/force-push.
+- **Tests:** 194 `@maka-cloud/superagent` tests passed after the merge
+- **Live:** n/a
+- **Migrations / risk:** none
+
 ## 2026-11-02 18:14 MST — cursor/superagent-scheduler-router-51be — 2b177c2d8
 
 - **PR:** [#474](https://github.com/raydocs/maka-cloud/pull/474)
 - **What:** merge: origin/cursor/superagent-scheduler-router-51be format-fix (`5e8282663`) with the local format-fix. Same biome output; both CHANGELOG entries kept.
 - **Why:** Remote landed a parallel format fix; git merge only, no rebase/force-push.
 - **Tests:** format:check clean
+- **Live:** n/a
+- **Migrations / risk:** none
+
+## 2026-11-02 18:09 MST — cursor/superagent-intake-merge-51be — 5f6a49fae
+
+- **PR:** [#477](https://github.com/raydocs/maka-cloud/pull/477)
+- **What:** merge: cursor/superagent-scheduler-router-51be format fix into Super-agent intake-merge. Biome format now clean. Keep every CHANGELOG entry, newest first. This branch is now a descendant of the formatted #474.
+- **Why:** Carry the Linux format:check fix through the linearized stack.
+- **Tests:** 194 `@maka-cloud/superagent` tests passed after the merge
 - **Live:** n/a
 - **Migrations / risk:** none
 
@@ -34,6 +52,15 @@ a heading time is more than five minutes off that SHA's committer date.
 - **Tests:** `@maka-cloud/superagent` suite re-run after format
 - **Live:** n/a
 - **Migrations / risk:** none
+
+## 2026-11-02 17:46 MST — cursor/superagent-intake-merge-51be — ca10972ec
+
+- **PR:** [#477](https://github.com/raydocs/maka-cloud/pull/477)
+- **What:** merge: cursor/superagent-scheduler-router-51be (#474) into Super-agent intake-merge. Kept event-graph/escalate and BoxPool/autonomy. Keep every CHANGELOG entry, newest first. This branch is now a descendant of #474 and main.
+- **Why:** One-pass linearization so #474 → #477 → #475 → #476 → #478 → #479 → #480 can merge in order without re-conflicts.
+- **Tests:** 194 `@maka-cloud/superagent` tests passed after the merge
+- **Live:** n/a
+- **Migrations / risk:** none. JSON fields only. Escalation stays opt-in; merge default observe.
 
 ## 2026-11-02 17:45 MST — cursor/superagent-scheduler-router-51be — 4c5cb40e3
 
@@ -306,6 +333,15 @@ Keep every CHANGELOG entry, newest first.
 - **Tests:** conflict resolution only; desktop e2e flakes on later PRs are unrelated
 - **Live:** n/a
 - **Migrations / risk:** none. Inherits #469 MakaEngine. No sqlite change.
+
+## 2026-11-02 13:26 MST — cursor/superagent-intake-merge-51be — e45c5fc4f
+
+- **PR:** [#477](https://github.com/raydocs/maka-cloud/pull/477)
+- **What:** Cross-source live event graph (programmatic path/commit/fingerprint/ref merge, fuzzy Slow Path only for survivors, observe/auto/split, recall `mergeId`) and graded escalation (value/urgency/risk → archive / worker / waiting-human card + feedback). Scheduler footprint conflicts record a graph hint. JSON `graph` / `escalate` documents. No `user_version` bump.
+- **Why:** User-approved P1 (2 Nov 2026) aligned with DSH same-ticket intake and cheap-model triage.
+- **Tests:** 171 passed (`test:dist`), including new event-graph / escalate suites. FakeJudgeClient proves programmatic hits do not grow router prompts.
+- **Live:** n/a
+- **Migrations / risk:** none. Documents are `CREATE TABLE IF NOT EXISTS`. Schema version stays 2.
 
 ## 2026-11-02 12:19 MST — cursor/superagent-scheduler-router-51be — 3f12cbe39
 

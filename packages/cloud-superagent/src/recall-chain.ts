@@ -15,12 +15,16 @@ export interface RecallChain {
   decisionId?: string;
   layer: 'fast' | 'slow' | 'passthrough';
   at: number;
+  mergeId?: string;
+  fromThreadId?: string;
+  cause?: string;
 }
 
 export interface RecallQuery {
   triggerId?: string;
   threadId?: string;
   workerId?: string;
+  mergeId?: string;
 }
 
 export function loadRecall(store: SuperagentStore, tenantId: string): RecallChain[] {
@@ -61,8 +65,14 @@ export function appendRecall(
 
 export function followRecall(links: readonly RecallChain[], query: RecallQuery): RecallChain[] {
   return links.filter((row) => {
+    if (query.mergeId && row.mergeId === query.mergeId) return true;
     if (query.triggerId && row.triggerId === query.triggerId) return true;
-    if (query.threadId && row.threadId === query.threadId) return true;
+    if (
+      query.threadId &&
+      (row.threadId === query.threadId || row.fromThreadId === query.threadId)
+    ) {
+      return true;
+    }
     if (query.workerId && row.workerId === query.workerId) return true;
     return false;
   });

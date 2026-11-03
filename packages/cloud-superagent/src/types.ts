@@ -492,6 +492,8 @@ export interface IdFactory {
   audit(): string;
   task(): string;
   decision(): string;
+  merge(): string;
+  card(): string;
 }
 
 export const DEFAULT_WATCHDOG: WatchdogSettings = {
