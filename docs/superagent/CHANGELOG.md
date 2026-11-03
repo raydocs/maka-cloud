@@ -8,7 +8,7 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
-## 2026-11-02 18:09 MST — cursor/superagent-scheduler-router-51be
+## 2026-11-02 18:09 MST — cursor/superagent-scheduler-router-51be — 5e8282663
 
 - **PR:** [#474](https://github.com/raydocs/maka-cloud/pull/474)
 - **What:** Biome format the scheduler / intake / recall / runtime / WorkStatus files so CI `format:check` passes after the main merge.
