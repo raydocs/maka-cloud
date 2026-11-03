@@ -69,6 +69,10 @@ test('sqlite v1 gains usage_events in place; not a cloud-server migration', asyn
     .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='usage_events'`)
     .get() as { name: string } | undefined;
   assert.equal(tables?.name, 'usage_events');
+  const documents = db
+    .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='documents'`)
+    .get() as { name: string } | undefined;
+  assert.equal(documents?.name, 'documents', 'documents is IF NOT EXISTS; user_version stays 2');
   db.close();
   const store = SqliteSuperagentStore.open(path);
   store.appendUsageEvent({

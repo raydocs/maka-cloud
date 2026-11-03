@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
-import { buildBuiltinTools } from '@maka/runtime/builtin-tools';
+import { buildBuiltinTools } from '@maka-cloud/maka-engine';
 import { setup, type Harness } from './harness.js';
 
 const hasRipgrep = (() => {
