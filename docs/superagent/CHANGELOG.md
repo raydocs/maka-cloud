@@ -8,7 +8,15 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
-## 2026-11-02 18:09 MST — cursor/superagent-wiring-51be
+## 2026-11-02 18:28 MST — cursor/superagent-wiring-51be
+
+- **What:** Wire the second batch into one runtime. `resolveDecisionCard` calls `recordFromCardResolution` (`accept` → decided, `reject` → refused, `archive` leaves no standing row). Must-ask rows are copied onto `statusSnapshot.decisions` and still listed on `mustAskPending`. An exact ledger hit does not open another escalation card. Speculative outbound and a Safety hold still produce one card at most. Host `startStack` passes BYOM, the peer-review client, the `/version` probe (skipped when no endpoint is configured), the weekly sweep timer, and rules-file load plus hot reload, each behind its flag and default off. Constructors do not read env. `CodingLoopHandler` runs through `DuplexLoop`; pause still refuses until the box is verified stopped. sqlite `user_version` stays 2.
+- **Why:** The feature branches stay default-off until this wiring turns them on together.
+- **Tests:** `@maka-cloud/superagent` wiring suite and `@maka-cloud/host` feature-flag suite.
+- **Live:** n/a
+- **Migrations / risk:** none. No `user_version` bump. No server, deploy, secret, or billing change.
+
+## 2026-11-02 18:09 MST — cursor/superagent-wiring-51be — 6b5713fae
 
 - **What:** merge `cursor/superagent-decisions-policy-51be` (#480) into the wiring branch. Decision ledger, must-ask, and routing rules sit beside the scheduler, escalation cards, BYOM, duplex, lessons, and release verify. One `applyAction` gates must-ask, Safety, and speculative outbound, so a speculative block does not open a second card. sqlite `user_version` stays 2.
 - **Why:** Linearize batch 2 in order (#479 then #480).

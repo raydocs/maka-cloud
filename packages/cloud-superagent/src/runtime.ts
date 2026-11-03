@@ -26,10 +26,12 @@ import {
   DECISION_AUDIT_RECORDED,
   DECISION_AUDIT_REVOKED,
   DecisionBook,
+  recordFromCardResolution,
   RULE_MATCHED_AUDIT,
   type DecisionEntry,
 } from './decisions.js';
 import {
+  cardDraftFromMustAsk,
   categoryFromApproval,
   consultBeforeAsk,
   DEFAULT_MUST_ASK,
@@ -1020,8 +1022,19 @@ export class Superagent {
     const queue =
       tenantId === undefined ? this.scheduler.allViews(this.now()) : this.scheduler.views(tenantId);
     const intake = tenantId ? this.intakeMetrics(tenantId) : undefined;
-    const decisions = tenantId ? pendingCards(this.escalateState(tenantId)) : undefined;
+    const escalation = tenantId ? pendingCards(this.escalateState(tenantId)) : undefined;
     const pending = tenantId ? this.decisionsFor(tenantId).pending(tenantId) : [];
+    const mustAskCards: DecisionCard[] = pending.map((row) => ({
+      ...cardDraftFromMustAsk(row),
+      cardId: row.pendingId,
+      state: 'pending',
+      at: row.at,
+    }));
+    const seen = new Set((escalation ?? []).map((row) => row.cardId));
+    const decisions = [
+      ...(escalation ?? []),
+      ...mustAskCards.filter((row) => !seen.has(row.cardId)),
+    ];
     const citations = tenantId
       ? snap.workers
           .filter((row) => row.decisionEntryId)
@@ -1034,7 +1047,7 @@ export class Superagent {
       ...snap,
       queue,
       ...(intake ? { intake } : {}),
-      ...(decisions && decisions.length > 0 ? { decisions } : {}),
+      ...(decisions.length > 0 ? { decisions } : {}),
       ...(pending.length > 0 ? { mustAskPending: pending } : {}),
       ...(citations.length > 0 ? { decisionCitations: citations } : {}),
     };
@@ -1219,6 +1232,27 @@ export class Superagent {
       option,
       value: card.score.value,
     });
+    const eventForCard = this.store.event(tenantId, card.eventId);
+    const recorded = recordFromCardResolution(this.decisionsFor(tenantId), {
+      card,
+      option,
+      actor: { login: 'owner', kind: 'user' },
+      verbatim: card.title,
+      at,
+      ...(eventForCard?.subject?.repo ? { repo: eventForCard.subject.repo } : {}),
+      category: card.score.reason.startsWith('must_ask:')
+        ? card.score.reason.slice('must_ask:'.length)
+        : 'card',
+      object: card.threadId,
+    });
+    if (recorded.ok) {
+      this.audit(tenantId, null, DECISION_AUDIT_RECORDED, at, {
+        entryId: recorded.entry.entryId,
+        polarity: recorded.entry.polarity,
+        cardId,
+        option,
+      });
+    }
     if (option === 'accept') {
       const event = this.store.event(tenantId, card.eventId);
       if (event?.subject) {
@@ -2070,6 +2104,29 @@ export class Superagent {
         band: 'low',
         judgeCalls: 0,
       };
+    }
+    const prior = consultBeforeAsk({
+      book: this.decisionsFor(event.tenantId),
+      policy: this.mustAsk,
+      action: {
+        kind: 'other_irreversible',
+        boundText: [event.summary, ...event.fields.map(([, value]) => value)].join('\n'),
+      },
+      tenantId: event.tenantId,
+      ...(event.subject?.repo ? { repo: event.subject.repo } : {}),
+    });
+    if (
+      prior.kind === 'apply_decided' ||
+      prior.kind === 'apply_refused' ||
+      prior.kind === 'already_blocked'
+    ) {
+      this.audit(event.tenantId, null, 'escalate_skipped', at, {
+        reason: prior.kind,
+        ...(prior.kind === 'already_blocked'
+          ? { blocked: prior.reason }
+          : { entryId: prior.entry.entryId }),
+      });
+      return undefined;
     }
     const card: DecisionCard = {
       cardId: this.ids.card(),

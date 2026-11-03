@@ -52,6 +52,11 @@ import {
   openHostSuperagent,
   startHostSuperagent,
 } from './superagent.js';
+import {
+  startSuperagentFeatureTimers,
+  superagentOptionsFromFeatures,
+  sweepTargets,
+} from './superagent-features.js';
 import { createHttpMailer } from './mail.js';
 import {
   type CloudServerOptions,
@@ -285,6 +290,7 @@ export async function startStack(
   let transcripts: SqliteTranscriptStore | undefined;
   let superagentRt: HostSuperagent | undefined;
   let releaseSuperagentTick: (() => void) | undefined;
+  let releaseFeatureTimers: (() => void) | undefined;
   try {
     if (config.agentChannel !== undefined) {
       await mkdir(dirname(config.transcriptsDbPath), { recursive: true });
@@ -397,7 +403,9 @@ export async function startStack(
       every: superagentEvery,
       ...agentOpts
     } = superagentOptions;
+    const featureOptions = superagentOptionsFromFeatures(config.superagentFeatures, env);
     const wiredSuperagent = {
+      ...featureOptions,
       ...agentOpts,
       sandbox:
         agentOpts.sandbox ??
@@ -600,7 +608,26 @@ export async function startStack(
           .catch((error: unknown) => warn('A Super-agent tick failed', error));
       }, tickMs);
     }
+    releaseFeatureTimers = startSuperagentFeatureTimers({
+      features: config.superagentFeatures,
+      every: tickEvery,
+      reloadRules: () => {
+        superagentRt?.agent.rules.maybeReload();
+      },
+      sweep: () => {
+        const tenants = sweepTargets(
+          config.superagentFeatures,
+          config.dutyLinks.map((link) => link.inviteId),
+        );
+        for (const tenantId of tenants) {
+          void superagentRt?.agent
+            .runSweep(tenantId, config.superagentFeatures.sweepRepo)
+            .catch((error: unknown) => warn('A Super-agent sweep failed', error));
+        }
+      },
+    });
   } catch (error) {
+    releaseFeatureTimers?.();
     releaseSuperagentTick?.();
     superagentRt?.close();
     await cards?.stop();
@@ -751,6 +778,8 @@ export async function startStack(
             // longer answers webhook requests.
             await cards?.stop();
             await duties?.stop();
+            releaseFeatureTimers?.();
+            releaseFeatureTimers = undefined;
             releaseSuperagentTick?.();
             releaseSuperagentTick = undefined;
             await cloud.close();

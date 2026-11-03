@@ -23,6 +23,7 @@ import {
   type BoxExecLog,
 } from './loop-box.js';
 import { GitCloneStore, type WorkspaceHandle, type WorkspaceStore } from './workspace.js';
+import { DuplexLoop } from './duplex.js';
 import type { SandboxPort } from './sandbox.js';
 
 const run = promisify(execFile);
@@ -326,6 +327,31 @@ export class CodingLoopHandler implements WorkerHandler {
   }
 
   async handle(ctx: WorkerContext, event: NormalizedEvent): Promise<HandlerResult> {
+    let produced: HandlerResult | undefined;
+    const loop = new DuplexLoop(
+      {
+        next: async () => {
+          if (produced) {
+            return { kind: 'done' as const, result: produced };
+          }
+          produced = await this.runLoop(ctx, event);
+          return {
+            kind: 'done' as const,
+            memory: produced.memory,
+            plan: produced.plan,
+            usage: produced.usage,
+            progressUpdate: produced.progressUpdate,
+            result: produced,
+          };
+        },
+      },
+      { maxSteps: 2 },
+    );
+    const wrapped = await loop.handle(ctx, event);
+    return produced ?? wrapped;
+  }
+
+  private async runLoop(ctx: WorkerContext, event: NormalizedEvent): Promise<HandlerResult> {
     const worker = ctx.worker;
     const repo = worker.subject.repo ?? 'local/scratch';
     const boxId = worker.sandboxRef ?? 'loop';
