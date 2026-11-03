@@ -1,12 +1,14 @@
 import { mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { type Delivery, type Headers, readDelivery } from '@maka-cloud/duties';
+import type { InstaboxClient } from '@maka-cloud/instabox';
 import type { DutyService } from '@maka-cloud/server';
 import type { StuckChoice } from '@maka-cloud/supervisor';
 import {
   formatStuckAsk,
   type IngestInput,
   type IngestResult,
+  type SandboxPort,
   type StuckCard,
   Superagent,
   type SuperagentOptions,
@@ -102,6 +104,34 @@ export function startHostSuperagent(
     },
     close: () => agent.close(),
     backupTo: (destination) => store.backupTo?.(destination) ?? Promise.resolve(),
+  };
+}
+
+/** Structural wrap so InstaboxClient's extra snapshot signature does not leak. */
+export function instaboxSandboxPort(client: InstaboxClient): SandboxPort {
+  return {
+    ensureRunning: (machineId) => client.ensureRunning(machineId),
+    exec: async (machineId, request) => {
+      const result = await client.exec(machineId, request);
+      return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode };
+    },
+    getMachine: async (machineId) => {
+      const machine = await client.getMachine(machineId);
+      return { id: machine.id, state: machine.state };
+    },
+    createSnapshot: async (machineId, name) => {
+      const snapshot = await client.createSnapshot(machineId, { name });
+      return { id: snapshot.id };
+    },
+    deleteSnapshot: (snapshotId) => client.deleteSnapshot(snapshotId),
+    waitForSnapshot: async (snapshotId) => {
+      await client.waitForSnapshot(snapshotId);
+    },
+    putActivityLease: (machineId, holder) => client.putActivityLease(machineId, holder, 60),
+    deleteActivityLease: (machineId, holder) => client.deleteActivityLease(machineId, holder),
+    suspend: async (machineId) => {
+      await client.suspendMachine(machineId);
+    },
   };
 }
 

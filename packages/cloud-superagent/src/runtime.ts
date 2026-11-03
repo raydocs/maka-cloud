@@ -29,7 +29,9 @@ import {
   type WorkerHandler,
 } from './types.js';
 import { mergeEvidence } from './evidence.js';
+import { FakeSandbox, type SandboxPort } from './sandbox.js';
 import { UnconfiguredOrgSecrets } from './secrets.js';
+import { recallMemory, spillMemory } from './spill.js';
 import { type StuckCard, stuckCardOf } from './stuck.js';
 import { runWatchdog } from './watchdog.js';
 
@@ -72,8 +74,12 @@ export interface SuperagentOptions {
   metering?: MeteringHooks;
   /** Host turns escalate/stop findings into a T33 stuck card. */
   onEscalate?: (card: StuckCard) => void;
-  /** Interface only. Default refuses every inject. */
+  /** Interface + local/env implementation. Default refuses every inject. */
   orgSecrets?: OrgSecretPort;
+  /** Instabox (or FakeSandbox). Sleep may suspend; wake calls ensureRunning. */
+  sandbox?: SandboxPort;
+  /** Default box id stored on new workers when the host has one machine. */
+  sandboxRef?: string;
 }
 
 export class Superagent {
@@ -86,10 +92,12 @@ export class Superagent {
   readonly metering: MeteringHooks;
   readonly safety: Safety;
   readonly orgSecrets: OrgSecretPort;
+  readonly sandbox: SandboxPort;
   readonly escalations: StuckCard[] = [];
   judgeCalls = 0;
   private readonly now: () => number;
   private readonly onEscalate?: (card: StuckCard) => void;
+  private readonly defaultSandboxRef: string | null;
 
   constructor(options: SuperagentOptions = {}) {
     this.store = options.store ?? new MemorySuperagentStore();
@@ -103,6 +111,8 @@ export class Superagent {
     this.safety = new Safety(this.store, this.ids, this.watchdogSettings.approvalTtlMs);
     this.onEscalate = options.onEscalate;
     this.orgSecrets = options.orgSecrets ?? new UnconfiguredOrgSecrets();
+    this.sandbox = options.sandbox ?? new FakeSandbox();
+    this.defaultSandboxRef = options.sandboxRef ?? null;
   }
 
   ledger(tenantId: string) {
@@ -303,9 +313,10 @@ export class Superagent {
       generation: 1,
       mandate,
       memory: '',
+      spills: [],
       plan: '',
       transcriptPointer: null,
-      sandboxRef: null,
+      sandboxRef: this.defaultSandboxRef,
       workspaceRef: null,
       lastEventId: null,
       lastProgressAt: at,
@@ -343,10 +354,12 @@ export class Superagent {
         worker.state = 'sleeping';
         worker.updatedAt = this.now();
         this.store.putWorker(worker);
+        await this.suspendBox(worker);
       }
       return;
     }
 
+    await this.wakeBox(worker);
     setState(worker, 'running');
     for (const item of pending) {
       const event = this.store.event(tenantId, item.eventId);
@@ -366,7 +379,7 @@ export class Superagent {
         return;
       }
       try {
-        const result = await this.handler.handle({ worker: { ...worker }, event }, event);
+        const result = await this.handler.handle(this.context(worker, event), event);
         const halt = this.applyResult(worker, result, at);
         this.store.consume(workerId, item.seq, at);
         if (halt) {
@@ -386,10 +399,15 @@ export class Superagent {
     if (worker.state === 'running') setState(worker, 'sleeping');
     worker.updatedAt = this.now();
     this.store.putWorker(worker);
+    if (worker.state === 'sleeping') await this.suspendBox(worker);
   }
 
   private applyResult(worker: WorkerRecord, result: HandlerResult, at: number): boolean {
-    if (result.memory !== undefined) worker.memory = result.memory;
+    if (result.memory !== undefined) {
+      const spilled = spillMemory(result.memory, worker.spills ?? [], at);
+      worker.memory = spilled.inline;
+      worker.spills = spilled.spills;
+    }
     if (result.plan !== undefined) worker.plan = result.plan;
     if (result.transcriptPointer !== undefined) worker.transcriptPointer = result.transcriptPointer;
     if (result.progress) worker.lastProgressAt = at;
@@ -463,7 +481,7 @@ export class Superagent {
     worker.state = 'retiring';
     this.store.putWorker(worker);
     try {
-      const result = await this.handler.handle({ worker: { ...worker }, event }, event);
+      const result = await this.handler.handle(this.context(worker, event), event);
       this.applyResult(worker, result, at);
     } catch {
       // A close note is best-effort.
@@ -516,6 +534,47 @@ export class Superagent {
     current.updatedAt = at;
     this.store.putWorker(current);
     this.audit(current.tenantId, current.workerId, 'stuck', at, {});
+  }
+
+  private context(
+    worker: WorkerRecord,
+    event: NormalizedEvent,
+  ): {
+    worker: WorkerRecord;
+    event: NormalizedEvent;
+    sandbox: SandboxPort;
+    orgSecrets: Superagent['orgSecrets'];
+    recall: () => string;
+  } {
+    return {
+      worker: { ...worker },
+      event,
+      sandbox: this.sandbox,
+      orgSecrets: this.orgSecrets,
+      recall: () => recallMemory(worker),
+    };
+  }
+
+  private async wakeBox(worker: WorkerRecord): Promise<void> {
+    if (!worker.sandboxRef) return;
+    try {
+      await this.sandbox.ensureRunning(worker.sandboxRef);
+    } catch (error) {
+      this.audit(worker.tenantId, worker.workerId, 'sandbox_wake_failed', this.now(), {
+        message: error instanceof Error ? error.message : 'ensureRunning',
+      });
+    }
+  }
+
+  private async suspendBox(worker: WorkerRecord): Promise<void> {
+    if (!worker.sandboxRef || this.sandbox.suspend === undefined) return;
+    try {
+      await this.sandbox.suspend(worker.sandboxRef);
+    } catch (error) {
+      this.audit(worker.tenantId, worker.workerId, 'sandbox_suspend_failed', this.now(), {
+        message: error instanceof Error ? error.message : 'suspend',
+      });
+    }
   }
 
   private audit(

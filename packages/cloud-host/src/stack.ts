@@ -37,11 +37,17 @@ import {
   type TaskDirectory,
   TenantMachineProvider,
 } from '@maka-cloud/runners';
-import type { SuperagentOptions, SuperagentStore } from '@maka-cloud/superagent';
+import {
+  createJudgeFromEnv,
+  EnvOrgSecrets,
+  type SuperagentOptions,
+  type SuperagentStore,
+} from '@maka-cloud/superagent';
 import type { Supervisor } from '@maka-cloud/supervisor';
 import {
   attachDutySource,
   type HostSuperagent,
+  instaboxSandboxPort,
   openHostSuperagent,
   startHostSuperagent,
 } from './superagent.js';
@@ -310,9 +316,10 @@ export async function startStack(
       });
     }
     const publicUrl = config.mcp.publicUrl;
+    let instaboxClient: InstaboxClient | undefined;
     if (config.boxes !== undefined) {
       const apiKey = env.INSTABOX_API_KEY;
-      const client =
+      instaboxClient =
         dependencies.boxes?.client ??
         (apiKey === undefined || apiKey === ''
           ? undefined
@@ -320,9 +327,9 @@ export async function startStack(
               apiKey,
               baseUrl: config.instabox.apiUrl ?? DEFAULT_INSTABOX_BASE_URL,
             }));
-      if (client === undefined) throw new Error('INSTABOX_API_KEY is not set.');
+      if (instaboxClient === undefined) throw new Error('INSTABOX_API_KEY is not set.');
       boxService = startBoxService({
-        client,
+        client: instaboxClient,
         templateId: config.boxes.templateId,
         maxPerInvite: config.boxes.maxPerInvite,
         ...(config.agentChannel === undefined ? {} : { agent: config.agentChannel }),
@@ -389,28 +396,24 @@ export async function startStack(
       every: superagentEvery,
       ...agentOpts
     } = superagentOptions;
+    const wiredSuperagent = {
+      ...agentOpts,
+      sandbox:
+        agentOpts.sandbox ??
+        (instaboxClient === undefined ? undefined : instaboxSandboxPort(instaboxClient)),
+      orgSecrets: agentOpts.orgSecrets ?? new EnvOrgSecrets({ env }),
+      judge: agentOpts.judge ?? createJudgeFromEnv(env),
+      admission: {
+        ...agentOpts.admission,
+        ...(config.superagentActors.length > 0 && agentOpts.admission?.allowActors === undefined
+          ? { allowActors: config.superagentActors }
+          : {}),
+      },
+    };
     superagentRt =
       superagentStore === undefined
-        ? await openHostSuperagent(config.superagentDbPath, {
-            ...agentOpts,
-            admission: {
-              ...agentOpts.admission,
-              ...(config.superagentActors.length > 0 &&
-              agentOpts.admission?.allowActors === undefined
-                ? { allowActors: config.superagentActors }
-                : {}),
-            },
-          })
-        : startHostSuperagent(superagentStore, {
-            ...agentOpts,
-            admission: {
-              ...agentOpts.admission,
-              ...(config.superagentActors.length > 0 &&
-              agentOpts.admission?.allowActors === undefined
-                ? { allowActors: config.superagentActors }
-                : {}),
-            },
-          });
+        ? await openHostSuperagent(config.superagentDbPath, wiredSuperagent)
+        : startHostSuperagent(superagentStore, wiredSuperagent);
     if (duties !== undefined && webhookSecret !== undefined) {
       attachDutySource(duties.service, webhookSecret, config.dutyLinks, superagentRt);
     }
