@@ -1,6 +1,7 @@
 import type { SuperagentStore } from './store.js';
 import { parseMergeBound } from './loop.js';
 import { hasClearReceipt, prRef } from './review.js';
+import { speculativeBlocksOutbound } from './speculative.js';
 import type {
   ApprovalKind,
   ApprovalRecord,
@@ -22,10 +23,22 @@ export type GateResult =
   | { allowed: true }
   | { allowed: false; reason: 'intensity_observe' }
   | { allowed: false; reason: 'review_required' }
+  | { allowed: false; reason: 'speculative_blocked' }
   | { allowed: false; reason: 'held'; approvalId: string };
 
 export function isRisky(kind: ApprovalKind): boolean {
   return (RISKY_ACTIONS as readonly string[]).includes(kind);
+}
+
+/** Mandate / review blocks that Safety.gate applies before opening a hold. */
+export function mandateBlocks(
+  worker: WorkerRecord,
+  action: ProposedAction,
+): 'intensity_observe' | 'review_required' | undefined {
+  if (!isRisky(action.kind)) return undefined;
+  if (worker.mandate.intensity === 'observe') return 'intensity_observe';
+  if (action.kind === 'merge' && !mergeReceiptOk(worker, action)) return 'review_required';
+  return undefined;
 }
 
 export function overBudget(worker: WorkerRecord): string | undefined {
@@ -46,11 +59,15 @@ export class Safety {
   ) {}
 
   gate(worker: WorkerRecord, action: ProposedAction, at: number): GateResult {
+    if (speculativeBlocksOutbound(worker, action)) {
+      return { allowed: false, reason: 'speculative_blocked' };
+    }
     if (!isRisky(action.kind)) return { allowed: true };
-    if (worker.mandate.intensity === 'observe') {
+    const blocked = mandateBlocks(worker, action);
+    if (blocked === 'intensity_observe') {
       return { allowed: false, reason: 'intensity_observe' };
     }
-    if (action.kind === 'merge' && !mergeReceiptOk(worker, action)) {
+    if (blocked === 'review_required') {
       return { allowed: false, reason: 'review_required' };
     }
     if (this.approvedFor(worker, action)) return { allowed: true };

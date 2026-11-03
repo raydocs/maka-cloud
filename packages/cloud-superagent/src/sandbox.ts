@@ -28,6 +28,21 @@ export interface SandboxExecResult {
   exitCode: number;
 }
 
+/** Duplex: a long exec that has been started; the result arrives later. */
+export interface SandboxStartResult {
+  status: 'started';
+  jobId: string;
+}
+
+export interface SandboxJob {
+  jobId: string;
+  machineId: string;
+  request: SandboxExecRequest;
+  startedAt: number;
+  result?: SandboxExecResult;
+  cancelled?: boolean;
+}
+
 export interface SandboxMachine {
   id: string;
   state: string;
@@ -147,8 +162,12 @@ export class FakeSandbox implements SandboxPort {
   readonly snapshotRoots = new Map<string, string>();
   readonly leases = new Map<string, string>();
   readonly roots = new Map<string, string>();
+  readonly jobs = new Map<string, SandboxJob>();
+  /** When true, `start()` returns `{ status: 'started' }` and waits for `finish()`. */
+  holdStarts = false;
   private readonly rootJobs = new Map<string, Promise<string>>();
   private snapshotSeq = 0;
+  private jobSeq = 0;
   private createSeq = 0;
 
   async ensureRunning(machineId: string): Promise<void> {
@@ -184,6 +203,35 @@ export class FakeSandbox implements SandboxPort {
       : root;
     await mkdir(cwd, { recursive: true });
     return await runLocal(request.cmd, cwd, request.stdin, request.timeoutSeconds, request.env);
+  }
+
+  /**
+   * Duplex hook: return `started` and keep the loop moving. Tests set
+   * `holdStarts` and call `finish(jobId)` so the result is an event, not a
+   * blocking `exec`.
+   */
+  async start(
+    machineId: string,
+    request: SandboxExecRequest,
+  ): Promise<SandboxStartResult | SandboxExecResult> {
+    this.jobSeq += 1;
+    const jobId = `job_${this.jobSeq}`;
+    const job: SandboxJob = { jobId, machineId, request, startedAt: Date.now() };
+    this.jobs.set(jobId, job);
+    if (this.holdStarts) return { status: 'started', jobId };
+    void this.exec(machineId, request).then((result) => {
+      job.result = result;
+    });
+    return { status: 'started', jobId };
+  }
+
+  finish(
+    jobId: string,
+    result: SandboxExecResult = { stdout: 'ok', stderr: '', exitCode: 0 },
+  ): void {
+    const job = this.jobs.get(jobId);
+    if (!job) throw new Error(`unknown job ${jobId}`);
+    job.result = result;
   }
 
   async getMachine(machineId: string): Promise<SandboxMachine> {

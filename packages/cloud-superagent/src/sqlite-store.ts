@@ -389,6 +389,10 @@ export class SqliteSuperagentStore implements SuperagentStore {
     return this.memory.eventByIdempotency(tenantId, key);
   }
 
+  listEvents(tenantId: string): NormalizedEvent[] {
+    return this.memory.listEvents(tenantId);
+  }
+
   putWorker(worker: WorkerRecord): void {
     this.memory.putWorker(worker);
     this.db

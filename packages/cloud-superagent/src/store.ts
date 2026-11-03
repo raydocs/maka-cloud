@@ -84,10 +84,29 @@ export function cloneWorker(worker: WorkerRecord): WorkerRecord {
     evidence: (worker.evidence ?? []).map((block) => ({ ...block })),
     spills: (worker.spills ?? []).map((row) => ({ ...row })),
     reviewReceipts: (worker.reviewReceipts ?? []).map((row) => ({ ...row })),
+    lessonRefs: worker.lessonRefs?.slice(),
     doneClaim: worker.doneClaim
       ? { ...worker.doneClaim, signals: worker.doneClaim.signals.map((row) => ({ ...row })) }
       : undefined,
     lastLive: worker.lastLive ? { ...worker.lastLive } : undefined,
+    routeRule: worker.routeRule
+      ? { ...worker.routeRule, skills: worker.routeRule.skills?.slice() }
+      : undefined,
+    peerReviewStats: worker.peerReviewStats
+      ? {
+          ...worker.peerReviewStats,
+          openFindings: [...worker.peerReviewStats.openFindings],
+        }
+      : undefined,
+    releaseVerify: worker.releaseVerify ? { ...worker.releaseVerify } : undefined,
+    seenEventIds: worker.seenEventIds ? [...worker.seenEventIds] : undefined,
+    executionTarget: worker.executionTarget ? { ...worker.executionTarget } : undefined,
+    speculative: worker.speculative
+      ? {
+          ...worker.speculative,
+          cost: worker.speculative.cost ? { ...worker.speculative.cost } : undefined,
+        }
+      : undefined,
     autonomy: worker.autonomy
       ? {
           ...worker.autonomy,

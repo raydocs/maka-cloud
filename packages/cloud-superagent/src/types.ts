@@ -270,6 +270,41 @@ export interface WorkerRecord {
   lastLive?: { sha?: string; ci?: string; prMerged?: boolean; at: number };
   /** Named step plan + heartbeat. JSON only; no schema bump. */
   progress?: import('./progress.js').WorkerProgress;
+  /** Declarative routing rule that spawned this worker. JSON only. */
+  routeRule?: {
+    ruleId: string;
+    model?: string;
+    reasoning?: 'low' | 'medium' | 'high';
+    skills?: string[];
+    objectId?: string;
+  };
+  /**
+   * Stable lesson prefix (refs + summaries, or refs only when over budget).
+   * JSON only; no schema bump. Recall prepends this and never rewrites it.
+   */
+  lessonPrefix?: string;
+  /** Accepted lesson ids injected at spawn. Append-only. JSON only. */
+  lessonRefs?: string[];
+  /** Last `ci_failed` after this worker pushed. JSON only. */
+  ciFailedEventId?: string | null;
+  /** Last pushed SHA parsed from handler memory. JSON only. */
+  lastPushSha?: string;
+  /** Completed blocking peer-review rounds. JSON only. */
+  peerReviewRounds?: number;
+  /** Cross-model review ledger rollup. JSON only; no schema bump. */
+  peerReviewStats?: import('./peer-review.js').PeerReviewStats;
+  /** Post-deploy version probe. JSON only; no schema bump. */
+  releaseVerify?: import('./release-verify.js').ReleaseVerifyRecord;
+  /** Merge commit SHA after Done / live read. JSON only. */
+  mergeSha?: string;
+  /** Duplex: event ids already applied. JSON only; no schema bump. */
+  seenEventIds?: string[];
+  /** Owner/watchdog cancel; the running loop preempts then retires. */
+  cancelRequested?: boolean;
+  /** Instabox (default) or a paired BYOM device. JSON only; no schema bump. */
+  executionTarget?: import('./execution-target.js').ExecutionTargetRef;
+  /** Speculative attempt. JSON only; no schema bump. Default unset (off). */
+  speculative?: import('./speculative.js').SpeculativeMeta;
   /** Bounded autonomy + prompt-cache counters. JSON only; no schema bump. */
   autonomy?: AutonomyState;
   /** Copy of the tenant box (JSON). Source of truth is SuperagentStore.tenantBox. */
@@ -370,6 +405,11 @@ export interface OrgSecretPort {
 export interface ProposedAction {
   kind: ApprovalKind;
   boundText: string;
+  /** Must-ask category when the handler already classified the action. */
+  category?: string;
+  object?: string;
+  path?: string;
+  tags?: string[];
 }
 
 export interface HandlerResult {
@@ -403,8 +443,18 @@ export interface WorkerContext {
   event: NormalizedEvent;
   sandbox: SandboxPort;
   orgSecrets: OrgSecretPort;
-  /** Chain of Recall: spilled chunks plus the inline window. */
+  /** Chain of Recall: optional lesson prefix, spilled chunks, then the inline window. */
   recall: () => string;
+  /** Read one accepted/recorded lesson by id when the prefix kept only a ref. */
+  recallLesson?: (lessonId: string) => string | undefined;
+  /**
+   * Cross-model review of a diff before push / open-PR. Absent when the
+   * host left peer review off (the default).
+   */
+  peerReview?: (input: {
+    diff: string;
+    repo?: string;
+  }) => Promise<import('./peer-review.js').PeerReviewOutcome>;
   /**
    * Persist a phase / activity / waiting heartbeat. Not a user channel —
    * Superagent may speak through `LeadPort` after it writes the store.
@@ -414,6 +464,10 @@ export interface WorkerContext {
    * Intentionally absent: workers have no outbound user channel.
    * `LeadPort.speak` lives on Superagent, never here.
    */
+  /** Unconsumed inbox that arrived after this run started (duplex). */
+  pollInbox?: () => NormalizedEvent[];
+  /** Consume + remember event ids. Idempotent. */
+  ackInbox?: (eventIds: string[]) => void;
 }
 
 export interface WorkerHandler {

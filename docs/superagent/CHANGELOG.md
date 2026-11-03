@@ -8,6 +8,60 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
+## 2026-11-02 18:15 MST — cursor/superagent-decisions-policy-51be — ef272e026
+
+- **PR:** [#480](https://github.com/raydocs/maka-cloud/pull/480)
+- **What:** merge: review-verify format-fix into Super-agent decisions-policy. Biome format now clean. Keep every CHANGELOG entry, newest first.
+- **Why:** Carry the Linux format:check fix through the linearized stack without rebase/force-push.
+- **Tests:** 288 `@maka-cloud/superagent` tests passed after the merge
+- **Live:** n/a
+- **Migrations / risk:** none
+
+## 2026-11-02 18:15 MST — cursor/superagent-review-verify-51be — fd8e03e85
+
+- **PR:** [#479](https://github.com/raydocs/maka-cloud/pull/479)
+- **What:** merge: learning-review format-fix into Super-agent review-verify. Biome format now clean. Keep every CHANGELOG entry, newest first.
+- **Why:** Carry the Linux format:check fix through the linearized stack without rebase/force-push.
+- **Tests:** 263 `@maka-cloud/superagent` tests passed after the merge
+- **Live:** n/a
+- **Migrations / risk:** none
+
+## 2026-11-02 18:15 MST — cursor/superagent-learning-review-51be — 352c8dd60
+
+- **PR:** [#478](https://github.com/raydocs/maka-cloud/pull/478)
+- **What:** merge: watchdog-duplex format-fix into Super-agent learning-review. Biome format now clean. Keep every CHANGELOG entry, newest first.
+- **Why:** Carry the Linux format:check fix through the linearized stack without rebase/force-push.
+- **Tests:** 245 `@maka-cloud/superagent` tests passed after the merge
+- **Live:** n/a
+- **Migrations / risk:** none
+
+## 2026-11-02 18:15 MST — cursor/superagent-watchdog-duplex-51be — dc007def4
+
+- **PR:** [#476](https://github.com/raydocs/maka-cloud/pull/476)
+- **What:** merge: origin/cursor/superagent-watchdog-duplex-51be format-fix (`9adc07fd2`) into the linearized watchdog-duplex. Same biome output as the stack format-fix. Keep every CHANGELOG entry, newest first.
+- **Why:** Remote landed a parallel format fix; git merge only, no rebase/force-push.
+- **Tests:** format:check clean; 233 tests already passed on the parent
+- **Live:** n/a
+- **Migrations / risk:** none
+
+## 2026-11-02 18:14 MST — cursor/superagent-watchdog-duplex-51be — 50f17de2c
+
+- **PR:** [#476](https://github.com/raydocs/maka-cloud/pull/476)
+- **What:** merge: byom-spec format-fix (including remote #474) into Super-agent watchdog-duplex. Biome format now clean. Keep every CHANGELOG entry, newest first.
+- **Why:** Carry the Linux format:check fix through the linearized stack without rebase/force-push.
+- **Tests:** 233 `@maka-cloud/superagent` tests passed after the merge
+- **Live:** n/a
+- **Migrations / risk:** none
+
+## 2026-11-02 18:14 MST — cursor/superagent-byom-spec-51be — ff22aa7d3
+
+- **PR:** [#475](https://github.com/raydocs/maka-cloud/pull/475)
+- **What:** merge: intake-merge format-fix (including remote #474) into Super-agent byom-spec. Biome format now clean. Keep every CHANGELOG entry, newest first.
+- **Why:** Carry the Linux format:check fix through the linearized stack without rebase/force-push.
+- **Tests:** 223 `@maka-cloud/superagent` tests passed after the merge
+- **Live:** n/a
+- **Migrations / risk:** none
+
 ## 2026-11-02 18:14 MST — cursor/superagent-intake-merge-51be — 841f5bae1
 
 - **PR:** [#477](https://github.com/raydocs/maka-cloud/pull/477)
@@ -23,6 +77,51 @@ a heading time is more than five minutes off that SHA's committer date.
 - **What:** merge: origin/cursor/superagent-scheduler-router-51be format-fix (`5e8282663`) with the local format-fix. Same biome output; both CHANGELOG entries kept.
 - **Why:** Remote landed a parallel format fix; git merge only, no rebase/force-push.
 - **Tests:** format:check clean
+- **Live:** n/a
+- **Migrations / risk:** none
+
+## 2026-11-02 18:11 MST — cursor/superagent-decisions-policy-51be — e861d144e
+
+- **PR:** [#480](https://github.com/raydocs/maka-cloud/pull/480)
+- **What:** merge: cursor/superagent-review-verify-51be format fix into Super-agent decisions-policy. Biome format now clean. Keep every CHANGELOG entry, newest first.
+- **Why:** Carry the Linux format:check fix through the linearized stack.
+- **Tests:** 288 `@maka-cloud/superagent` tests passed after the merge
+- **Live:** n/a
+- **Migrations / risk:** none
+
+## 2026-11-02 18:10 MST — cursor/superagent-review-verify-51be — 14619a92c
+
+- **PR:** [#479](https://github.com/raydocs/maka-cloud/pull/479)
+- **What:** merge: cursor/superagent-learning-review-51be format fix into Super-agent review-verify. Biome format now clean. Keep every CHANGELOG entry, newest first.
+- **Why:** Carry the Linux format:check fix through the linearized stack.
+- **Tests:** 263 `@maka-cloud/superagent` tests passed after the merge
+- **Live:** n/a
+- **Migrations / risk:** none
+
+## 2026-11-02 18:10 MST — cursor/superagent-learning-review-51be — 25fb6cb27
+
+- **PR:** [#478](https://github.com/raydocs/maka-cloud/pull/478)
+- **What:** merge: cursor/superagent-watchdog-duplex-51be format fix into Super-agent learning-review. Biome format now clean. Keep every CHANGELOG entry, newest first.
+- **Why:** Carry the Linux format:check fix through the linearized stack.
+- **Tests:** 245 `@maka-cloud/superagent` tests passed after the merge
+- **Live:** n/a
+- **Migrations / risk:** none
+
+## 2026-11-02 18:10 MST — cursor/superagent-watchdog-duplex-51be — 710908087
+
+- **PR:** [#476](https://github.com/raydocs/maka-cloud/pull/476)
+- **What:** merge: cursor/superagent-byom-spec-51be format fix into Super-agent watchdog-duplex. Kept applyWatchdogCommand and preempt coalesce. Biome format now clean. Keep every CHANGELOG entry, newest first.
+- **Why:** Carry the Linux format:check fix through the linearized stack.
+- **Tests:** 233 `@maka-cloud/superagent` tests passed after the merge
+- **Live:** n/a
+- **Migrations / risk:** none
+
+## 2026-11-02 18:09 MST — cursor/superagent-byom-spec-51be — d6ada5292
+
+- **PR:** [#475](https://github.com/raydocs/maka-cloud/pull/475)
+- **What:** merge: cursor/superagent-intake-merge-51be format fix into Super-agent byom-spec. Biome format now clean. Keep every CHANGELOG entry, newest first. This branch is now a descendant of the formatted #477.
+- **Why:** Carry the Linux format:check fix through the linearized stack.
+- **Tests:** 223 `@maka-cloud/superagent` tests passed after the merge
 - **Live:** n/a
 - **Migrations / risk:** none
 
@@ -44,6 +143,15 @@ a heading time is more than five minutes off that SHA's committer date.
 - **Live:** n/a
 - **Migrations / risk:** none. Format only.
 
+## 2026-11-02 18:09 MST — cursor/superagent-watchdog-duplex-51be — 9adc07fd2
+
+- **PR:** [#476](https://github.com/raydocs/maka-cloud/pull/476)
+- **What:** biome-format the linearized Super-agent files CI rejected after the #475 merge (intake/scheduler/judge-client/runtime and their tests). No behavior change.
+- **Why:** `npm run format:check` failed on `88ffc5f36`; the merge brought long lines biome wraps.
+- **Tests:** `biome format` on the 9 reported files; `format:check` clean
+- **Live:** n/a
+- **Migrations / risk:** none
+
 ## 2026-11-02 18:08 MST — cursor/superagent-scheduler-router-51be — 3524bb276
 
 - **PR:** [#474](https://github.com/raydocs/maka-cloud/pull/474)
@@ -52,6 +160,51 @@ a heading time is more than five minutes off that SHA's committer date.
 - **Tests:** `@maka-cloud/superagent` suite re-run after format
 - **Live:** n/a
 - **Migrations / risk:** none
+
+## 2026-11-02 17:59 MST — cursor/superagent-decisions-policy-51be — 8df73c97e
+
+- **PR:** [#480](https://github.com/raydocs/maka-cloud/pull/480)
+- **What:** merge: cursor/superagent-review-verify-51be (#479) into Super-agent decisions-policy. Kept decisions book / must-ask / `superagent.rules.json` and every earlier stack hook. `statusSnapshot.decisions` stays escalate cards; must-ask uses `mustAskPending` / `decisionCitations`. Keep every CHANGELOG entry, newest first. This branch is now a descendant of #479 and below.
+- **Why:** One-pass linearization so #474 → #477 → #475 → #476 → #478 → #479 → #480 can merge in order without re-conflicts.
+- **Tests:** 288 `@maka-cloud/superagent` tests passed after the merge
+- **Live:** n/a
+- **Migrations / risk:** none. JSON fields only. New features stay default-off.
+
+## 2026-11-02 17:53 MST — cursor/superagent-review-verify-51be — d2f66c8f1
+
+- **PR:** [#479](https://github.com/raydocs/maka-cloud/pull/479)
+- **What:** merge: cursor/superagent-learning-review-51be (#478) into Super-agent review-verify. Kept review hardening / release-verify / sweep (default off) and every earlier stack hook. Keep every CHANGELOG entry, newest first. This branch is now a descendant of #478 and below.
+- **Why:** One-pass linearization so #474 → #477 → #475 → #476 → #478 → #479 → #480 can merge in order without re-conflicts.
+- **Tests:** 263 `@maka-cloud/superagent` tests after dropping a leftover merge marker
+- **Live:** n/a
+- **Migrations / risk:** none. JSON fields only. New features stay default-off.
+
+## 2026-11-02 17:52 MST — cursor/superagent-learning-review-51be — 1fc322d53
+
+- **PR:** [#478](https://github.com/raydocs/maka-cloud/pull/478)
+- **What:** merge: cursor/superagent-watchdog-duplex-51be (#476) into Super-agent learning-review. Kept mistake-book/peer-review (default off) and watchdog/BYOM/scheduler/graph/BoxPool/autonomy. Keep every CHANGELOG entry, newest first. This branch is now a descendant of #476 and below.
+- **Why:** One-pass linearization so #474 → #477 → #475 → #476 → #478 → #479 → #480 can merge in order without re-conflicts.
+- **Tests:** 245 `@maka-cloud/superagent` tests passed after the merge
+- **Live:** n/a
+- **Migrations / risk:** none. JSON fields only. Learning and peer review stay default-off.
+
+## 2026-11-02 17:51 MST — cursor/superagent-watchdog-duplex-51be — 7f0174146
+
+- **PR:** [#476](https://github.com/raydocs/maka-cloud/pull/476)
+- **What:** merge: cursor/superagent-byom-spec-51be (#475) into Super-agent watchdog-duplex. Kept conversational watchdog/duplex and BYOM/scheduler/graph/BoxPool/autonomy. Keep every CHANGELOG entry, newest first. This branch is now a descendant of #475, #477, #474, and main.
+- **Why:** One-pass linearization so #474 → #477 → #475 → #476 → #478 → #479 → #480 can merge in order without re-conflicts.
+- **Tests:** 233 `@maka-cloud/superagent` tests passed after the merge
+- **Live:** n/a
+- **Migrations / risk:** none. JSON fields only. New features stay default-off.
+
+## 2026-11-02 17:49 MST — cursor/superagent-byom-spec-51be — 70bbaeba1
+
+- **PR:** [#475](https://github.com/raydocs/maka-cloud/pull/475)
+- **What:** merge: cursor/superagent-intake-merge-51be (#477) into Super-agent byom-spec. Kept BYOM/speculative (default off) and scheduler/graph/escalate/BoxPool/autonomy. Keep every CHANGELOG entry, newest first. This branch is now a descendant of #477, #474, and main.
+- **Why:** One-pass linearization so #474 → #477 → #475 → #476 → #478 → #479 → #480 can merge in order without re-conflicts.
+- **Tests:** 223 `@maka-cloud/superagent` tests passed after the merge
+- **Live:** n/a
+- **Migrations / risk:** none. JSON fields only. BYOM and speculative stay default-off.
 
 ## 2026-11-02 17:46 MST — cursor/superagent-intake-merge-51be — ca10972ec
 
@@ -235,6 +388,33 @@ Keep every CHANGELOG entry, newest first.
 - **Live:** n/a
 - **Migrations / risk:** none. Retry only `unchecked` listings. Production boxes with a real privileged program still refuse immediately.
 
+## 2026-11-02 14:10 MST — cursor/superagent-decisions-policy-51be — dc4783aa1
+
+- **PR:** none (base `cursor/superagent-real-loop-51be`)
+- **What:** Decision ledger (human-only decided/refused, tenant+repo, exact match auto-applies, fuzzy hints only). Must-ask whitelist (delete/deploy/spend/outbound/direction/secrets/permissions/migration/force-push); tenant may tighten, never loosen; always-ask delete_data / rotate_secrets / spend. Declarative `superagent.rules.json` with schema, hot reload, event envelope; miss falls through to the existing Router. Progress cites ledger ids. #477 card adapters (`cardDraftFromMustAsk`, `recordFromCardResolution`) without taking `statusSnapshot.decisions`.
+- **Why:** Paid cloud employee: ask once, remember, do not re-ask; irreversible actions always wait; routing rules as a file.
+- **Tests:** `@maka-cloud/superagent` typecheck + `node --test` + biome on the package
+- **Live:** n/a
+- **Migrations / risk:** none. No sqlite `user_version` bump. Ledger is memory + optional JSON + existing audit rows.
+
+## 2026-11-02 14:10 MST — cursor/superagent-review-verify-51be — 9f917ea19
+
+- **PR:** [#479](https://github.com/raydocs/maka-cloud/pull/479)
+- **What:** Harden cross-model review: isolated read-only contract (diff+repo only; write/network/secrets forced false; secret-shaped env stripped and proven not to reach the reviewer), prompt and parse drop style-only findings, default max rounds 3, ledger records review duration / token share / issues reported / issues fixed. After merge+publish, optional `/version` probe confirms the live SHA contains the merge commit before Done; timeout or mismatch marks the worker stuck and raises a watchdog card. Optional weekly sweep (default off) opens a cleanup PR for duplicates / temp patches / leftover code / diary docs and never pushes trunk. Tests use fakes only.
+- **Why:** Follow-up to the learning/review hook: isolate the reviewer, verify the live deploy, and keep a weekly cleanup lane without touching parallel branches.
+- **Tests:** `@maka-cloud/superagent` typecheck + `node --test` + biome format
+- **Live:** n/a
+- **Migrations / risk:** none. Defaults false. No server/deploy/billing change. No sqlite `user_version` bump.
+
+## 2026-11-02 13:42 MST — cursor/superagent-real-loop-51be — 1157d2ea8
+
+- **PR:** [#471](https://github.com/raydocs/maka-cloud/pull/471)
+- **What:** Removed leftover `AGENTS.md` conflict markers on the `asf-license-headers` fork-delta row. Kept both `docs/superagent` and `scripts/cloud-maka-engine-boundary.mjs` exclusions.
+- **Why:** The main-merge commit resolved the T34/MakaEngine table but left a second hunk at line 65.
+- **Tests:** none (docs table only)
+- **Live:** n/a
+- **Migrations / risk:** none
+
 ## 2026-11-02 13:42 MST — cursor/superagent-bounded-autonomy-51be — 20b7ba5cc
 
 - **PR:** [#473](https://github.com/raydocs/maka-cloud/pull/473)
@@ -247,15 +427,6 @@ Keep every CHANGELOG entry, newest first.
 ## 2026-11-02 13:42 MST — cursor/superagent-shared-box-51be — cf89368a5
 
 - **PR:** [#472](https://github.com/raydocs/maka-cloud/pull/472)
-- **What:** Removed leftover `AGENTS.md` conflict markers on the `asf-license-headers` fork-delta row. Kept both `docs/superagent` and `scripts/cloud-maka-engine-boundary.mjs` exclusions.
-- **Why:** The main-merge commit resolved the T34/MakaEngine table but left a second hunk at line 65.
-- **Tests:** none (docs table only)
-- **Live:** n/a
-- **Migrations / risk:** none
-
-## 2026-11-02 13:42 MST — cursor/superagent-real-loop-51be — 1157d2ea8
-
-- **PR:** [#471](https://github.com/raydocs/maka-cloud/pull/471)
 - **What:** Removed leftover `AGENTS.md` conflict markers on the `asf-license-headers` fork-delta row. Kept both `docs/superagent` and `scripts/cloud-maka-engine-boundary.mjs` exclusions.
 - **Why:** The main-merge commit resolved the T34/MakaEngine table but left a second hunk at line 65.
 - **Tests:** none (docs table only)
@@ -334,6 +505,15 @@ Keep every CHANGELOG entry, newest first.
 - **Live:** n/a
 - **Migrations / risk:** none. Inherits #469 MakaEngine. No sqlite change.
 
+## 2026-11-02 13:29 MST — cursor/superagent-learning-review-51be — 66178a088
+
+- **PR:** [#478](https://github.com/raydocs/maka-cloud/pull/478)
+- **What:** Optional mistake book (off by default) records a lesson when work is bounced — review changes/reject, CI fail-then-fix after a worker push, owner deny, watchdog correction, peer-review BLOCK. Distill merges repo-level lessons and emits skill/prompt diffs that are never auto-applied. Accepted lessons inject as an append-only id+summary prefix via existing spill/recall. Optional cross-model review (off by default, default 2 rounds) runs a different model on the diff before push/PR; blocking findings bounce the worker, then wait on a human; tokens go to the usage ledger. Tests use `FakePeerReviewClient`. Constructor does not read env; host passes flags. No sqlite `user_version` bump (audit + worker JSON).
+- **Why:** Self-learning from bounced work and a second-model review gate, without touching parallel scheduler/watchdog/BYOM/box branches.
+- **Tests:** `@maka-cloud/superagent` typecheck + `node --test` + biome format
+- **Live:** n/a
+- **Migrations / risk:** none. Defaults false. No server/deploy/billing change.
+
 ## 2026-11-02 13:26 MST — cursor/superagent-intake-merge-51be — e45c5fc4f
 
 - **PR:** [#477](https://github.com/raydocs/maka-cloud/pull/477)
@@ -342,6 +522,33 @@ Keep every CHANGELOG entry, newest first.
 - **Tests:** 171 passed (`test:dist`), including new event-graph / escalate suites. FakeJudgeClient proves programmatic hits do not grow router prompts.
 - **Live:** n/a
 - **Migrations / risk:** none. Documents are `CREATE TABLE IF NOT EXISTS`. Schema version stays 2.
+
+## 2026-11-02 12:42 MST — cursor/superagent-byom-spec-51be — 010c9b925
+
+- **PR:** [#475](https://github.com/raydocs/maka-cloud/pull/475)
+- **What:** BYOM default command allowlist drops shells (`sh`, `bash`, `zsh`, `dash`, …) and wrappers (`env`, `xargs`, …). Devices exec `argv[0]` by exact basename match, no shell parse. `SandboxPort` `cmd` is tokenized and spawned directly; pipes / redirects / `sh -c` are refused with `shell_not_allowed` (never a silent `sh -c` fallback). Per-device `allowShell` (default false) is set at pairing or via `setAllowShell`; enabling writes `byom_allow_shell` to the hub audit and Super-agent ledger and shows `allowShell` on worker progress. A shell job also records `byom_shell_used`.
+- **Why:** Owner agreed to close the residual that an allowlisted shell could run arbitrary scripts on a paired machine.
+- **Tests:** `@maka-cloud/superagent` byom suite: default refuse `sh` / `bash` / `sh -c` / pipes; allow when `allowShell` is on; existing jail / HMAC / offline / pairing tests unchanged.
+- **Live:** n/a
+- **Migrations / risk:** none. Existing paired devices stay `allowShell: false`. Owners who need a shell opt in per device.
+
+## 2026-11-02 12:26 MST — cursor/superagent-watchdog-duplex-51be — 656e7d7cc
+
+- **PR:** [#476](https://github.com/raydocs/maka-cloud/pull/476)
+- **What:** Conversational watchdog (ask/instruct on the existing progress API + `status` CLI; ledger / incidents / worker state / trigger→thread→worker citations; cheap model optional, deterministic fallback default; nudge/pause/resume/cancel/stuck-check only on explicit instruct). Full-duplex workers (`DuplexLoop`: mid-run inbox at the next step, `start()` → `started`, cancel/correct preempt, `seenEventIds` idempotency, progress ack `received, will apply at next step`). Design: `docs/superagent/watchdog-duplex.md`.
+- **Why:** User-approved task: queryable watchdog + async ReAct mid-run delivery, additive against parallel BoxPool / scheduler branches.
+- **Tests:** `@maka-cloud/superagent` `test:dist` (watchdog-query + duplex). cloud-server progress ask/instruct route test.
+- **Live:** n/a
+- **Migrations / risk:** none. Worker JSON only (`seenEventIds`, `cancelRequested`). No sqlite `user_version` bump. Watchdog `tick()` stays a separate timer loop.
+
+## 2026-11-02 12:25 MST — cursor/superagent-byom-spec-51be — ca33ac59d
+
+- **PR:** [#475](https://github.com/raydocs/maka-cloud/pull/475)
+- **What:** BYOM execution target (default off) and speculative runs (default off). New `@maka-cloud/superagent-device` daemon dials out; `ByomHub` pairing / HMAC / jail / allow-deny / kill switch / repo opt-in; `ExecutionTarget` picks Instabox or a capability-matched device and waits with `device_offline` when the box is gone. Speculative workers start on watched CI failures / matching issues before the Router, lowest priority, hard daily + concurrency caps, no push/comment/PR until `acceptSpeculative`; discard cleans worktree/box and the ledger records accepted/discarded cost.
+- **Why:** Owner-approved: run iOS / local trees on a paired machine; measure whether pre-decision attempts are worth the spend. Both stay off so P0 Instabox behavior is unchanged.
+- **Tests:** `@maka-cloud/superagent` byom + speculative suites (in-process daemon / fake daemon). `@maka-cloud/superagent-device` loopback daemon test.
+- **Live:** n/a
+- **Migrations / risk:** none. No sqlite `user_version` bump. New fields are worker JSON (`executionTarget`, `speculative`). Cloud never receives device-local secrets. Threat model: [byom.md](byom.md). Speculative: [speculative.md](speculative.md).
 
 ## 2026-11-02 12:19 MST — cursor/superagent-scheduler-router-51be — 3f12cbe39
 

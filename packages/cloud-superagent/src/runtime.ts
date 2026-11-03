@@ -2,6 +2,24 @@ import type { IngestInput } from './events.js';
 import { normalize } from './events.js';
 import { defaultIds } from './ids.js';
 import {
+  DECISION_AUDIT_APPLIED,
+  DECISION_AUDIT_RECORDED,
+  DECISION_AUDIT_REVOKED,
+  DecisionBook,
+  RULE_MATCHED_AUDIT,
+  type DecisionEntry,
+} from './decisions.js';
+import {
+  categoryFromApproval,
+  consultBeforeAsk,
+  DEFAULT_MUST_ASK,
+  mergeMustAskPolicy,
+  speculativeBlocksOutbound,
+  type BeforeAskResult,
+  type MustAskPolicy,
+  type TenantMustAskOverlay,
+} from './must-ask.js';
+import {
   addCard,
   bandOf,
   emptyEscalateState,
@@ -65,7 +83,7 @@ import {
   ROUTER_DOCUMENT,
 } from './intake.js';
 import { appendRecall, followRecallInStore, type RecallQuery } from './recall-chain.js';
-import { admitSpawn, HeuristicJudge, isStatusAsk, type JudgeClient } from './router.js';
+import { admit, admitSpawn, HeuristicJudge, isStatusAsk, type JudgeClient } from './router.js';
 import {
   estimateFootprint,
   estimatePriority,
@@ -82,10 +100,12 @@ import {
   type TaskSize,
   waitMsOf,
 } from './scheduler.js';
-import { overBudget, Safety } from './safety.js';
+import { applyConcurrency, envelopeOf, RulesEngine, type RoutingRule } from './rules.js';
+import { isRisky, mandateBlocks, overBudget, Safety } from './safety.js';
 import type { SuperagentStore } from './store.js';
 import { MemorySuperagentStore } from './memory-store.js';
 import {
+  actMandate,
   DEFAULT_AUTONOMY,
   emptyUsage,
   isLiveState,
@@ -115,7 +135,7 @@ import {
   type WorkerHandler,
 } from './types.js';
 import { mergeEvidence } from './evidence.js';
-import { defaultDoneWorld, verifyDone, type DoneWorld } from './done.js';
+import { defaultDoneWorld, verifyDone, type DoneClaim, type DoneWorld } from './done.js';
 import { formatLeadReport, freshnessOf, type LiveFacts } from './freshness.js';
 import {
   applyProgressPatch,
@@ -143,10 +163,80 @@ import {
 import { BoxPool } from './box-pool.js';
 import { FakeSandbox, type SandboxPort } from './sandbox.js';
 import { UnconfiguredOrgSecrets } from './secrets.js';
+import {
+  DefaultExecutionResolver,
+  type ExecutionNeed,
+  type ExecutionTargetResolver,
+} from './execution-target.js';
+import { DeviceOfflineError, type ByomHub } from './byom.js';
 import { recallMemory, spillMemory } from './spill.js';
+import {
+  DEFAULT_SPECULATIVE,
+  admitSpeculative,
+  compareWorkerPriority,
+  isSpeculativeShadow,
+  isUnacceptedSpeculative,
+  markSpeculativeReady,
+  matchSpeculativeTrigger,
+  snapshotSpeculativeCost,
+  speculativeMandate,
+  type SpeculativeCleanup,
+  type SpeculativeSettings,
+} from './speculative.js';
 import { AUTONOMY_LEDGER_KIND, autonomyUsage, emptyAutonomy, markApplied } from './autonomy.js';
+
 import { type StuckCard, stuckCardOf } from './stuck.js';
+import { DUPLEX_ACK, isPreemptEvent, rememberEventIds } from './duplex.js';
 import { runWatchdog } from './watchdog.js';
+import {
+  DEFAULT_LEARNING,
+  formatLessonPrefix,
+  isWatchdogCorrectAction,
+  learningSettingsFrom,
+  lessonAuditDetail,
+  LessonBook,
+  proposalAuditDetail,
+  recallWithLessons,
+  reviewBounceOf,
+  stripLessonPrefix,
+  type LearningSettings,
+  type LessonRecord,
+  type SkillProposal,
+} from './lessons.js';
+import {
+  DEFAULT_PEER_REVIEW,
+  mergePeerReviewStats,
+  peerReviewSettingsFrom,
+  runPeerReview,
+  type PeerReviewInput,
+  type PeerReviewOutcome,
+  type PeerReviewSettings,
+} from './peer-review.js';
+import {
+  DEFAULT_RELEASE_VERIFY,
+  looksLikeRelease,
+  mergeShaFromClaim,
+  releaseVerifySettingsFrom,
+  verifyRelease,
+  type ReleaseVerifySettings,
+} from './release-verify.js';
+import {
+  DEFAULT_SWEEP,
+  runSweep,
+  sweepSettingsFrom,
+  type SweepResult,
+  type SweepSettings,
+} from './sweep.js';
+import {
+  answerWatchdog,
+  collectWatchdogContext,
+  commandRefusedAsk,
+  formatWatchdogAnswer,
+  parseWatchdogText,
+  type WatchdogActionResult,
+  type WatchdogAnswer,
+  type WatchdogNarrator,
+} from './watchdog-query.js';
 
 export type IngestResult =
   | { result: 'rejected'; reason: string; judgeCalls: 0 }
@@ -155,6 +245,14 @@ export type IngestResult =
   | { result: 'passthrough'; eventId: string; workerIds: string[]; judgeCalls: 0 }
   | { result: 'answered'; eventId: string; text: string; judgeCalls: number }
   | { result: 'spawned'; eventId: string; workerId: string; judgeCalls: number }
+  | {
+      result: 'must_ask';
+      eventId: string;
+      pendingId: string;
+      category: string;
+      judgeCalls: number;
+    }
+  | { result: 'speculative'; eventId: string; workerId: string; judgeCalls: 0 }
   | {
       result: 'queued';
       eventId: string;
@@ -199,7 +297,7 @@ export type IngestResult =
       judgeCalls: number;
     };
 
-/** Collapse a worker inbox into one event. Approval wins over the latest row. */
+/** Collapse a worker inbox into one event. Preempt, then approval, then latest. */
 function handledIdsOf(event: NormalizedEvent): string[] {
   return [event.eventId, event.idempotencyKey];
 }
@@ -208,8 +306,9 @@ export function coalesceInbox(events: NormalizedEvent[]): NormalizedEvent {
   if (events.length === 0) throw new Error('coalesceInbox needs events');
   const first = events[0];
   if (events.length === 1 && first) return first;
+  const preempt = [...events].reverse().find(isPreemptEvent);
   const approval = [...events].reverse().find((row) => row.type === 'approval_granted');
-  const primary = approval ?? events[events.length - 1] ?? first;
+  const primary = preempt ?? approval ?? events[events.length - 1] ?? first;
   if (!primary) throw new Error('coalesceInbox needs events');
   return {
     ...primary,
@@ -270,6 +369,44 @@ export interface SuperagentOptions {
   liveFacts?: (worker: WorkerRecord) => Promise<Partial<LiveFacts>>;
   /** Phase-change / still / looks-stuck cadence. Quiet otherwise. */
   progress?: Partial<ProgressSettings>;
+  /** Standing human decisions. Default empty; hydrates from audit. */
+  decisions?: DecisionBook;
+  /** Must-ask whitelist. Tenant overlay can only tighten. */
+  mustAsk?: MustAskPolicy;
+  mustAskOverlay?: TenantMustAskOverlay;
+  /** Declarative routing rules. Miss falls through to the existing Router. */
+  rules?: RulesEngine;
+  rulesPath?: string;
+  /**
+   * Mistake book. Default off. Host passes this; the constructor never
+   * reads environment variables.
+   */
+  learning?: Partial<LearningSettings> | LearningSettings;
+  /**
+   * Cross-model review before push / open-PR. Default off. Host passes
+   * this; the constructor never reads environment variables.
+   */
+  peerReview?: Partial<PeerReviewSettings> | PeerReviewSettings;
+  /**
+   * After merge+publish, probe a live /version endpoint for the merge
+   * SHA. Default off. Host passes this; the constructor never reads env.
+   */
+  releaseVerify?: Partial<ReleaseVerifySettings> | ReleaseVerifySettings;
+  /**
+   * Weekly sweep of merged work. Default off. Host calls `runSweep`.
+   * The constructor never reads environment variables.
+   */
+  sweep?: Partial<SweepSettings> | SweepSettings;
+  /** Cheap watchdog narrator. Absent → deterministic fallback. */
+  watchdogNarrator?: WatchdogNarrator;
+  /** Speculative attempts. Default off. */
+  speculative?: Partial<SpeculativeSettings>;
+  /** Optional cleanup of worktree/box state when a speculative run is discarded. */
+  speculativeCleanup?: SpeculativeCleanup;
+  /** BYOM hub. Default unset (disabled). */
+  byom?: ByomHub;
+  /** Instabox vs paired device. Default is Instabox only. */
+  targets?: ExecutionTargetResolver;
   /**
    * Ingest default is `auto` so existing tests keep spawning. New persisted
    * tenant configs default to `observe` (`defaultTenantRouterConfig`).
@@ -309,6 +446,19 @@ export class Superagent {
   readonly reviewer: ReviewerPort | undefined;
   readonly doneWorld: DoneWorld;
   readonly progressSettings: ProgressSettings;
+  readonly decisions: DecisionBook;
+  readonly mustAsk: MustAskPolicy;
+  readonly rules: RulesEngine;
+  private readonly hydratedTenants = new Set<string>();
+  readonly learning: LearningSettings;
+  readonly peerReview: PeerReviewSettings;
+  readonly releaseVerify: ReleaseVerifySettings;
+  readonly sweep: SweepSettings;
+  readonly lessonsBook: LessonBook;
+  readonly speculativeSettings: SpeculativeSettings;
+  readonly byom: ByomHub | undefined;
+  readonly targets: ExecutionTargetResolver;
+  private readonly speculativeCleanup?: SpeculativeCleanup;
   readonly scheduler: Scheduler;
   readonly routerDefaults: { mode: RouterMode; sensitivity?: number };
   readonly intakeLimits: { maxUnownedPerMinute?: number };
@@ -318,10 +468,15 @@ export class Superagent {
   readonly scoreClient: JudgeClient | undefined;
   private readonly liveFacts?: (worker: WorkerRecord) => Promise<Partial<LiveFacts>>;
   readonly escalations: StuckCard[] = [];
+  /** Timer-loop findings the conversational watchdog can cite. */
+  readonly incidents: WatchdogFinding[] = [];
   judgeCalls = 0;
   private readonly now: () => number;
   private readonly onEscalate?: (card: StuckCard) => void;
   private readonly defaultSandboxRef: string | null;
+  private readonly watchdogNarrator?: WatchdogNarrator;
+  private readonly draining = new Set<string>();
+  private readonly duplexWaiters = new Map<string, Set<() => void>>();
 
   constructor(options: SuperagentOptions = {}) {
     this.store = options.store ?? new MemorySuperagentStore();
@@ -365,6 +520,47 @@ export class Superagent {
     this.doneWorld = defaultDoneWorld(options.doneWorld ?? {});
     this.progressSettings = { ...DEFAULT_PROGRESS, ...options.progress };
     this.liveFacts = options.liveFacts;
+    this.decisions =
+      options.decisions ??
+      new DecisionBook({
+        ids: {
+          entry: () => this.ids.decision(),
+          pending: () => this.ids.decision().replace(/^dec_/u, 'msk_'),
+          hit: () => this.ids.decision().replace(/^dec_/u, 'hit_'),
+        },
+      });
+    const overlay = options.mustAskOverlay
+      ? mergeMustAskPolicy(options.mustAskOverlay, options.mustAsk ?? DEFAULT_MUST_ASK)
+      : undefined;
+    this.mustAsk = overlay?.ok === true ? overlay.policy : (options.mustAsk ?? DEFAULT_MUST_ASK);
+    this.rules =
+      options.rules ??
+      new RulesEngine({
+        path: options.rulesPath,
+        now: this.now,
+        onInvalid: (message, at) => {
+          this.audit('system', null, 'rules_invalid', at, { message });
+        },
+      });
+    this.learning = options.learning ? learningSettingsFrom(options.learning) : DEFAULT_LEARNING;
+    this.peerReview = options.peerReview
+      ? peerReviewSettingsFrom(options.peerReview)
+      : DEFAULT_PEER_REVIEW;
+    this.releaseVerify = options.releaseVerify
+      ? releaseVerifySettingsFrom(options.releaseVerify)
+      : DEFAULT_RELEASE_VERIFY;
+    this.sweep = options.sweep ? sweepSettingsFrom(options.sweep) : DEFAULT_SWEEP;
+    this.lessonsBook = new LessonBook();
+    this.watchdogNarrator = options.watchdogNarrator;
+    this.speculativeSettings = { ...DEFAULT_SPECULATIVE, ...options.speculative };
+    if (options.speculative?.triggers) {
+      this.speculativeSettings.triggers = options.speculative.triggers;
+    }
+    this.speculativeCleanup = options.speculativeCleanup;
+    this.byom = options.byom;
+    this.targets =
+      options.targets ??
+      new DefaultExecutionResolver(this.sandbox, this.defaultSandboxRef, options.byom);
     this.routerDefaults = {
       mode: options.router?.mode ?? 'auto',
       sensitivity: options.router?.sensitivity,
@@ -394,6 +590,102 @@ export class Superagent {
 
   ledger(tenantId: string) {
     return this.store.tenantUsage(tenantId);
+  }
+
+  lessons(tenantId: string): LessonRecord[] {
+    this.hydrateLessons(tenantId);
+    return this.lessonsBook.list(tenantId);
+  }
+
+  lessonDocument(tenantId: string, repo = 'tenant'): string {
+    this.hydrateLessons(tenantId);
+    return this.lessonsBook.document(tenantId, repo);
+  }
+
+  proposals(tenantId: string): SkillProposal[] {
+    this.hydrateLessons(tenantId);
+    return this.lessonsBook.proposals(tenantId);
+  }
+
+  distillLessons(
+    tenantId: string,
+    repo = 'tenant',
+  ): { document: string; proposals: SkillProposal[]; groups: number } {
+    this.hydrateLessons(tenantId);
+    const at = this.now();
+    const result = this.lessonsBook.distill(tenantId, repo, at);
+    for (const proposal of result.proposals) {
+      this.audit(tenantId, null, 'lesson_proposed', at, {
+        ...proposalAuditDetail(proposal, { document: result.document, scope: repo }),
+      });
+    }
+    return result;
+  }
+
+  acceptLesson(
+    tenantId: string,
+    lessonId: string,
+  ): { ok: true; lesson: LessonRecord } | { ok: false; reason: string } {
+    this.hydrateLessons(tenantId);
+    const lesson = this.lessonsBook.setStatus(tenantId, lessonId, 'accepted');
+    if (!lesson) return { ok: false, reason: 'unknown_lesson' };
+    const at = this.now();
+    this.audit(tenantId, lesson.workerId, 'lesson_accepted', at, {
+      lessonId,
+      status: 'accepted',
+    });
+    return { ok: true, lesson };
+  }
+
+  rejectLesson(
+    tenantId: string,
+    lessonId: string,
+  ): { ok: true; lesson: LessonRecord } | { ok: false; reason: string } {
+    this.hydrateLessons(tenantId);
+    const lesson = this.lessonsBook.setStatus(tenantId, lessonId, 'rejected');
+    if (!lesson) return { ok: false, reason: 'unknown_lesson' };
+    const at = this.now();
+    this.audit(tenantId, lesson.workerId, 'lesson_rejected', at, {
+      lessonId,
+      status: 'rejected',
+    });
+    return { ok: true, lesson };
+  }
+
+  acceptProposal(
+    tenantId: string,
+    proposalId: string,
+  ): { ok: true; proposal: SkillProposal } | { ok: false; reason: string } {
+    this.hydrateLessons(tenantId);
+    const proposal = this.lessonsBook.setProposalStatus(tenantId, proposalId, 'accepted');
+    if (!proposal) return { ok: false, reason: 'unknown_proposal' };
+    const at = this.now();
+    this.audit(tenantId, null, 'lesson_accepted', at, {
+      proposalId,
+      status: 'accepted',
+      applied: false,
+    });
+    return { ok: true, proposal };
+  }
+
+  rejectProposal(
+    tenantId: string,
+    proposalId: string,
+  ): { ok: true; proposal: SkillProposal } | { ok: false; reason: string } {
+    this.hydrateLessons(tenantId);
+    const proposal = this.lessonsBook.setProposalStatus(tenantId, proposalId, 'rejected');
+    if (!proposal) return { ok: false, reason: 'unknown_proposal' };
+    const at = this.now();
+    this.audit(tenantId, null, 'lesson_rejected', at, {
+      proposalId,
+      status: 'rejected',
+    });
+    return { ok: true, proposal };
+  }
+
+  recallLesson(tenantId: string, lessonId: string): string | undefined {
+    this.hydrateLessons(tenantId);
+    return this.lessonsBook.recall(tenantId, lessonId);
   }
 
   async ingest(input: IngestInput): Promise<IngestResult> {
@@ -462,7 +754,12 @@ export class Superagent {
       const workerIds: string[] = [];
       for (const sub of subscribers) {
         this.store.enqueue(sub.workerId, event.eventId, at);
-        await this.drain(event.tenantId, sub.workerId);
+        if (this.draining.has(sub.workerId)) {
+          await this.ackDuplexArrival(event.tenantId, sub.workerId, event, at);
+          this.notifyDuplex(sub.workerId);
+        } else {
+          await this.drain(event.tenantId, sub.workerId);
+        }
         workerIds.push(sub.workerId);
         this.linkRecall(event.tenantId, {
           triggerId: event.eventId,
@@ -488,11 +785,15 @@ export class Superagent {
       return { result: 'passthrough', eventId: event.eventId, workerIds, judgeCalls: 0 };
     }
 
+    const speculated = await this.considerSpeculative(event, at);
+    if (speculated) return speculated;
+
     const merged = await this.tryMerge(event, at);
     if (merged) return merged;
 
     const intake = this.intakeState(event.tenantId);
     const routerCfg = this.routerConfig(event.tenantId);
+
     const meter = this.metering.admit?.(event.tenantId) === 'stop';
     const fast = fastPathDrop({
       event,
@@ -517,6 +818,8 @@ export class Superagent {
       return { result: 'ignored', reason: fast.reason, eventId: event.eventId, judgeCalls: 0 };
     }
 
+    const routed = await this.tryRules(event, at);
+    if (routed) return routed;
     const scored = await this.tryEscalate(event, at);
     if (scored) return scored;
 
@@ -661,7 +964,7 @@ export class Superagent {
     }
 
     const existing = this.store.liveWorkerBySubject(event.tenantId, event.subject.key);
-    if (existing) {
+    if (existing && !isSpeculativeShadow(existing)) {
       return {
         result: 'ignored',
         reason: 'already_owned',
@@ -695,6 +998,7 @@ export class Superagent {
     const reserved = isHumanEvent(event);
     const task = this.scheduler.enqueue({
       tenantId: event.tenantId,
+
       eventId: event.eventId,
       subject: event.subject,
       title: decision.title,
@@ -780,12 +1084,145 @@ export class Superagent {
       tenantId === undefined ? this.scheduler.allViews(this.now()) : this.scheduler.views(tenantId);
     const intake = tenantId ? this.intakeMetrics(tenantId) : undefined;
     const decisions = tenantId ? pendingCards(this.escalateState(tenantId)) : undefined;
+    const pending = tenantId ? this.decisionsFor(tenantId).pending(tenantId) : [];
+    const citations = tenantId
+      ? snap.workers
+          .filter((row) => row.decisionEntryId)
+          .map((row) => ({ workerId: row.workerId, entryId: row.decisionEntryId as string }))
+      : [];
     return {
       ...snap,
       queue,
       ...(intake ? { intake } : {}),
       ...(decisions && decisions.length > 0 ? { decisions } : {}),
+      ...(pending.length > 0 ? { mustAskPending: pending } : {}),
+      ...(citations.length > 0 ? { decisionCitations: citations } : {}),
     };
+  }
+
+  decisionBook(): DecisionBook {
+    return this.decisions;
+  }
+
+  pendingMustAsks(tenantId: string) {
+    return this.decisionsFor(tenantId).pending(tenantId);
+  }
+
+  consultAction(
+    action: import('./types.js').ProposedAction,
+    tenantId: string,
+    repo?: string,
+    worker?: WorkerRecord,
+  ): BeforeAskResult {
+    return consultBeforeAsk({
+      book: this.decisionsFor(tenantId),
+      policy: this.mustAsk,
+      action,
+      tenantId,
+      repo,
+      worker,
+    });
+  }
+
+  recordHumanDecision(input: {
+    polarity: 'decided' | 'refused';
+    verbatim: string;
+    sourceEventId: string;
+    actor: { login: string; kind: import('./types.js').ActorKind };
+    scope: import('./decisions.js').DecisionScope;
+    at?: number;
+  }): { ok: true; entry: DecisionEntry } | { ok: false; reason: string } {
+    const at = input.at ?? this.now();
+    const recorded = this.decisionsFor(input.scope.tenantId).record({ ...input, at });
+    if (!recorded.ok) return recorded;
+    this.audit(input.scope.tenantId, null, DECISION_AUDIT_RECORDED, at, {
+      entry: JSON.stringify(recorded.entry),
+      entryId: recorded.entry.entryId,
+      polarity: recorded.entry.polarity,
+    });
+    return recorded;
+  }
+
+  revokeHumanDecision(
+    tenantId: string,
+    entryId: string,
+    actor: { login: string; kind: import('./types.js').ActorKind },
+    at?: number,
+  ): { ok: true; entry: DecisionEntry } | { ok: false; reason: string } {
+    const when = at ?? this.now();
+    const revoked = this.decisionsFor(tenantId).revoke(tenantId, entryId, actor, when);
+    if (!revoked.ok) return revoked;
+    this.audit(tenantId, null, DECISION_AUDIT_REVOKED, when, {
+      entryId,
+      at: when,
+    });
+    return revoked;
+  }
+
+  async resolveMustAsk(
+    tenantId: string,
+    pendingId: string,
+    option: 'accept' | 'reject',
+    input: { verbatim: string; actor: { login: string; kind: import('./types.js').ActorKind } },
+  ): Promise<
+    { ok: true; entry: DecisionEntry; workerId?: string } | { ok: false; reason: string }
+  > {
+    if (input.actor.kind !== 'user') return { ok: false, reason: 'human_only' };
+    const at = this.now();
+    const book = this.decisionsFor(tenantId);
+    const pending = book.pending(tenantId).find((row) => row.pendingId === pendingId);
+    if (!pending) return { ok: false, reason: 'unknown_pending' };
+    const recorded = book.record({
+      polarity: option === 'accept' ? 'decided' : 'refused',
+      verbatim: input.verbatim,
+      sourceEventId: pending.eventId,
+      actor: input.actor,
+      scope: {
+        tenantId,
+        ...(pending.repo ? { repo: pending.repo } : {}),
+        category: pending.category,
+        ...(pending.object ? { object: pending.object } : {}),
+        ...(pending.path ? { path: pending.path } : {}),
+        ...(pending.tags ? { tags: pending.tags } : {}),
+      },
+      at,
+    });
+    if (!recorded.ok) return recorded;
+    book.removePending(tenantId, pendingId);
+    this.audit(tenantId, pending.workerId ?? null, DECISION_AUDIT_RECORDED, at, {
+      entry: JSON.stringify(recorded.entry),
+      entryId: recorded.entry.entryId,
+      polarity: recorded.entry.polarity,
+      pendingId,
+    });
+    if (option !== 'accept' || pending.workerId) {
+      return {
+        ok: true,
+        entry: recorded.entry,
+        ...(pending.workerId ? { workerId: pending.workerId } : {}),
+      };
+    }
+    const event = this.store.event(tenantId, pending.eventId);
+    if (!event?.subject) return { ok: true, entry: recorded.entry };
+    if (this.store.liveWorkerBySubject(tenantId, event.subject.key)) {
+      return { ok: true, entry: recorded.entry };
+    }
+    const rule = pending.ruleId
+      ? this.rules.snapshot().rules.find((row) => row.id === pending.ruleId)
+      : undefined;
+    const repos = event.subject.repo ? [event.subject.repo] : [];
+    const mandate =
+      rule?.intensity === 'act' ? actMandate(repos, 'inferred') : observeMandate(repos, 'inferred');
+    const worker = await this.spawn(event, mandate, at, {
+      routeRule: ruleMeta(rule, event.subject.key),
+    });
+    this.store.enqueue(worker.workerId, event.eventId, at);
+    await this.drain(tenantId, worker.workerId);
+    this.audit(tenantId, worker.workerId, 'spawned', at, {
+      subject: event.subject.key,
+      from: 'must_ask',
+    });
+    return { ok: true, entry: recorded.entry, workerId: worker.workerId };
   }
 
   routerConfig(tenantId: string): TenantRouterConfig {
@@ -1048,9 +1485,87 @@ export class Superagent {
     return ids;
   }
 
+  async askWatchdog(tenantId: string, text: string): Promise<WatchdogAnswer> {
+    const intent = parseWatchdogText(text);
+    if (intent.kind === 'command') return commandRefusedAsk(intent);
+    const ctx = collectWatchdogContext({
+      store: this.store,
+      tenantId,
+      at: this.now(),
+      incidents: this.incidents,
+      snapshot: this.statusSnapshot(tenantId),
+      settings: this.watchdogSettings,
+    });
+    return answerWatchdog(intent, ctx, this.watchdogNarrator);
+  }
+
+  async instructWatchdog(tenantId: string, text: string): Promise<WatchdogAnswer> {
+    const intent = parseWatchdogText(text);
+    if (intent.kind !== 'command') return this.askWatchdog(tenantId, text);
+    const action = await this.applyWatchdogCommand(tenantId, intent.command, intent.workerId);
+    const after = await this.askWatchdog(
+      tenantId,
+      intent.workerId ? `why is worker ${intent.workerId} stuck` : 'what is everyone doing',
+    );
+    const citations = [...(intent.workerId ? [intent.workerId] : []), ...after.citations];
+    const textOut = `${formatWatchdogAnswer({ ...after, action, citations, intent })}`;
+    return { ...after, action, citations, intent, text: textOut };
+  }
+
+  async nudgeWorker(
+    tenantId: string,
+    workerId: string,
+    detail = 'owner instruct',
+  ): Promise<{ ok: true } | { ok: false; reason: string }> {
+    const worker = this.store.worker(tenantId, workerId);
+    if (!worker) return { ok: false, reason: 'worker_gone' };
+    await this.nudge(worker, this.now(), detail);
+    return { ok: true };
+  }
+
+  async cancel(
+    tenantId: string,
+    workerId: string,
+  ): Promise<{ ok: true } | { ok: false; reason: string }> {
+    const worker = this.store.worker(tenantId, workerId);
+    if (!worker) return { ok: false, reason: 'worker_gone' };
+    if (worker.state === 'retired' || worker.state === 'retiring') {
+      return { ok: false, reason: 'not_live' };
+    }
+    const at = this.now();
+    worker.cancelRequested = true;
+    worker.updatedAt = at;
+    this.store.putWorker(worker);
+    const event: NormalizedEvent = {
+      eventId: this.ids.event(),
+      tenantId,
+      source: 'internal',
+      type: 'user_cancel',
+      subject: worker.subject,
+      idempotencyKey: `cancel:${workerId}:${at}`,
+      actor: { login: 'owner', kind: 'user' },
+      occurredAt: at,
+      receivedAt: at,
+      summary: 'The owner cancelled the worker.',
+      fields: [['text', 'cancel']],
+      closesSubject: false,
+    };
+    this.store.putEvent(event);
+    this.store.enqueue(worker.workerId, event.eventId, at);
+    this.audit(tenantId, workerId, 'cancelled', at, { eventId: event.eventId });
+    if (this.draining.has(workerId)) {
+      await this.ackDuplexArrival(tenantId, workerId, event, at);
+      this.notifyDuplex(workerId);
+      return { ok: true };
+    }
+    await this.retire(worker, at, 'owner_cancel');
+    return { ok: true };
+  }
+
   async restore(): Promise<{ resumed: number }> {
     let resumed = 0;
-    for (const worker of this.store.allWorkers()) {
+    const live = this.store.allWorkers().sort(compareWorkerPriority);
+    for (const worker of live) {
       if (worker.state === 'spawning' || worker.state === 'running' || worker.state === 'waking') {
         await this.drain(worker.tenantId, worker.workerId);
         resumed += 1;
@@ -1074,6 +1589,8 @@ export class Superagent {
       },
       at,
     );
+    for (const found of findings) this.incidents.push(found);
+    if (this.incidents.length > 200) this.incidents.splice(0, this.incidents.length - 200);
     if (this.boxPool) await this.boxPool.tick(at);
     for (const found of findings) {
       if (
@@ -1158,6 +1675,14 @@ export class Superagent {
     };
     this.store.putEvent(grant);
     this.store.enqueue(worker.workerId, grant.eventId, at);
+    this.rememberApproval(
+      worker,
+      decided.approval.kind,
+      decided.approval.boundText,
+      'decided',
+      at,
+      grant.eventId,
+    );
     await this.drain(tenantId, worker.workerId);
     this.audit(tenantId, worker.workerId, 'approved', at, { approvalId });
     return { ok: true, workerId: worker.workerId };
@@ -1173,6 +1698,29 @@ export class Superagent {
     if (!decided.ok) return decided;
     const worker = this.store.worker(tenantId, decided.approval.workerId);
     if (!worker) return { ok: false, reason: 'worker_gone' };
+    this.rememberApproval(
+      worker,
+      decided.approval.kind,
+      decided.approval.boundText,
+      'refused',
+      at,
+      `approval:${approvalId}:denied`,
+    );
+    if (this.learning.enabled) {
+      this.recordLesson({
+        tenantId,
+        triggerEventId: this.putInternalEvent(worker, 'approval_denied', at, [
+          ['kind', decided.approval.kind],
+          ['boundText', decided.approval.boundText],
+        ]),
+        cause: 'approval_denied',
+        mistake: `Owner denied ${decided.approval.kind}: ${decided.approval.boundText}`,
+        correct: 'Ask before irreversible work; wait for an exact-text grant.',
+        scope: worker.subject.repo ?? 'tenant',
+        workerId: worker.workerId,
+        at,
+      });
+    }
     await this.retire(worker, at, 'approval_denied');
     this.audit(tenantId, worker.workerId, 'denied', at, { approvalId });
     return { ok: true, workerId: worker.workerId };
@@ -1204,6 +1752,18 @@ export class Superagent {
       sha: receipt.sha,
       verdict: receipt.verdict,
     });
+    if (receipt.verdict === 'BLOCK' && this.learning.enabled) {
+      this.recordLesson({
+        tenantId,
+        triggerEventId: worker.lastEventId ?? this.ids.event(),
+        cause: 'review_rejected',
+        mistake: receipt.summary,
+        correct: 'Address every BLOCK finding before proposing merge.',
+        scope: worker.subject.repo ?? 'tenant',
+        workerId,
+        at,
+      });
+    }
     return { ok: true, receipt };
   }
 
@@ -1296,8 +1856,186 @@ export class Superagent {
     return { ok: true, stale: freshness.stale, text };
   }
 
+  async acceptSpeculative(
+    tenantId: string,
+    workerId: string,
+  ): Promise<{ ok: true; workerId: string } | { ok: false; reason: string }> {
+    const worker = this.store.worker(tenantId, workerId);
+    if (!worker) return { ok: false, reason: 'worker_gone' };
+    if (!isUnacceptedSpeculative(worker) || !worker.speculative) {
+      return { ok: false, reason: 'not_speculative' };
+    }
+    const at = this.now();
+    const cost = snapshotSpeculativeCost(worker);
+    worker.speculative = {
+      ...worker.speculative,
+      status: 'accepted',
+      acceptedAt: at,
+      cost,
+    };
+    worker.updatedAt = at;
+    this.store.putWorker(worker);
+    const already = this.store
+      .liveSubscribers(tenantId, worker.subject.key)
+      .some((sub) => sub.workerId === worker.workerId);
+    if (!already) {
+      this.store.putSubscription({
+        subscriptionId: this.ids.subscription(),
+        tenantId,
+        subjectKey: worker.subject.key,
+        workerId: worker.workerId,
+        createdAt: at,
+        retiredAt: null,
+      });
+    }
+    this.audit(tenantId, workerId, 'speculative_accepted', at, {
+      trigger: worker.speculative.trigger,
+      tokens: cost.tokens,
+      usdMicros: cost.usdMicros,
+    });
+    return { ok: true, workerId };
+  }
+
+  async discardSpeculative(
+    tenantId: string,
+    workerId: string,
+  ): Promise<{ ok: true; workerId: string } | { ok: false; reason: string }> {
+    const worker = this.store.worker(tenantId, workerId);
+    if (!worker) return { ok: false, reason: 'worker_gone' };
+    if (!worker.speculative || worker.speculative.status === 'discarded') {
+      return { ok: false, reason: 'not_speculative' };
+    }
+    const at = this.now();
+    const cost = snapshotSpeculativeCost(worker);
+    worker.speculative = {
+      ...worker.speculative,
+      status: 'discarded',
+      discardedAt: at,
+      cost,
+    };
+    worker.updatedAt = at;
+    this.store.putWorker(worker);
+    if (this.speculativeCleanup) {
+      await this.speculativeCleanup.discard(worker);
+    } else if (worker.workspaceRef) {
+      worker.workspaceRef = null;
+    }
+    worker.sandboxRef = null;
+    await this.retire(worker, at, 'speculative_discarded');
+    this.audit(tenantId, workerId, 'speculative_discarded', at, {
+      trigger: worker.speculative.trigger,
+      tokens: cost.tokens,
+      usdMicros: cost.usdMicros,
+    });
+    return { ok: true, workerId };
+  }
+
+  createByomPairing(
+    tenantId: string,
+    options?: { allowShell?: boolean },
+  ): { ok: true; code: string; expiresAt: number } | { ok: false; reason: string } {
+    if (!this.byom) return { ok: false, reason: 'disabled' };
+    const out = this.byom.createPairing(tenantId, options);
+    if (out.ok && options?.allowShell) {
+      this.audit(tenantId, null, 'byom_allow_shell', this.now(), {
+        allowShell: true,
+        via: 'pairing',
+      });
+    }
+    return out;
+  }
+
+  async setByomAllowShell(
+    tenantId: string,
+    deviceId: string,
+    allowShell: boolean,
+  ): Promise<{ ok: true } | { ok: false; reason: string }> {
+    if (!this.byom) return { ok: false, reason: 'disabled' };
+    const device = this.byom.deviceOf(deviceId);
+    if (!device || device.tenantId !== tenantId) return { ok: false, reason: 'unknown_device' };
+    const out = this.byom.setAllowShell(deviceId, allowShell);
+    if (!out.ok) return out;
+    const at = this.now();
+    this.audit(tenantId, null, 'byom_allow_shell', at, { deviceId, allowShell });
+    for (const worker of this.store.workers(tenantId)) {
+      if (worker.retiredAt != null) continue;
+      if (worker.executionTarget?.id !== deviceId) continue;
+      worker.executionTarget = { ...worker.executionTarget, allowShell };
+      await this.recordProgress(
+        worker,
+        { activity: allowShell ? 'allowShell' : 'allowShell_off' },
+        at,
+      );
+    }
+    return { ok: true };
+  }
+
   close(): void {
     this.store.close();
+  }
+
+  private async considerSpeculative(
+    event: NormalizedEvent,
+    at: number,
+  ): Promise<IngestResult | undefined> {
+    if (!event.subject) return undefined;
+    const trigger = matchSpeculativeTrigger(event, this.speculativeSettings);
+    if (!trigger) return undefined;
+    const meter = this.metering.admit?.(event.tenantId) === 'stop';
+    if (event.type === 'ci_failed' || event.type === 'ci_passed') {
+      if (meter) return undefined;
+    } else {
+      const admission = admit(event, this.admission, meter);
+      if (!admission.ok) return undefined;
+    }
+    const existing = this.store
+      .workers(event.tenantId)
+      .find((row) => row.subject.key === event.subject?.key && isUnacceptedSpeculative(row));
+    if (existing) {
+      this.store.enqueue(existing.workerId, event.eventId, at);
+      await this.drain(event.tenantId, existing.workerId);
+      this.audit(event.tenantId, existing.workerId, 'speculative_passthrough', at, {
+        eventId: event.eventId,
+      });
+      return {
+        result: 'speculative',
+        eventId: event.eventId,
+        workerId: existing.workerId,
+        judgeCalls: 0,
+      };
+    }
+    const gate = admitSpeculative(
+      this.store,
+      event.tenantId,
+      event.subject.key,
+      this.speculativeSettings,
+      at,
+    );
+    if (!gate.ok) {
+      this.audit(event.tenantId, null, 'speculative_refused', at, { reason: gate.reason });
+      return undefined;
+    }
+    const repos = event.subject.repo ? [event.subject.repo] : [];
+    const worker = await this.spawn(event, speculativeMandate(repos), at, {
+      subscribe: false,
+      speculative: {
+        status: 'running',
+        trigger: trigger.kind,
+        priority: this.speculativeSettings.priority,
+      },
+    });
+    this.store.enqueue(worker.workerId, event.eventId, at);
+    await this.drain(event.tenantId, worker.workerId);
+    this.audit(event.tenantId, worker.workerId, 'speculative_started', at, {
+      trigger: trigger.kind,
+      subject: event.subject.key,
+    });
+    return {
+      result: 'speculative',
+      eventId: event.eventId,
+      workerId: worker.workerId,
+      judgeCalls: 0,
+    };
   }
 
   private async admitTenant(tenantId: string): Promise<string[]> {
@@ -1314,7 +2052,7 @@ export class Superagent {
         continue;
       }
       const at = this.now();
-      const worker = this.spawn(event, task.mandate, at);
+      const worker = await this.spawn(event, task.mandate, at);
       this.registerTicket(event, { taskId: task.taskId, workerId: worker.workerId });
       this.scheduler.markRunning(tenantId, task.taskId, worker.workerId);
       this.linkRecall(tenantId, {
@@ -1675,13 +2413,43 @@ export class Superagent {
     appendRecall(this.store, tenantId, link);
   }
 
-  private spawn(
+  private async spawn(
     event: NormalizedEvent,
     mandate: WorkerRecord['mandate'],
     at: number,
-  ): WorkerRecord {
+    extras: {
+      subscribe?: boolean;
+      speculative?: WorkerRecord['speculative'];
+      need?: ExecutionNeed;
+      routeRule?: WorkerRecord['routeRule'];
+    } = {},
+  ): Promise<WorkerRecord> {
     const subject = event.subject;
     if (!subject) throw new Error('Cannot spawn without a subject.');
+    const resolved = await this.targets.resolve({
+      tenantId: event.tenantId,
+      repo: subject.repo,
+      need: extras.need,
+    });
+    let sandboxRef = this.defaultSandboxRef;
+    let executionTarget: WorkerRecord['executionTarget'] = {
+      kind: 'instabox',
+      id: sandboxRef ?? undefined,
+    };
+    if (resolved.ok) {
+      executionTarget = { kind: resolved.target.kind, id: resolved.target.id };
+      if (resolved.target.kind === 'device') {
+        sandboxRef = resolved.target.id;
+        const device = this.byom?.deviceOf(resolved.target.id);
+        if (device?.allowShell) executionTarget.allowShell = true;
+      }
+    } else {
+      executionTarget = {
+        kind: resolved.kind ?? 'device',
+        waitReason: resolved.waitReason ?? resolved.reason,
+      };
+      sandboxRef = null;
+    }
     const worker: WorkerRecord = {
       workerId: this.ids.worker(),
       tenantId: event.tenantId,
@@ -1693,33 +2461,104 @@ export class Superagent {
       spills: [],
       plan: '',
       transcriptPointer: null,
-      sandboxRef: this.defaultSandboxRef,
+      sandboxRef,
       workspaceRef: null,
       lastEventId: null,
       lastProgressAt: at,
       lastHeartbeatAt: at,
       lastStepSignature: null,
       stepRepeats: 0,
+      seenEventIds: [],
       progress: startProgress(at),
+      executionTarget,
+      speculative: extras.speculative,
+      ...(extras.routeRule ? { routeRule: extras.routeRule } : {}),
       usage: emptyUsage(),
       evidence: [],
       createdAt: at,
       updatedAt: at,
       retiredAt: null,
     };
+    if (this.learning.enabled) this.injectLessons(worker);
     this.store.putWorker(worker);
-    this.store.putSubscription({
-      subscriptionId: this.ids.subscription(),
-      tenantId: event.tenantId,
-      subjectKey: subject.key,
-      workerId: worker.workerId,
-      createdAt: at,
-      retiredAt: null,
-    });
+    if (extras.subscribe !== false) {
+      this.store.putSubscription({
+        subscriptionId: this.ids.subscription(),
+        tenantId: event.tenantId,
+        subjectKey: subject.key,
+        workerId: worker.workerId,
+        createdAt: at,
+        retiredAt: null,
+      });
+    }
+    if (executionTarget.waitReason) {
+      await this.recordProgress(
+        worker,
+        {
+          waiting: { kind: 'human', detail: executionTarget.waitReason },
+          activity: executionTarget.waitReason,
+        },
+        at,
+      );
+    } else if (executionTarget.allowShell) {
+      await this.recordProgress(worker, { activity: 'allowShell' }, at);
+    }
     return worker;
   }
 
+  private async applyWatchdogCommand(
+    tenantId: string,
+    command: WatchdogActionResult['kind'],
+    workerId?: string,
+  ): Promise<WatchdogActionResult> {
+    if (command !== 'stuck_check' && !workerId) {
+      return { kind: command, ok: false, reason: 'worker_required' };
+    }
+    if (command === 'nudge' && workerId) {
+      const nudged = await this.nudgeWorker(tenantId, workerId);
+      return { kind: 'nudge', workerId, ...nudged };
+    }
+    if (command === 'pause' && workerId) {
+      const paused = await this.pause(tenantId, workerId);
+      return { kind: 'pause', workerId, ...paused };
+    }
+    if (command === 'resume' && workerId) {
+      const resumed = await this.resume(tenantId, workerId);
+      return { kind: 'resume', workerId, ...resumed };
+    }
+    if (command === 'cancel' && workerId) {
+      const cancelled = await this.cancel(tenantId, workerId);
+      return { kind: 'cancel', workerId, ...cancelled };
+    }
+    const findings = await this.tick();
+    const scoped = workerId ? findings.filter((row) => row.workerId === workerId) : findings;
+    return {
+      kind: 'stuck_check',
+      ...(workerId ? { workerId } : {}),
+      ok: true,
+      reason: scoped.length > 0 ? scoped.map((row) => row.rule).join(',') : 'clear',
+    };
+  }
+
   private async drain(tenantId: string, workerId: string): Promise<void> {
+    if (this.draining.has(workerId)) {
+      const worker = this.store.worker(tenantId, workerId);
+      const pending = this.store.inbox(workerId).filter((item) => item.consumedAt === null);
+      const last = pending[pending.length - 1];
+      const event = last && worker ? this.store.event(tenantId, last.eventId) : undefined;
+      if (worker && event) await this.ackDuplexArrival(tenantId, workerId, event, this.now());
+      this.notifyDuplex(workerId);
+      return;
+    }
+    this.draining.add(workerId);
+    try {
+      await this.drainBody(tenantId, workerId);
+    } finally {
+      this.draining.delete(workerId);
+    }
+  }
+
+  private async drainBody(tenantId: string, workerId: string): Promise<void> {
     const worker = this.store.worker(tenantId, workerId);
     if (!worker) return;
     if (worker.state === 'retired' || worker.state === 'retiring') return;
@@ -1738,7 +2577,13 @@ export class Superagent {
       return;
     }
 
-    await this.wakeBox(worker);
+    const woke = await this.wakeBox(worker);
+    if (woke === 'wait') {
+      worker.state = 'waking';
+      worker.updatedAt = this.now();
+      this.store.putWorker(worker);
+      return;
+    }
     setState(worker, 'running');
     const items: typeof pending = [];
     const events: NormalizedEvent[] = [];
@@ -1774,10 +2619,16 @@ export class Superagent {
 
     const event = coalesceInbox(events);
     worker.lastEventId = event.eventId;
+    if (this.learning.enabled) this.noteBounce(worker, event, at);
     try {
       const result = await this.handler.handle(this.context(worker, event), event);
       const halt = await this.applyResult(worker, result, at);
       for (const item of items) this.store.consume(workerId, item.seq, at);
+      const live = this.store.worker(tenantId, workerId);
+      if (live?.cancelRequested) {
+        await this.retire(live, at, 'owner_cancel');
+        return;
+      }
       if (halt) {
         if (worker.retiredAt == null) this.store.putWorker(worker);
         return;
@@ -1803,9 +2654,14 @@ export class Superagent {
     at: number,
   ): Promise<boolean> {
     if (result.memory !== undefined) {
-      const spilled = spillMemory(result.memory, worker.spills ?? [], at);
+      const body = stripLessonPrefix(worker.lessonPrefix, result.memory);
+      const spilled = spillMemory(body, worker.spills ?? [], at);
       worker.memory = spilled.inline;
       worker.spills = spilled.spills;
+      if (this.learning.enabled) {
+        const pushed = /(?:^|\s)pushed ([0-9a-f]{7,40})\b/i.exec(result.memory);
+        if (pushed?.[1]) worker.lastPushSha = pushed[1];
+      }
     }
     if (result.plan !== undefined) worker.plan = result.plan;
     if (result.progressUpdate) await this.recordProgress(worker, result.progressUpdate, at);
@@ -1889,6 +2745,13 @@ export class Superagent {
         },
       );
       if (verified.ok) {
+        if (this.releaseVerify.enabled) {
+          const release = await this.confirmRelease(worker, result.done, at);
+          if (!release.complete) {
+            this.escalateRelease(worker, at, release.record.reason);
+            return true;
+          }
+        }
         await this.retire(worker, at, 'done_verified');
         return true;
       }
@@ -1904,36 +2767,10 @@ export class Superagent {
       }
     }
     if (result.action) {
-      const gate = this.safety.gate(worker, result.action, at);
-      if (!gate.allowed && gate.reason === 'intensity_observe') {
-        this.audit(worker.tenantId, worker.workerId, 'action_refused', at, {
-          kind: result.action.kind,
-          reason: 'intensity_observe',
-        });
-      } else if (!gate.allowed && gate.reason === 'review_required') {
-        this.audit(worker.tenantId, worker.workerId, 'action_refused', at, {
-          kind: result.action.kind,
-          reason: 'review_required',
-        });
-      } else if (!gate.allowed && gate.reason === 'held') {
-        worker.state = 'awaiting_approval';
-        this.audit(worker.tenantId, worker.workerId, 'awaiting_approval', at, {
-          approvalId: gate.approvalId,
-          kind: result.action.kind,
-        });
-        await this.recordProgress(
-          worker,
-          {
-            phase: result.action.kind === 'merge' ? 'merge-held' : worker.progress?.phase,
-            waiting: { kind: 'human', detail: result.action.kind },
-            activity: `held ${result.action.kind}`,
-          },
-          at,
-        );
-        worker.lastHeartbeatAt = at;
-        return true;
-      }
+      const halt = await this.applyAction(worker, result.action, at);
+      if (halt) return true;
     }
+    markSpeculativeReady(worker);
     worker.lastHeartbeatAt = at;
     return false;
   }
@@ -1965,6 +2802,7 @@ export class Superagent {
     this.audit(current.tenantId, current.workerId, 'restart', at, {
       generation: current.generation,
     });
+    this.recordWatchdogLesson(current, 'restart', 'Watchdog restarted the worker.', at);
     await this.drain(current.tenantId, current.workerId);
   }
 
@@ -2001,6 +2839,7 @@ export class Superagent {
     worker.updatedAt = at;
     this.store.putWorker(current);
     this.audit(current.tenantId, current.workerId, 'stopped', at, { reason });
+    this.recordWatchdogLesson(current, 'stop', reason, at);
   }
 
   private async nudge(worker: WorkerRecord, at: number, detail: string): Promise<void> {
@@ -2029,6 +2868,18 @@ export class Superagent {
       nudges: current.nudges,
       detail,
     });
+    if (this.learning.enabled) {
+      this.recordLesson({
+        tenantId: current.tenantId,
+        triggerEventId: event.eventId,
+        cause: 'watchdog_correct',
+        mistake: `Watchdog nudged: ${detail}`,
+        correct: 'Make visible progress or declare a wait (CI/review/human).',
+        scope: current.subject.repo ?? 'tenant',
+        workerId: current.workerId,
+        at,
+      });
+    }
   }
 
   private markStuck(worker: WorkerRecord, at: number): void {
@@ -2038,6 +2889,7 @@ export class Superagent {
     current.updatedAt = at;
     this.store.putWorker(current);
     this.audit(current.tenantId, current.workerId, 'stuck', at, {});
+    this.recordWatchdogLesson(current, 'escalate', 'Watchdog marked the worker stuck.', at);
   }
 
   private async collectReview(
@@ -2061,6 +2913,18 @@ export class Superagent {
       sha: receipt.sha,
       verdict: receipt.verdict,
     });
+    if (receipt.verdict === 'BLOCK' && this.learning.enabled) {
+      this.recordLesson({
+        tenantId: worker.tenantId,
+        triggerEventId: worker.lastEventId ?? this.ids.event(),
+        cause: 'review_rejected',
+        mistake: receipt.summary,
+        correct: 'Address every BLOCK finding before proposing merge.',
+        scope: worker.subject.repo ?? 'tenant',
+        workerId: worker.workerId,
+        at,
+      });
+    }
   }
 
   private async readLive(worker: WorkerRecord, at: number): Promise<LiveFacts> {
@@ -2077,13 +2941,29 @@ export class Superagent {
     return { sha, ci: extra.ci, prMerged, at };
   }
 
+  private sandboxFor(worker: WorkerRecord): SandboxPort {
+    if (worker.executionTarget?.kind === 'device' && worker.executionTarget.id && this.byom) {
+      return this.byom.sandboxFor(
+        worker.executionTarget.id,
+        worker.tenantId,
+        worker.workerId,
+        worker.subject.repo,
+      );
+    }
+    return this.sandbox;
+  }
+
   private context(worker: WorkerRecord, event: NormalizedEvent): WorkerContext {
     return {
       worker: { ...worker },
       event,
-      sandbox: this.sandbox,
+      sandbox: this.sandboxFor(worker),
       orgSecrets: this.orgSecrets,
-      recall: () => recallMemory(worker),
+      recall: () => recallWithLessons(worker, recallMemory),
+      recallLesson: (lessonId) => this.recallLesson(worker.tenantId, lessonId),
+      peerReview: this.peerReview.enabled
+        ? (input) => this.reviewBeforePublish(worker, input)
+        : undefined,
       reportProgress: async (patch) => {
         const live = this.store.worker(worker.tenantId, worker.workerId);
         if (!live) return;
@@ -2092,7 +2972,53 @@ export class Superagent {
         worker.lastHeartbeatAt = live.lastHeartbeatAt;
         worker.lastProgressAt = live.lastProgressAt;
       },
+      pollInbox: () => this.pollDuplexInbox(worker.tenantId, worker.workerId),
+      ackInbox: (eventIds) => this.ackDuplexInbox(worker, eventIds),
     };
+  }
+
+  private pollDuplexInbox(tenantId: string, workerId: string): NormalizedEvent[] {
+    const live = this.store.worker(tenantId, workerId);
+    const seen = new Set(live?.seenEventIds ?? []);
+    const out: NormalizedEvent[] = [];
+    for (const item of this.store.inbox(workerId)) {
+      if (item.consumedAt !== null || seen.has(item.eventId)) continue;
+      const event = this.store.event(tenantId, item.eventId);
+      if (event) out.push(event);
+    }
+    return out.sort((a, b) => a.receivedAt - b.receivedAt || a.eventId.localeCompare(b.eventId));
+  }
+
+  private ackDuplexInbox(worker: WorkerRecord, eventIds: string[]): void {
+    const live = this.store.worker(worker.tenantId, worker.workerId);
+    if (!live) return;
+    const at = this.now();
+    const seen = new Set(live.seenEventIds ?? []);
+    for (const item of this.store.inbox(worker.workerId)) {
+      if (!eventIds.includes(item.eventId) || item.consumedAt !== null) continue;
+      this.store.consume(worker.workerId, item.seq, at);
+      seen.add(item.eventId);
+    }
+    live.seenEventIds = rememberEventIds([...seen], eventIds);
+    live.updatedAt = at;
+    this.store.putWorker(live);
+    worker.seenEventIds = live.seenEventIds;
+  }
+
+  private async ackDuplexArrival(
+    tenantId: string,
+    workerId: string,
+    event: NormalizedEvent,
+    at: number,
+  ): Promise<void> {
+    const worker = this.store.worker(tenantId, workerId);
+    if (!worker) return;
+    await this.recordProgress(worker, { activity: DUPLEX_ACK }, at);
+    this.audit(tenantId, workerId, 'duplex_ack', at, { eventId: event.eventId });
+  }
+
+  private notifyDuplex(workerId: string): void {
+    for (const wake of this.duplexWaiters.get(workerId) ?? []) wake();
   }
 
   private progressView(worker: WorkerRecord, at: number) {
@@ -2186,7 +3112,18 @@ export class Superagent {
     });
   }
 
-  private async wakeBox(worker: WorkerRecord): Promise<void> {
+  private async wakeBox(worker: WorkerRecord): Promise<'ready' | 'wait'> {
+    if (worker.executionTarget?.waitReason === 'device_offline') {
+      await this.recordProgress(
+        worker,
+        {
+          waiting: { kind: 'human', detail: 'device_offline' },
+          activity: 'waiting for paired device',
+        },
+        this.now(),
+      );
+      return 'wait';
+    }
     if (this.boxPool) {
       try {
         setState(worker, 'waking');
@@ -2202,16 +3139,61 @@ export class Superagent {
           message: error instanceof Error ? error.message : 'shared box wake',
         });
       }
-      return;
+      return 'ready';
     }
-    if (!worker.sandboxRef) return;
+    if (!worker.sandboxRef) return 'ready';
+    const box = this.sandboxFor(worker);
     try {
-      await this.sandbox.ensureRunning(worker.sandboxRef);
+      const machine = await box.getMachine(worker.sandboxRef);
+      if (machine.state === 'offline') {
+        worker.executionTarget = {
+          kind: worker.executionTarget?.kind ?? 'device',
+          id: worker.sandboxRef,
+          waitReason: 'device_offline',
+          allowShell: worker.executionTarget?.allowShell,
+        };
+        await this.recordProgress(
+          worker,
+          {
+            waiting: { kind: 'human', detail: 'device_offline' },
+            activity: 'waiting for paired device',
+          },
+          this.now(),
+        );
+        this.store.putWorker(worker);
+        this.audit(worker.tenantId, worker.workerId, 'device_offline', this.now(), {
+          deviceId: worker.sandboxRef,
+        });
+        return 'wait';
+      }
+      await box.ensureRunning(worker.sandboxRef);
     } catch (error) {
+      if (error instanceof DeviceOfflineError) {
+        worker.executionTarget = {
+          kind: 'device',
+          id: worker.sandboxRef,
+          waitReason: 'device_offline',
+          allowShell: worker.executionTarget?.allowShell,
+        };
+        await this.recordProgress(
+          worker,
+          {
+            waiting: { kind: 'human', detail: 'device_offline' },
+            activity: 'waiting for paired device',
+          },
+          this.now(),
+        );
+        this.store.putWorker(worker);
+        this.audit(worker.tenantId, worker.workerId, 'device_offline', this.now(), {
+          deviceId: worker.sandboxRef,
+        });
+        return 'wait';
+      }
       this.audit(worker.tenantId, worker.workerId, 'sandbox_wake_failed', this.now(), {
         message: error instanceof Error ? error.message : 'ensureRunning',
       });
     }
+    return 'ready';
   }
 
   private async suspendBox(worker: WorkerRecord): Promise<void> {
@@ -2227,6 +3209,581 @@ export class Superagent {
         message: error instanceof Error ? error.message : 'suspend',
       });
     }
+  }
+
+  private async tryRules(event: NormalizedEvent, at: number): Promise<IngestResult | undefined> {
+    const reload = this.rules.maybeReload(at);
+    if (reload === 'kept_previous' && this.rules.lastError) {
+      this.audit(event.tenantId, null, 'rules_invalid', at, {
+        message: this.rules.lastError.message,
+      });
+    }
+    const envelope = envelopeOf(event);
+    const rule = this.rules.match(envelope);
+    if (!rule) return undefined;
+    const hit = this.decisionsFor(event.tenantId).recordRuleHit({
+      tenantId: event.tenantId,
+      repo: event.subject?.repo,
+      ruleId: rule.id,
+      eventId: event.eventId,
+      at,
+    });
+    this.audit(event.tenantId, null, RULE_MATCHED_AUDIT, at, {
+      ruleId: rule.id,
+      eventId: event.eventId,
+      hitId: hit.hitId,
+      ...(event.subject?.repo ? { repo: event.subject.repo } : {}),
+    });
+    const conc = applyConcurrency(rule, envelope, this.store.workers(event.tenantId));
+    if (!conc.ok) {
+      this.audit(event.tenantId, null, 'filtered', at, { reason: conc.reason, ruleId: rule.id });
+      return { result: 'ignored', reason: conc.reason, eventId: event.eventId, judgeCalls: 0 };
+    }
+    if (rule.notifyHuman === 'always') {
+      const pending = this.decisionsFor(event.tenantId).addPending({
+        tenantId: event.tenantId,
+        eventId: event.eventId,
+        category: 'rule_notify',
+        boundText: event.summary,
+        repo: event.subject?.repo,
+        object: envelope.object.id,
+        threadId: event.subject?.key,
+        ruleId: rule.id,
+        at,
+      });
+      this.audit(event.tenantId, null, 'must_ask', at, {
+        pendingId: pending.pendingId,
+        ruleId: rule.id,
+        category: 'rule_notify',
+      });
+      return {
+        result: 'must_ask',
+        eventId: event.eventId,
+        pendingId: pending.pendingId,
+        category: 'rule_notify',
+        judgeCalls: 0,
+      };
+    }
+    const existing = this.store.liveWorkerBySubject(event.tenantId, event.subject?.key ?? '');
+    if (existing) {
+      return { result: 'ignored', reason: 'already_owned', eventId: event.eventId, judgeCalls: 0 };
+    }
+    const boxedLive = this.store
+      .allWorkers()
+      .filter((row) => isLiveState(row.state) && row.sandboxRef).length;
+    const spawnGate = admitSpawn({
+      boxedLive,
+      wouldBox: Boolean(this.defaultSandboxRef),
+      tenantUsdMicros: this.store.tenantUsage(event.tenantId).usdMicros,
+      policy: this.admission,
+    });
+    if (!spawnGate.ok) {
+      this.audit(event.tenantId, null, 'filtered', at, {
+        reason: spawnGate.reason,
+        ruleId: rule.id,
+      });
+      return {
+        result: 'ignored',
+        reason: spawnGate.reason,
+        eventId: event.eventId,
+        judgeCalls: 0,
+      };
+    }
+    if (!event.subject) {
+      return { result: 'ignored', reason: 'no_subject', eventId: event.eventId, judgeCalls: 0 };
+    }
+    const repos = event.subject.repo ? [event.subject.repo] : [];
+    const mandate =
+      rule.intensity === 'act' ? actMandate(repos, 'inferred') : observeMandate(repos, 'inferred');
+    const worker = await this.spawn(event, mandate, at, {
+      routeRule: ruleMeta(rule, envelope.object.id),
+    });
+    this.store.enqueue(worker.workerId, event.eventId, at);
+    await this.drain(event.tenantId, worker.workerId);
+    this.audit(event.tenantId, worker.workerId, 'spawned', at, {
+      subject: event.subject.key,
+      ruleId: rule.id,
+    });
+    return {
+      result: 'spawned',
+      eventId: event.eventId,
+      workerId: worker.workerId,
+      judgeCalls: 0,
+    };
+  }
+
+  private async applyAction(
+    worker: WorkerRecord,
+    action: import('./types.js').ProposedAction,
+    at: number,
+  ): Promise<boolean> {
+    const blocked = mandateBlocks(worker, action);
+    if (blocked === 'intensity_observe' || blocked === 'review_required') {
+      this.audit(worker.tenantId, worker.workerId, 'action_refused', at, {
+        kind: action.kind,
+        reason: blocked,
+      });
+      return false;
+    }
+    if (speculativeBlocksOutbound(worker, action)) {
+      this.audit(worker.tenantId, worker.workerId, 'action_refused', at, {
+        kind: action.kind,
+        reason: 'speculative_blocked',
+      });
+      return false;
+    }
+    const verdict = consultBeforeAsk({
+      book: this.decisionsFor(worker.tenantId),
+      policy: this.mustAsk,
+      action,
+      tenantId: worker.tenantId,
+      repo: worker.subject.repo,
+      worker,
+    });
+    if (verdict.kind === 'apply_decided') {
+      this.audit(worker.tenantId, worker.workerId, DECISION_AUDIT_APPLIED, at, {
+        entryId: verdict.entry.entryId,
+        polarity: 'decided',
+        kind: action.kind,
+      });
+      await this.recordProgress(
+        worker,
+        { activity: `followed decision ${verdict.entry.entryId}` },
+        at,
+      );
+      return false;
+    }
+    if (verdict.kind === 'apply_refused') {
+      this.audit(worker.tenantId, worker.workerId, 'action_refused', at, {
+        kind: action.kind,
+        reason: 'decision_refused',
+        entryId: verdict.entry.entryId,
+      });
+      await this.recordProgress(
+        worker,
+        { activity: `followed decision ${verdict.entry.entryId}` },
+        at,
+      );
+      return false;
+    }
+    const actionForGate =
+      verdict.kind === 'must_ask' && !isRisky(action.kind)
+        ? { ...action, kind: 'other_irreversible' as const }
+        : action;
+    const gate = this.safety.gate(worker, actionForGate, at);
+    if (!gate.allowed && gate.reason === 'intensity_observe') {
+      this.audit(worker.tenantId, worker.workerId, 'action_refused', at, {
+        kind: action.kind,
+        reason: 'intensity_observe',
+      });
+      return false;
+    }
+    if (!gate.allowed && gate.reason === 'review_required') {
+      this.audit(worker.tenantId, worker.workerId, 'action_refused', at, {
+        kind: action.kind,
+        reason: 'review_required',
+      });
+      return false;
+    }
+    if (!gate.allowed && gate.reason === 'held') {
+      if (verdict.kind === 'must_ask') {
+        this.decisionsFor(worker.tenantId).addPending({
+          tenantId: worker.tenantId,
+          eventId: worker.lastEventId ?? '',
+          workerId: worker.workerId,
+          approvalId: gate.approvalId,
+          category: verdict.category,
+          boundText: action.boundText,
+          repo: worker.subject.repo,
+          object: action.object ?? worker.subject.key,
+          path: action.path,
+          tags: action.tags,
+          threadId: worker.subject.key,
+          at,
+        });
+      }
+      worker.state = 'awaiting_approval';
+      this.audit(worker.tenantId, worker.workerId, 'awaiting_approval', at, {
+        approvalId: gate.approvalId,
+        kind: action.kind,
+        ...(verdict.kind === 'must_ask' ? { mustAsk: verdict.category } : {}),
+        ...(verdict.kind === 'must_ask' && verdict.hints?.[0]
+          ? { hint: verdict.hints[0].entryId }
+          : {}),
+      });
+      const hintId =
+        verdict.kind === 'must_ask' && verdict.hints?.[0] ? verdict.hints[0].entryId : undefined;
+      await this.recordProgress(
+        worker,
+        {
+          phase: action.kind === 'merge' ? 'merge-held' : worker.progress?.phase,
+          waiting: {
+            kind: 'human',
+            detail: action.kind,
+            ...(hintId ? { decisionEntryId: hintId } : {}),
+          },
+          activity: `held ${action.kind}`,
+        },
+        at,
+      );
+      worker.lastHeartbeatAt = at;
+      return true;
+    }
+    return false;
+  }
+
+  private rememberApproval(
+    worker: WorkerRecord,
+    kind: import('./types.js').ApprovalKind,
+    boundText: string,
+    polarity: 'decided' | 'refused',
+    at: number,
+    sourceEventId: string,
+  ): void {
+    const recorded = this.decisionsFor(worker.tenantId).record({
+      polarity,
+      verbatim: boundText,
+      sourceEventId,
+      actor: { login: 'owner', kind: 'user' },
+      scope: {
+        tenantId: worker.tenantId,
+        ...(worker.subject.repo ? { repo: worker.subject.repo } : {}),
+        category: categoryFromApproval(kind, boundText),
+        object: worker.subject.key,
+      },
+      at,
+    });
+    if (!recorded.ok) return;
+    this.audit(worker.tenantId, worker.workerId, DECISION_AUDIT_RECORDED, at, {
+      entry: JSON.stringify(recorded.entry),
+      entryId: recorded.entry.entryId,
+      polarity,
+    });
+  }
+
+  private decisionsFor(tenantId: string): DecisionBook {
+    if (!this.hydratedTenants.has(tenantId)) {
+      this.decisions.hydrateFromAudit(this.store.audit(tenantId));
+      this.hydratedTenants.add(tenantId);
+    }
+    return this.decisions;
+  }
+
+  private hydrateLessons(tenantId: string): void {
+    if (this.lessonsBook.hydrated(tenantId)) return;
+    this.lessonsBook.loadFromAudit(this.store.audit(tenantId));
+    this.lessonsBook.markHydrated(tenantId);
+  }
+
+  private injectLessons(worker: WorkerRecord): void {
+    this.hydrateLessons(worker.tenantId);
+    const accepted = this.lessonsBook.acceptedFor(worker.tenantId, worker.subject.repo);
+    const { prefix } = formatLessonPrefix(accepted, this.learning.injectBudget);
+    if (!prefix) return;
+    worker.lessonPrefix = prefix;
+    worker.lessonRefs = accepted.map((row) => row.lessonId);
+  }
+
+  private noteBounce(worker: WorkerRecord, event: NormalizedEvent, at: number): void {
+    const review = reviewBounceOf(event);
+    if (review) {
+      this.recordLesson({
+        tenantId: worker.tenantId,
+        triggerEventId: event.eventId,
+        cause: review,
+        mistake: fieldLabel(event, 'comment') || event.summary,
+        correct: 'Address the review findings before pushing again.',
+        scope: worker.subject.repo ?? 'tenant',
+        workerId: worker.workerId,
+        at,
+      });
+      return;
+    }
+    if (event.type === 'ci_failed' && (worker.lastPushSha || /pushed /i.test(worker.memory))) {
+      worker.ciFailedEventId = event.eventId;
+      return;
+    }
+    if (event.type === 'ci_passed' && worker.ciFailedEventId) {
+      this.recordLesson({
+        tenantId: worker.tenantId,
+        triggerEventId: worker.ciFailedEventId,
+        cause: 'ci_failed_then_fixed',
+        mistake: `CI failed after push ${worker.lastPushSha ?? ''}`.trim(),
+        correct: fieldLabel(event, 'sha')
+          ? `Landed a fix that made CI pass at ${fieldLabel(event, 'sha')}.`
+          : 'Re-run the repo tests on the box before pushing.',
+        scope: worker.subject.repo ?? 'tenant',
+        workerId: worker.workerId,
+        at,
+      });
+      worker.ciFailedEventId = null;
+    }
+  }
+
+  private recordWatchdogLesson(
+    worker: WorkerRecord,
+    action: string,
+    detail: string,
+    at: number,
+  ): void {
+    if (!this.learning.enabled || !isWatchdogCorrectAction(action)) return;
+    this.recordLesson({
+      tenantId: worker.tenantId,
+      triggerEventId: this.putInternalEvent(worker, 'watchdog_correct', at, [
+        ['action', action],
+        ['detail', detail],
+      ]),
+      cause: 'watchdog_correct',
+      mistake: `Watchdog ${action}: ${detail}`,
+      correct: 'Keep a heartbeat, declare waits, and stay inside the mandate budget.',
+      scope: worker.subject.repo ?? 'tenant',
+      workerId: worker.workerId,
+      at,
+    });
+  }
+
+  private recordLesson(draft: Parameters<LessonBook['record']>[0]): LessonRecord | undefined {
+    if (!this.learning.enabled) return undefined;
+    this.hydrateLessons(draft.tenantId);
+    const lesson = this.lessonsBook.record(draft, this.learning.scrub);
+    const already = this.store
+      .audit(draft.tenantId)
+      .some(
+        (row) =>
+          row.kind === 'lesson_recorded' && row.detail.triggerEventId === draft.triggerEventId,
+      );
+    if (!already) {
+      this.audit(draft.tenantId, draft.workerId ?? null, 'lesson_recorded', draft.at, {
+        ...lessonAuditDetail(lesson),
+      });
+    }
+    if (
+      this.learning.distillAfter > 0 &&
+      this.lessonsBook.recordedCount(draft.tenantId) % this.learning.distillAfter === 0
+    ) {
+      this.distillLessons(draft.tenantId, draft.scope || 'tenant');
+    }
+    return lesson;
+  }
+
+  private putInternalEvent(
+    worker: WorkerRecord,
+    type: string,
+    at: number,
+    fields: Array<[string, string]>,
+  ): string {
+    const eventId = this.ids.event();
+    this.store.putEvent({
+      eventId,
+      tenantId: worker.tenantId,
+      source: 'internal',
+      type,
+      subject: worker.subject,
+      idempotencyKey: `${type}:${worker.workerId}:${eventId}`,
+      actor: { login: 'system', kind: 'system' },
+      occurredAt: at,
+      receivedAt: at,
+      summary: type.replaceAll('_', ' '),
+      fields,
+      closesSubject: false,
+    });
+    return eventId;
+  }
+
+  private async reviewBeforePublish(
+    worker: WorkerRecord,
+    input: PeerReviewInput,
+  ): Promise<PeerReviewOutcome> {
+    const live = this.store.worker(worker.tenantId, worker.workerId) ?? worker;
+    const at = this.now();
+    const outcome = await runPeerReview({
+      settings: this.peerReview,
+      diff: input.diff,
+      repo: input.repo ?? live.subject.repo,
+      currentRounds: live.peerReviewRounds ?? 0,
+    });
+    if (outcome.usage && !outcome.skipped) {
+      this.chargeUsage(live, outcome.usage, at);
+      worker.usage = live.usage;
+    }
+    const stats = mergePeerReviewStats(live.peerReviewStats, outcome, live.usage.tokens);
+    live.peerReviewStats = stats;
+    worker.peerReviewStats = stats;
+    if (outcome.skipped) {
+      this.store.putWorker(live);
+      this.audit(live.tenantId, live.workerId, 'peer_review_skipped', at, {
+        reason: outcome.skipped,
+      });
+      return outcome;
+    }
+    live.peerReviewRounds = outcome.rounds;
+    worker.peerReviewRounds = outcome.rounds;
+    this.store.putWorker(live);
+    this.audit(live.tenantId, live.workerId, 'peer_review', at, {
+      severity: outcome.severity,
+      waiting: outcome.waiting,
+      rounds: outcome.rounds,
+      tokens: outcome.usage?.tokens ?? 0,
+      usdMicros: outcome.usage?.usdMicros ?? 0,
+      wallMs: stats.wallMs,
+      tokenShare: stats.tokenShare,
+      issuesReported: stats.issuesReported,
+      issuesFixed: stats.issuesFixed,
+      discardedStyle: outcome.discardedStyle.length,
+      write: false,
+      network: false,
+      secrets: false,
+    });
+    if (outcome.severity === 'block' && this.learning.enabled) {
+      this.recordLesson({
+        tenantId: live.tenantId,
+        triggerEventId: this.putInternalEvent(live, 'peer_review_block', at, [
+          ['severity', outcome.severity],
+          ['feedback', outcome.feedback.slice(0, 400)],
+        ]),
+        cause: 'peer_review',
+        mistake: outcome.feedback,
+        correct: outcome.correct ?? 'Fix blocking peer-review findings before push.',
+        scope: live.subject.repo ?? input.repo ?? 'tenant',
+        workerId: live.workerId,
+        at,
+      });
+    }
+    return outcome;
+  }
+
+  async runSweep(tenantId: string, repo?: string): Promise<SweepResult> {
+    const at = this.now();
+    const since = at - this.sweep.windowMs;
+    const result = await runSweep({
+      settings: this.sweep,
+      tenantId,
+      repo,
+      since,
+      at,
+    });
+    this.audit(tenantId, null, result.pr ? 'sweep_opened' : 'sweep_skipped', at, {
+      skipped: result.skipped ?? '',
+      findings: result.findings.length,
+      pr: result.pr?.number ?? 0,
+      branch: result.pr?.branch ?? '',
+    });
+    return result;
+  }
+
+  private async confirmRelease(
+    worker: WorkerRecord,
+    claim: DoneClaim,
+    at: number,
+  ): Promise<import('./release-verify.js').ReleaseVerifyResult> {
+    const mergeSha = await this.mergeShaOf(worker, claim);
+    if (mergeSha) worker.mergeSha = mergeSha;
+    const result =
+      !mergeSha && !looksLikeRelease(claim)
+        ? {
+            complete: true,
+            escalate: false,
+            record: {
+              status: 'skipped' as const,
+              reason: 'no release to verify',
+              wallMs: 0,
+              at,
+              url: this.releaseVerify.versionUrl,
+            },
+          }
+        : await verifyRelease({
+            settings: this.releaseVerify,
+            mergeSha,
+            now: this.now,
+          });
+    worker.releaseVerify = result.record;
+    this.store.putWorker(worker);
+    this.audit(worker.tenantId, worker.workerId, 'release_verify', at, {
+      status: result.record.status,
+      reason: result.record.reason,
+      wallMs: result.record.wallMs,
+      sha: result.record.sha ?? '',
+      seen: result.record.seen ?? '',
+    });
+    if (result.record.wallMs > 0) {
+      this.chargeUsage(worker, { wallMs: result.record.wallMs }, at);
+    }
+    await this.recordProgress(
+      worker,
+      {
+        activity: `release-verify ${result.record.status}: ${result.record.reason}`,
+      },
+      at,
+    );
+    return result;
+  }
+
+  private async mergeShaOf(worker: WorkerRecord, claim: DoneClaim): Promise<string | undefined> {
+    if (worker.mergeSha) return worker.mergeSha;
+    for (const signal of claim.signals) {
+      if (signal.kind === 'merged' && this.doneWorld.pull) {
+        const pull = await this.doneWorld.pull(signal.repo, signal.number);
+        if (pull.mergeSha) return pull.mergeSha;
+      }
+    }
+    return mergeShaFromClaim(claim, {
+      lastPushSha: worker.lastPushSha,
+      lastLiveSha: worker.lastLive?.sha,
+    });
+  }
+
+  private escalateRelease(worker: WorkerRecord, at: number, detail: string): void {
+    worker.state = 'stuck';
+    worker.updatedAt = at;
+    this.store.putWorker(worker);
+    this.audit(worker.tenantId, worker.workerId, 'stuck', at, { reason: 'release_verify' });
+    this.recordWatchdogLesson(worker, 'escalate', detail, at);
+    const card = stuckCardOf(
+      worker,
+      {
+        rule: 'stuck',
+        tenantId: worker.tenantId,
+        workerId: worker.workerId,
+        action: 'escalate',
+        generation: worker.generation,
+        detail,
+      },
+      at,
+    );
+    this.escalations.push(card);
+    this.onEscalate?.(card);
+  }
+
+  private chargeUsage(
+    worker: WorkerRecord,
+    usage: Partial<WorkerRecord['usage']>,
+    at: number,
+  ): void {
+    const delta = {
+      tokens: usage.tokens ?? 0,
+      usdMicros: usage.usdMicros ?? 0,
+      wallMs: usage.wallMs ?? 0,
+    };
+    worker.usage = {
+      tokens: worker.usage.tokens + delta.tokens,
+      usdMicros: worker.usage.usdMicros + delta.usdMicros,
+      wallMs: worker.usage.wallMs + delta.wallMs,
+      inputTokens: (worker.usage.inputTokens ?? 0) + (usage.inputTokens ?? 0),
+      outputTokens: (worker.usage.outputTokens ?? 0) + (usage.outputTokens ?? 0),
+    };
+    this.store.putUsage(worker.tenantId, worker.workerId, worker.usage, at);
+    this.store.appendUsageEvent({
+      tenantId: worker.tenantId,
+      workerId: worker.workerId,
+      ...delta,
+      at,
+    });
+    this.metering.record({
+      tenantId: worker.tenantId,
+      workerId: worker.workerId,
+      ...delta,
+      at,
+    });
   }
 
   private audit(
@@ -2245,4 +3802,19 @@ export class Superagent {
       detail,
     });
   }
+}
+
+function ruleMeta(rule: RoutingRule | undefined, objectId: string): WorkerRecord['routeRule'] {
+  if (!rule) return undefined;
+  return {
+    ruleId: rule.id,
+    ...(rule.model ? { model: rule.model } : {}),
+    ...(rule.reasoning ? { reasoning: rule.reasoning } : {}),
+    ...(rule.skills ? { skills: [...rule.skills] } : {}),
+    objectId,
+  };
+}
+
+function fieldLabel(event: NormalizedEvent, label: string): string {
+  return event.fields.find(([name]) => name === label)?.[1] ?? '';
 }
