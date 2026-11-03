@@ -7,38 +7,51 @@ Survives compaction and restarts. Read this first, then continue from **Next ste
   and Codex are the executors; no more growth of our own harness. New features default off
   behind env switches; never weaken tests; no force-push, no merge to main, no branch deletion;
   secrets only from env; Linux CI is the bar; morning report in `docs/superagent/CHANGELOG.md`.
-- **Started:** 2026-11-03 02:50 MST. **Updated:** see the last commit touching this file.
+- **Started:** 2026-11-03 02:50 MST. **Updated:** 2026-11-03 04:20 MST (about 1 h 30 min in).
 
 ## Phases
 
 | Phase | Branch / PR | State |
 |---|---|---|
-| 0 old branches | `superagent/harness-analysis` #482, `superagent/coder-tool-loop` #483 (drafts, default off, frozen) | CI was running at 02:58; `superagent/script-tool` has no commits of its own (same tip as #483), so no separate PR |
-| 0 decision docs | `superagent/executor-decision` #484 (docs + AGENTS.md) | open, draft |
-| 1 Executor interface + FakeExecutor | `superagent/executor` #485, commit `4f9f76001` | done |
-| 2 ClaudeCodeExecutor + budgets | `superagent/claude-code-executor` (stacks on #485) | next |
-| 3a persisted outbox | `superagent/outbox` `78a5d4e8b` (subagent; stacks on #484) | done, PR not opened yet |
-| 3b restart recovery note, follow-up hand-back, `dsh-gap.md` | stacks on phase 2 | not started |
-| 4 layered workspace | `superagent/layered-workspace` (subagent) | running |
-| 5 CodexExecutor + cross-vendor review | stacks on phase 3b | not started |
-| 6 benchmark | — | check for keys first |
+| 0 old branches | `superagent/harness-analysis` #482, `superagent/coder-tool-loop` #483 | done; drafts, default off, frozen; Linux green |
+| 0 decision docs | `superagent/executor-decision` #484 | done; draft; green |
+| 1 Executor interface + FakeExecutor | `superagent/executor` #485 (`4f9f76001`) | done; green |
+| 2 ClaudeCodeExecutor + budgets | `superagent/claude-code-executor` #486 (`3e4609985`, `06f9a50f4`) | done; green |
+| 3a persisted outbox | `superagent/outbox` #487 (`78a5d4e8b`) | done, not wired (see `dsh-gap.md`); green |
+| 3b restart recovery, follow-ups, `dsh-gap.md` | `superagent/executor-recovery` #490 (`3f9c2cc71`) | done; green |
+| 4 layered workspace | `superagent/layered-workspace` #488 (`3e13d9ddd`) | done; green |
+| 5 CodexExecutor + cross-vendor review | `superagent/codex-executor` #491 (`002a86565`) | done; CI running at 04:20 |
+| 6 benchmark | `superagent/executor-bench` #489 (`5ac5bd249`), extended in #491 | done for claude-code and codex; maka skipped |
 
-Worktrees (scratchpad of this session): `decision`, `exec`, `outbox`, `layered`; each has a
-`node_modules` symlink to the main checkout.
+Stack: #485 → #486 → #489 → #490 → #491 (each PR targets `main` and names its own commits).
+Worktrees (scratchpad of this session): `decision`, `exec`, `outbox`, `layered`.
 
 ## Decisions
 
-- Every PR targets `main` (CI only runs there) and names its own commits; stacked branches
-  merge their parent, never rebase.
-- CHANGELOG: newest entry may omit its SHA; heading time within 5 minutes of the commit.
-- `FakeCoder` = `ExecutorCoder(new FakeExecutor(files))`.
-- Executor outcome `needs-person` / `blocked` → loop waits on a human (`review-wait`, waiting
-  `human`), no tests, no push. `failed` → `progress: false`.
+- Every PR targets `main` and names its own commits; stacked branches merge their parent.
+- Auth (owner, 2026-11-03): the box's own CLI login first (Instabox org Secret selected at
+  create time, e.g. `CLAUDE_TOKEN_1`), checked once per box; Magpie only where the CLI is not
+  signed in (`MAKA_CLOUD_MAGPIE_URL` / `MAKA_CLOUD_MAGPIE_KEY`), or always with
+  `MAKA_CLOUD_EXECUTOR_GATEWAY=magpie`.
+- Instabox exec drops `env`: box env goes over stdin (0600 file, sourced and deleted).
+- No invented prices: models without a list price show `unpriced` in the bench.
+
+## Blocked on the owner
+
+- `MAKA_GITHUB_TOKEN` (fine-grained PAT) gets 403 on `POST git/blobs` in
+  raydocs/maka-loop-scratch: it needs Contents and Pull requests read/write there. Until then
+  the live bench cannot open PRs, so the merge gate is only exercised offline.
+- AGENTS.md says "Models are reached with API keys only… never offer a claude.ai login", while
+  the box route runs Claude Code on an org Secret OAuth token (`CLAUDE_CODE_OAUTH_TOKEN`).
+  Needs the owner's call.
+- The owner's "Magpie gateway, tested 2026-11-03" section is an uncommitted edit of
+  `docs/superagent/executor-decision.md` in the main checkout; #484 does not have it yet.
 
 ## Next step
 
-Phase 2 on `superagent/claude-code-executor`: `executor-budget.ts` (tokens/USD/wall/turns from
-`mandate.budgets` minus `worker.usage`; 80% → `send` wrap-up, 100% → `stop` + needs-person),
-`claude-code-executor.ts` (`claude -p --bare --output-format stream-json --input-format
-stream-json --session-id`, JSONL parse, process runner port for tests), `MAKA_CLOUD_EXECUTOR`
-selection in `loop-coder.ts`.
+1. Read the independent Codex review of `4f9f76001..superagent/codex-executor`
+   (`review-out.md` in the session scratchpad); fix P1/P2 findings on `superagent/codex-executor`.
+2. Once the PAT can write: `MAKA_CLOUD_BENCH_PUBLISH=1 MAKA_CLOUD_BENCH_REVIEW=cross npm run
+   executor-bench` in `packages/cloud-superagent` (stops at the held merge).
+3. `dsh-gap.md` next steps, smallest first: wire the outbox (#487), host coder with
+   `StoreExecutorSessionStore`, `handback` status, policy-version notice, failure hold.

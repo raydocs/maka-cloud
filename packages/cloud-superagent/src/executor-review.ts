@@ -74,15 +74,18 @@ export class ExecutorReviewer implements ReviewerPort {
     });
     const ran = await driveTurn(turn);
     const terminal = ran.terminal;
-    const text =
+    // Only a ready turn's final summary can carry the verdict. Any other
+    // `VERDICT:` text (progress, errors) is defused so it cannot make a receipt.
+    const verdictLine =
+      terminal.type === 'ready' ? /^(VERDICT:\s*(CLEAR|BLOCK)\b.*)$/m.exec(terminal.summary) : null;
+    const context =
       terminal.type === 'ready'
-        ? `${ran.progress.slice(-5).join('\n')}\n${terminal.summary}`
+        ? [...ran.progress.slice(-5), terminal.summary].join('\n')
         : terminal.type === 'failed'
           ? `reviewer failed: ${terminal.error}`
           : `reviewer stopped (${terminal.type})`;
-    // Only a ready turn can carry a verdict; anything else leaves no receipt.
-    const verdictLine =
-      terminal.type === 'ready' ? /^(VERDICT:\s*(CLEAR|BLOCK)\b.*)$/m.exec(terminal.summary) : null;
+    const defused = context.replace(/VERDICT:/g, 'verdict:');
+    const text = verdictLine ? `${defused}\n${verdictLine[1]}` : defused;
     this.records.push({
       ref: `${input.repo}#${input.number}@${input.sha}`,
       verdict: verdictLine?.[2] as 'CLEAR' | 'BLOCK' | undefined,

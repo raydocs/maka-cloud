@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import {
   eventsOf,
+  routeGone,
   parseStatusLine,
   stripStatusLine,
   type Executor,
@@ -18,7 +19,7 @@ import type { GatewayRoute } from './claude-code-executor.js';
 import {
   NodeProcessRunner,
   executorEnv,
-  redactSecrets,
+  redactDeep,
   signedIn,
   type ExecutorProcess,
   type ProcessRunner,
@@ -234,6 +235,10 @@ export class CodexExecutor implements Executor {
     return this.run(session, true, note);
   }
 
+  canResume(session: ExecutorSession): boolean {
+    return Boolean(session.vendorSessionId);
+  }
+
   async stop(session: ExecutorSession): Promise<void> {
     this.live.get(session.sessionId)?.proc.kill();
   }
@@ -281,6 +286,7 @@ export class CodexExecutor implements Executor {
         ]),
       };
     }
+    if (session.route === 'magpie' && !this.gatewayEnv) return routeGone(session);
     const magpie = (session.route ?? this.route) === 'magpie' && this.gatewayEnv;
     const proc = this.runner.spawn({
       command: this.options.bin ?? 'codex',
@@ -302,6 +308,11 @@ export class CodexExecutor implements Executor {
     return { session, events: this.events(session, live) };
   }
 
+  /** Every event's text leaves with the Magpie key redacted (progress, errors, summaries). */
+  private clean<T extends ExecutorEvent>(event: T): T {
+    return redactDeep(event, this.gatewayEnv ?? this.env, [CODEX_MAGPIE_KEY_ENV]);
+  }
+
   private async *events(session: ExecutorSession, live: Live): AsyncIterable<ExecutorEvent> {
     const state: CodexStreamState = { model: session.model, lastText: '', turnStarted: 0 };
     try {
@@ -313,21 +324,19 @@ export class CodexExecutor implements Executor {
           continue;
         }
         const parsed = codexStreamEvents(row, state, session);
-        for (const event of parsed.events) yield event;
+        for (const event of parsed.events) yield this.clean(event);
         if (parsed.terminal) {
-          yield parsed.terminal;
+          yield this.clean(parsed.terminal);
           return;
         }
       }
       const exit = await live.proc.exited;
-      const stderr = redactSecrets(exit.stderr, this.gatewayEnv ?? this.env, [CODEX_MAGPIE_KEY_ENV])
-        .trim()
-        .slice(-800);
-      yield {
+      const stderr = exit.stderr.trim().slice(-800);
+      yield this.clean({
         type: 'failed',
         error: `codex exited ${exit.code ?? exit.signal ?? 'unknown'} before a result${stderr ? `: ${stderr}` : ''}`,
         retryable: exit.signal === null,
-      };
+      });
     } finally {
       if (this.live.get(session.sessionId) === live) this.live.delete(session.sessionId);
     }

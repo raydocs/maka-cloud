@@ -133,11 +133,18 @@ export class BoxProcessRunner implements ProcessRunner {
       }
       return `${name}="$${from}"`;
     });
-    // The box has its own PATH and HOME (where the signed-in CLI keeps its
-    // login); only route variables such as a gateway URL go in.
+    // The box has its own PATH, HOME and CODEX_HOME (where the signed-in CLI
+    // keeps its login and sessions); only route variables such as a gateway
+    // URL go in.
     const env = Object.fromEntries(
-      Object.entries(spec.env).filter(([key]) => !BASE_ENV_KEYS.includes(key)),
+      Object.entries(spec.env).filter(([key]) => !HOST_ONLY_KEYS.includes(key)),
     );
+    // Box Secret values are known only inside the box, so the box filters
+    // them out of the CLI's output before the host reads it.
+    const boxSecrets = Object.values(spec.envFromBox ?? {});
+    const filter = boxSecrets.length
+      ? `awk -v names=${shellWord(boxSecrets.join(' '))} 'BEGIN { n = split(names, k, " ") } { for (j = 1; j <= n; j++) { s = ENVIRON[k[j]]; if (length(s) >= 8) while ((i = index($0, s)) > 0) $0 = substr($0, 1, i - 1) "[" k[j] "]" substr($0, i + length(s)) } print; fflush() }'`
+      : '';
     const timed = this.options.timeBin ? [this.options.timeBin, '-f', `${RSS_MARK}%M`] : [];
     const cmd = [...refs, ...[...timed, spec.command, ...spec.args].map(shellWord)].join(' ');
     const sandbox = this.sandbox;
@@ -171,6 +178,7 @@ export class BoxProcessRunner implements ProcessRunner {
       let code: number | null = null;
       let sampledRss = 0;
       let failure: string | undefined;
+      let running = false;
       try {
         // Instabox exec drops its `env` field, so variables (a gateway key
         // among them) reach the box on stdin as a 0600 file that run.sh
@@ -182,8 +190,14 @@ export class BoxProcessRunner implements ProcessRunner {
           '#!/bin/sh',
           '. "$1/env"',
           'rm -f "$1/env"',
-          `${cmd} < "$1/in" > "$1/out" 2> "$1/err"`,
-          'echo $? > "$1/code"',
+          ...(filter
+            ? [
+                `{ ${cmd} < "$1/in" 2> "$1/err.raw"; echo $? > "$1/rc"; } | ${filter} > "$1/out"`,
+                `${filter} < "$1/err.raw" > "$1/err"`,
+                'rm -f "$1/err.raw"',
+                'mv "$1/rc" "$1/code"',
+              ]
+            : [`${cmd} < "$1/in" > "$1/out" 2> "$1/err"`, 'echo $? > "$1/code"']),
           '',
         ].join('\n');
         const setup = await exec({
@@ -195,6 +209,8 @@ export class BoxProcessRunner implements ProcessRunner {
         if (setup.exitCode !== 0 || !dir.startsWith('/')) {
           throw new Error(`box exec setup failed: ${setup.stderr.slice(-400)}`);
         }
+        // Stopped while the setup ran: never start the CLI.
+        if (killed) return;
         const started = await exec({
           cmd: `(nohup sh ${shellWord(`${dir}/run.sh`)} ${shellWord(dir)} > /dev/null 2>&1 < /dev/null &)`,
           cwd: spec.cwd,
@@ -202,6 +218,7 @@ export class BoxProcessRunner implements ProcessRunner {
         });
         if (started.exitCode !== 0)
           throw new Error(`box exec start failed: ${started.stderr.slice(-400)}`);
+        running = true;
         let offset = 0;
         // Sum of RSS over the processes whose argv carries the session id.
         const rssProbe = marker
@@ -241,6 +258,13 @@ export class BoxProcessRunner implements ProcessRunner {
         // Also runs when the reader stops at the result line, so the run
         // directory (with the prompt) never stays in the box.
         let stderr = failure ?? '';
+        // A poll that failed leaves a detached CLI nobody watches: stop it.
+        if (failure && running && !killed && marker) {
+          killed = true;
+          await exec({ cmd: `pkill -f -- ${shellWord(marker)} || true`, timeoutSeconds: 30 }).catch(
+            () => undefined,
+          );
+        }
         if (dir) {
           const err = await exec({
             cmd: `tail -c ${STDERR_KEEP} ${shellWord(`${dir}/err`)} 2>/dev/null; rm -rf ${shellWord(dir)}`,
@@ -306,6 +330,8 @@ function shellWord(value: string): string {
  * other secrets stay on the host.
  */
 const BASE_ENV_KEYS = ['PATH', 'HOME', 'LANG', 'LC_ALL', 'TMPDIR', 'TERM', 'USER', 'SHELL'];
+/** Host paths that must never reach a box. */
+const HOST_ONLY_KEYS = [...BASE_ENV_KEYS, 'CODEX_HOME'];
 
 export function executorEnv(
   source: NodeJS.ProcessEnv,
@@ -332,6 +358,18 @@ export function redactSecrets(
     if (value && value.length >= 8) out = out.split(value).join(`[${key}]`);
   }
   return out;
+}
+
+/** `redactSecrets` over every string inside a value (an executor event, say). */
+export function redactDeep<T>(value: T, env: Record<string, string>, keys: readonly string[]): T {
+  if (typeof value === 'string') return redactSecrets(value, env, keys) as T;
+  if (Array.isArray(value)) return value.map((item) => redactDeep(item, env, keys)) as T;
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, redactDeep(item, env, keys)]),
+    ) as T;
+  }
+  return value;
 }
 
 /** Scripted process for tests: replays stdout lines, records stdin. */

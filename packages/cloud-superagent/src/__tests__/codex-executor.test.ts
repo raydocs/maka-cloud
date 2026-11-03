@@ -1,10 +1,18 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { CodexExecutor, codexStreamEvents } from '../codex-executor.js';
-import { STATUS_MARKER, driveTurn, type ExecutorSession } from '../executor.js';
+import {
+  ExecutorCoder,
+  MemoryExecutorSessionStore,
+  STATUS_MARKER,
+  driveTurn,
+  type ExecutorSession,
+} from '../executor.js';
 import { estimateUsdMicros } from '../executor-budget.js';
 import { ScriptedProcessRunner } from '../executor-process.js';
-import { actMandate } from '../types.js';
+import { scratchFiles } from '../loop.js';
+import { actMandate, type NormalizedEvent, type WorkerRecord } from '../types.js';
+import { initLocalRepo } from '../workspace.js';
 
 const KEY = 'magpie-key-0123456789abcdef';
 const ENV = { PATH: '/usr/bin', HOME: '/home/x', MAKA_GITHUB_TOKEN: 'ghp_never_0123456789' };
@@ -196,4 +204,62 @@ test('fallback: `codex login status` per box; Magpie only where Codex is not sig
     runner.spawned[3]?.args.some((arg) => arg.includes('magpie')),
     false,
   );
+});
+
+test('review fix: the thread id is stored as soon as it arrives; a session without one starts over', async () => {
+  const dir = await initLocalRepo(scratchFiles());
+  const sessions = new MemoryExecutorSessionStore();
+  const runner = new ScriptedProcessRunner([
+    () => ({ lines: [started, turnStarted, command, message('ok'), completed], done: true }),
+    () => ({ lines: [started, message('ok'), completed], done: true }),
+  ]);
+  let storedMidTurn: string | undefined;
+  const coder = new ExecutorCoder(new CodexExecutor({ env: ENV, runner }), {
+    sessions,
+    onEvent: async (event) => {
+      if (event.type === 'progress' && event.text.startsWith('$ ')) {
+        storedMidTurn = (await sessions.get('w1', 't'))?.vendorSessionId;
+      }
+    },
+  });
+  const worker = {
+    workerId: 'w1',
+    tenantId: 't',
+    mandate: actMandate([]),
+  } as unknown as WorkerRecord;
+  const event = { type: 'pr_opened', fields: [] } as unknown as NormalizedEvent;
+  await coder.apply({ dir, brief: 'fix', event, worker });
+  assert.equal(storedMidTurn, THREAD, 'persisted before the turn ended');
+
+  // A record from a crash before thread.started cannot resume: start a new thread.
+  const stored = await sessions.get('w1', 't');
+  await sessions.put({ ...(stored as ExecutorSession), vendorSessionId: undefined });
+  await new ExecutorCoder(new CodexExecutor({ env: ENV, runner }), { sessions }).apply({
+    dir,
+    brief: 'CI failed',
+    event: { type: 'ci_failed', fields: [] } as unknown as NormalizedEvent,
+    worker,
+  });
+  assert.equal(runner.spawned[1]?.args[1], '--json', 'exec, not exec resume');
+});
+
+test('review fix: a stored Codex Magpie session fails closed when Magpie is not configured', async () => {
+  const runner = new ScriptedProcessRunner([]);
+  const ran = await driveTurn(
+    await new CodexExecutor({ env: ENV, runner }).resume(
+      {
+        sessionId: 's',
+        kind: 'codex',
+        workerId: 'w',
+        workdir: '/repo',
+        systemPrompt: 'S',
+        startedAt: 1,
+        route: 'magpie',
+        vendorSessionId: THREAD,
+      },
+      'note',
+    ),
+  );
+  assert.equal(ran.terminal.type, 'failed');
+  assert.equal(runner.spawned.length, 0);
 });

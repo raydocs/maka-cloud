@@ -130,6 +130,23 @@ export interface Executor {
   /** After a host restart. `note` says to check the directory, git and GitHub first. */
   resume(session: ExecutorSession, note: string): Promise<ExecutorTurn>;
   stop(session: ExecutorSession): Promise<void>;
+  /** False when a stored session cannot be resumed (Codex before its thread id). Default true. */
+  canResume?(session: ExecutorSession): boolean;
+}
+
+/** A stored Magpie session never falls back to another login (fail closed). */
+export function routeGone(session: ExecutorSession): ExecutorTurn {
+  return {
+    session,
+    events: eventsOf([
+      {
+        type: 'failed',
+        error:
+          'this session runs on the Magpie route, but MAKA_CLOUD_MAGPIE_URL / MAKA_CLOUD_MAGPIE_KEY are not set; not switching it to another login',
+        retryable: false,
+      },
+    ]),
+  };
 }
 
 export const STATUS_MARKER = 'MAKA_STATUS';
@@ -556,7 +573,8 @@ export class ExecutorCoder implements CoderPort {
       existing &&
       existing.kind === this.executor.kind &&
       existing.workdir === workdir &&
-      existing.boxId === boxId;
+      existing.boxId === boxId &&
+      (this.executor.canResume?.(existing) ?? true);
     const turn = !reuse
       ? await this.executor.start({
           workerId: worker.workerId,
@@ -578,7 +596,14 @@ export class ExecutorCoder implements CoderPort {
     await this.sessions.put(turn.session);
     const spentTurns = reuse ? (existing.turns ?? 0) : 0;
     const budget = assignmentBudget(worker.mandate, worker.usage, spentTurns);
-    const ran = await this.guarded(turn, budget, worker.workerId);
+    // An id the CLI picks mid-turn (Codex thread id) is stored at once, so a
+    // host that dies during the turn can still resume the session.
+    let storedVendorId = turn.session.vendorSessionId;
+    const ran = await this.guarded(turn, budget, worker.workerId, async () => {
+      if (turn.session.vendorSessionId === storedVendorId) return;
+      storedVendorId = turn.session.vendorSessionId;
+      await this.sessions.put({ ...turn.session, turns: spentTurns });
+    });
     await this.sessions.put({ ...turn.session, turns: spentTurns + ran.usage.turns });
     return this.result(workdir, ran, box && boxId ? { sandbox: box.sandbox, boxId } : undefined);
   }
@@ -593,6 +618,7 @@ export class ExecutorCoder implements CoderPort {
     turn: ExecutorTurn,
     budget: AssignmentBudget,
     workerId: string,
+    afterEvent?: () => Promise<void>,
   ): Promise<ExecutorRun> {
     const now = this.options.now ?? Date.now;
     const started = now();
@@ -627,6 +653,7 @@ export class ExecutorCoder implements CoderPort {
     }
     try {
       const ran = await driveTurn(turn, async (event, usage) => {
+        await afterEvent?.();
         await this.options.onEvent?.(event, workerId);
         if (event.type !== 'usage' || isTerminal(event)) return undefined;
         const check = checkBudget(budget, usage, now() - started, this.options.wrapUpAt);

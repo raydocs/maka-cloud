@@ -734,3 +734,182 @@ test('a box run is found by an explicit marker inside an argument (Codex -o path
   assert.ok(sandbox.commands.some((row) => row.cmd.includes(`pkill -f -- ${marker}`)));
   assert.ok((runner.peakRssKb.get('box-m') ?? 0) > 0, 'sampled by the marker');
 });
+
+test('review fix: the gateway key is redacted from every event, not only no-result stderr', async () => {
+  const runner = new ScriptedProcessRunner([
+    () => ({
+      lines: [init, assistant('m1', `using ${KEY}`), result(`done with ${KEY}`)],
+      done: true,
+    }),
+    () => ({
+      lines: [
+        init,
+        result(`bad key ${KEY}`, { subtype: 'error_during_execution', is_error: true }),
+      ],
+      done: true,
+    }),
+  ]);
+  const executor = new ClaudeCodeExecutor({
+    env: ENV,
+    runner,
+    gateway: { baseUrl: 'https://magpie.example', token: KEY },
+  });
+  const seen: ExecutorEvent[] = [];
+  const first = await executor.start({
+    workerId: 'w',
+    ticket: 't',
+    mandate: actMandate([]),
+    workdir: '/tmp',
+    systemPrompt: 'S',
+  });
+  const ok = await driveTurn(first, (row) => {
+    seen.push(row);
+  });
+  const bad = await driveTurn(await executor.send(first.session, { kind: 'ci', text: 'x' }));
+  const all = JSON.stringify([seen, ok.terminal, bad.terminal]);
+  assert.equal(all.includes(KEY), false);
+  assert.match(all, /\[ANTHROPIC_AUTH_TOKEN\]/);
+});
+
+test('review fix: box Secret values are filtered in the box, from stdout and stderr', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'leaky-claude-'));
+  const bin = join(dir, 'claude');
+  await writeFile(
+    bin,
+    [
+      '#!/bin/sh',
+      'cat > /dev/null',
+      `echo '${init}'`,
+      'printf \'{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"saw %s"}]}}\\n\' "$CLAUDE_CODE_OAUTH_TOKEN"',
+      'echo "auth failed for $CLAUDE_CODE_OAUTH_TOKEN" >&2',
+      'exit 3',
+      '',
+    ].join('\n'),
+  );
+  await chmod(bin, 0o755);
+  const sandbox = new FakeSandbox();
+  await boxWithRepo(sandbox, 'box-s');
+  const before = process.env.CLAUDE_TOKEN_1;
+  process.env.CLAUDE_TOKEN_1 = 'placeholder-from-box';
+  try {
+    const executor = new ClaudeCodeExecutor({
+      env: ENV,
+      bin,
+      runner: new BoxProcessRunner(sandbox, { pollMs: 20 }),
+      boxSecretEnv: { CLAUDE_CODE_OAUTH_TOKEN: 'CLAUDE_TOKEN_1' },
+    });
+    const seen: ExecutorEvent[] = [];
+    const ran = await driveTurn(
+      await executor.start({
+        workerId: 'w',
+        ticket: 't',
+        mandate: actMandate([]),
+        workdir: BOX_REPO,
+        systemPrompt: 'S',
+        boxId: 'box-s',
+      }),
+      (row) => {
+        seen.push(row);
+      },
+    );
+    const all = JSON.stringify([seen, ran.terminal]);
+    assert.equal(all.includes('placeholder-from-box'), false);
+    assert.match(all, /saw \[CLAUDE_TOKEN_1\]/);
+    assert.match(all, /auth failed for \[CLAUDE_TOKEN_1\]/);
+  } finally {
+    if (before === undefined) delete process.env.CLAUDE_TOKEN_1;
+    else process.env.CLAUDE_TOKEN_1 = before;
+  }
+});
+
+test('review fix: a stop during setup never starts the CLI; a failed poll stops it', async () => {
+  const sandbox = new FakeSandbox();
+  await boxWithRepo(sandbox, 'box-k');
+  const cmds: string[] = [];
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const slow = Object.create(sandbox) as FakeSandbox;
+  slow.exec = async (machineId, request) => {
+    cmds.push(request.cmd);
+    if (request.cmd.includes('umask 077')) await gate;
+    return sandbox.exec(machineId, request);
+  };
+  const id = '0b9f3c1e-2d4a-4e8b-9c1d-123456789abc';
+  const spec = { command: 'sleep', args: ['5', id], cwd: BOX_REPO, env: {}, machineId: 'box-k' };
+  const proc = new BoxProcessRunner(slow, { pollMs: 20 }).spawn(spec);
+  proc.endInput();
+  const reading = (async () => {
+    for await (const _line of proc.lines) {
+      // none
+    }
+  })();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  proc.kill();
+  release();
+  await reading;
+  assert.equal(
+    cmds.some((cmd) => cmd.includes('nohup')),
+    false,
+    'never started',
+  );
+
+  const flaky = Object.create(sandbox) as FakeSandbox;
+  const sent: string[] = [];
+  flaky.exec = async (machineId, request) => {
+    sent.push(request.cmd);
+    if (request.cmd.includes('--MAKA-OUT--')) throw new Error('exec 502');
+    return sandbox.exec(machineId, request);
+  };
+  const lost = new BoxProcessRunner(flaky, { pollMs: 20 }).spawn(spec);
+  lost.endInput();
+  for await (const _line of lost.lines) {
+    // none
+  }
+  assert.match((await lost.exited).stderr, /exec 502/);
+  assert.ok(
+    sent.some((cmd) => cmd.includes(`pkill -f -- ${id}`)),
+    'the detached CLI is stopped',
+  );
+});
+
+test('review fix: host CODEX_HOME never reaches the box; a stored Magpie route fails closed', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'home-codex-'));
+  const bin = join(dir, 'codex');
+  await writeFile(
+    bin,
+    `#!/bin/sh\ncat > /dev/null\nprintf '%s|%s' "$CODEX_HOME" "$MAKA_CLOUD_MAGPIE_KEY" > ${dir}/seen\n`,
+  );
+  await chmod(bin, 0o755);
+  const sandbox = new FakeSandbox();
+  await boxWithRepo(sandbox, 'box-h');
+  const proc = new BoxProcessRunner(sandbox, { pollMs: 20 }).spawn({
+    command: bin,
+    args: [],
+    cwd: BOX_REPO,
+    env: { CODEX_HOME: '/Users/x/.codex', MAKA_CLOUD_MAGPIE_KEY: KEY },
+    machineId: 'box-h',
+  });
+  proc.endInput();
+  for await (const _line of proc.lines) {
+    // none
+  }
+  assert.equal(await readFile(join(dir, 'seen'), 'utf8'), `|${KEY}`);
+
+  const runner = new ScriptedProcessRunner([]);
+  const executor = new ClaudeCodeExecutor({ env: ENV, runner });
+  const stored = {
+    sessionId: '0b9f3c1e-2d4a-4e8b-9c1d-123456789abc',
+    kind: 'claude-code',
+    workerId: 'w',
+    workdir: '/tmp',
+    systemPrompt: 'S',
+    startedAt: 1,
+    route: 'magpie',
+  } as const;
+  const ran = await driveTurn(await executor.resume({ ...stored }, 'note'));
+  assert.equal(ran.terminal.type, 'failed');
+  if (ran.terminal.type === 'failed') assert.match(ran.terminal.error, /Magpie route/);
+  assert.equal(runner.spawned.length, 0, 'no fallback to the box login');
+});

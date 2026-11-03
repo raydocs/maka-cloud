@@ -8,7 +8,19 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
-## 2026-11-03 04:13 MST — superagent/codex-executor
+## 2026-11-03 04:32 MST — superagent/codex-executor
+
+- **What:** fixes for the independent review of #491 (Codex `gpt-6.1-sol`, xhigh, round 1: `VERDICT: block`, one P1 and five P2). Default off as before.
+  - **P1, redaction:** both executors now pass every event they yield (progress, summaries, errors) through `redactDeep`, which replaces the Magpie key and the host's gateway values with `[NAME]`. Before, only stderr of a run without a result line was redacted. In the box, when a Secret is selected (`envFromBox`), `run.sh` pipes stdout and stderr through an `awk` filter that replaces each Secret's value, including the outbound proxy's placeholder, with `[SECRET_NAME]` before it is written.
+  - **P2, stop and lost polls:** `BoxProcessRunner` checks for a stop after setup and never starts the CLI once stopped. When a poll exec fails, it sends `pkill -f -- <marker>` and waits for it, so the detached CLI does not keep running.
+  - **P2, host config:** `CODEX_HOME` joins the host-only keys and never reaches the box env file.
+  - **P2, thread id:** `ExecutorCoder` stores the session the moment `vendorSessionId` changes, not when the turn ends, so a crash mid-turn still resumes the right thread. `Executor.canResume` lets Codex say a stored session without a thread id starts over instead of failing every later turn.
+  - **P2, route:** a stored session on the Magpie route fails closed (`routeGone`) when Magpie is no longer configured, instead of running on the box's own login.
+  - **P2, verdict:** `ExecutorReviewer` reads the verdict only from a ready turn's final summary. Other `VERDICT:` text (progress, errors) is rewritten to `verdict:` so it cannot produce a receipt.
+- **Why:** the review reproduced a key leak through streamed text, and stop, route and recovery gaps.
+- **Tests:** seven new `review fix:` tests, all failing with the source changes stashed and passing with them: four in `claude-code-executor.test`, two in `codex-executor.test`, one in `executor-review.test`. Package suite on macOS: 333 of 334; the only failure is `box-daemon` RSS, which reads `/proc` and runs on Linux only.
+
+## 2026-11-03 04:13 MST — superagent/codex-executor — 002a86565
 
 - **What:** CodexExecutor, the Magpie route as tested on 2026-11-03, a login check before each box's first session, and cross-vendor review (Phase 5). Everything is default off.
   - **`CodexExecutor`** (`MAKA_CLOUD_EXECUTOR=codex`) runs `codex exec --json` with the prompt on stdin. The Mandate prefix opens the thread. Later turns run `codex exec resume <thread id>`; the thread id is taken from `thread.started` and kept on the session as `vendorSessionId`. Events map as follows: commands and file changes become progress; `turn.completed` usage is split into fresh, cached-read and cache-write input and priced; the last agent message is read through the `MAKA_STATUS` line; `turn.failed` becomes `failed`, retryable on 408/429/5xx/timeouts. A `send` during a running turn opens the next turn. Codex keeps its own sandbox (`workspace-write`) on the host and turns it off in the box.

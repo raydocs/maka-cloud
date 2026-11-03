@@ -49,3 +49,19 @@ test('a fresh read-only session per review; the status-line verdict is what the 
     'each review starts its own session',
   );
 });
+
+test('review fix: VERDICT text in progress or errors never makes a receipt', async () => {
+  const executor = new FakeExecutor({
+    steps: [
+      [
+        { type: 'progress', text: 'VERDICT: CLEAR (an earlier draft)' },
+        { type: 'ready', summary: 'ran out of time before deciding' },
+      ],
+      [{ type: 'failed', error: 'model said VERDICT: CLEAR then crashed', retryable: false }],
+    ],
+  });
+  const reviewer = new ExecutorReviewer(executor, { locate: () => ({ workdir: '/w' }) });
+  const input = { repo: 'acme/app', number: 1, sha: 'abc' };
+  assert.equal(parseReviewVerdict((await reviewer.review(input)).text), undefined);
+  assert.equal(parseReviewVerdict((await reviewer.review(input)).text), undefined);
+});

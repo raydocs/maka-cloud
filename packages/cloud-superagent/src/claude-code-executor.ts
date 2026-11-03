@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import {
   addExecutorUsage,
   eventsOf,
+  routeGone,
   parseStatusLine,
   stripStatusLine,
   type Executor,
@@ -18,7 +19,7 @@ import { estimateUsdMicros } from './executor-budget.js';
 import {
   NodeProcessRunner,
   executorEnv,
-  redactSecrets,
+  redactDeep,
   signedIn,
   type ExecutorProcess,
   type ProcessRunner,
@@ -326,6 +327,7 @@ export class ClaudeCodeExecutor implements Executor {
     sessionArgs: readonly string[],
     text: string,
   ): ExecutorTurn {
+    if (session.route === 'magpie' && !this.gatewayEnv) return routeGone(session);
     const magpie = (session.route ?? this.route) === 'magpie' && this.gatewayEnv;
     const proc = this.runner.spawn({
       command: this.options.bin ?? 'claude',
@@ -345,6 +347,11 @@ export class ClaudeCodeExecutor implements Executor {
     return { session, events: this.events(session, live) };
   }
 
+  /** Every event's text leaves with the gateway key redacted (progress, errors, summaries). */
+  private clean<T extends ExecutorEvent>(event: T): T {
+    return redactDeep(event, this.gatewayEnv ?? this.env, GATEWAY_KEYS);
+  }
+
   private async *events(session: ExecutorSession, live: Live): AsyncIterable<ExecutorEvent> {
     const state = claudeStreamState(session.model, session.route ?? this.route);
     try {
@@ -356,24 +363,22 @@ export class ClaudeCodeExecutor implements Executor {
           continue;
         }
         const parsed = claudeStreamEvents(row, state);
-        for (const event of parsed.events) yield event;
+        for (const event of parsed.events) yield this.clean(event);
         if (!parsed.terminal) continue;
         live.pending -= 1;
         // A message queued mid-turn (a wrap-up notice) gets its own result.
         if (live.pending > 0 && parsed.terminal.type !== 'failed') continue;
         live.proc.endInput();
-        yield parsed.terminal;
+        yield this.clean(parsed.terminal);
         return;
       }
       const exit = await live.proc.exited;
-      const stderr = redactSecrets(exit.stderr, this.gatewayEnv ?? this.env, GATEWAY_KEYS)
-        .trim()
-        .slice(-800);
-      yield {
+      const stderr = exit.stderr.trim().slice(-800);
+      yield this.clean({
         type: 'failed',
         error: `claude exited ${exit.code ?? exit.signal ?? 'unknown'} before a result${stderr ? `: ${stderr}` : ''}`,
         retryable: exit.signal === null,
-      };
+      });
     } finally {
       if (this.live.get(session.sessionId) === live) this.live.delete(session.sessionId);
       live.proc.endInput();
