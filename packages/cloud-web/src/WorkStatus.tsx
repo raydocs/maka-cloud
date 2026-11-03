@@ -45,19 +45,37 @@ export type WorkerProgressView = {
   waiting?: { kind: string; detail: string };
 };
 
+export type QueueProgressView = {
+  taskId: string;
+  title: string;
+  state: string;
+  reason?: string;
+  waitMs: number;
+  reserved?: boolean;
+};
+
 export function SuperagentProgress({ client }: { client: CloudClient }) {
   const [views, setViews] = useState<WorkerProgressView[]>([]);
+  const [queue, setQueue] = useState<QueueProgressView[]>([]);
   useEffect(() => {
     let current = true;
     const load = () => {
-      void client.request<{ workers?: WorkerProgressView[] }>('/v1/superagent/progress').then(
-        (body) => {
-          if (current) setViews(Array.isArray(body.workers) ? body.workers : []);
-        },
-        () => {
-          if (current) setViews([]);
-        },
-      );
+      void client
+        .request<{ workers?: WorkerProgressView[]; queue?: QueueProgressView[] }>(
+          '/v1/superagent/progress',
+        )
+        .then(
+          (body) => {
+            if (!current) return;
+            setViews(Array.isArray(body.workers) ? body.workers : []);
+            setQueue(Array.isArray(body.queue) ? body.queue : []);
+          },
+          () => {
+            if (!current) return;
+            setViews([]);
+            setQueue([]);
+          },
+        );
     };
     load();
     const tick = setInterval(load, 15_000);
@@ -66,11 +84,17 @@ export function SuperagentProgress({ client }: { client: CloudClient }) {
       clearInterval(tick);
     };
   }, [client]);
-  if (views.length === 0) return null;
+  if (views.length === 0 && queue.length === 0) return null;
   return (
     <section className="card section-card" data-testid="superagent-progress-list">
       {views.map((view) => (
         <WorkerProgressBar key={view.workerId} view={view} />
+      ))}
+      {queue.map((row) => (
+        <p key={row.taskId} className="muted" data-testid="superagent-queue-row">
+          {row.state}
+          {row.reason ? `: ${row.reason}` : ''} · wait {Math.round(row.waitMs / 1000)}s · {row.title}
+        </p>
       ))}
     </section>
   );

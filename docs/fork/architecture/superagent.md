@@ -82,7 +82,7 @@ life**.
 | Durable state | T28 step log, epoch fence, transcript mirror | Worker record adds memory, plan, transcript pointer, mandate, inbox offset. The step log remains the record of a **run**; the worker record is the record of a **subject**. |
 | Watchdog | `@maka-cloud/supervisor` R1–R5 ("rules decide, models describe"); T33 stuck report is docs only (#444) | Super-agent watchdog is a second, subject-level loop: stuck, looping, over-budget, crashed. It calls supervisor-shaped escalation; it does not replace R1–R5. |
 | Sandbox | `@maka-cloud/instabox` `InstaboxClient`; open PR #452 `SandboxApi` | Super-agent talks to `SandboxPort` (the #452 pick). Default adapter is Instabox. boat.dev stays parked. |
-| Workspace | Fresh git clone per task in the box | `WorkspaceStore` with `GitCloneStore` default. LayerFS behind a flag. |
+| Workspace | Fresh git clone per task in the box | Shared tenant box: git worktrees under `/work/<workerId>` from a cached base clone. `GitCloneStore` on the host. LayerFS stays off. |
 | Approvals | Conductor `GrantRow` bound to exact text; T15 taint; duty `Authority` | Worker `Mandate` + Super-agent approval kinds (merge, protected push, secrets, deploy, spend). Conductor grants stay for conductor tools. |
 | Isolation | `docs/fork/isolation-model.md` I1–…; one box per invite at launch | Tenant id on every Super-agent row. A worker never sees another tenant's store, sandbox, or secrets. |
 | Spend | Gateway caps, duty `runBudgetUsd` / `dailyCapUsd`, orchestrator `budgetUsd` | Per-worker budgets on the Mandate; metering hooks for a later ledger (T17). |
@@ -587,9 +587,26 @@ Supervisor principle: **rules decide, models describe**.
 | W4 | `over_budget` | usage ≥ any Mandate budget | Stop handler, escalate, no restart |
 | W5 | `subject_closed` | close event not yet retiring | Force `retiring` |
 | W6 | `awaiting_expired` | pending approval past `expiresAt` | Deny, retire if the action was required |
+| W7 | `stream_silence` | no tokens/events on a model stream for 4 minutes | Retry the same endpoint; discard any partial |
+| W8 | `time_limit` | the response hit a hard time limit | Retry; stop after 2 attempts |
+| W9 | `empty_turns` | 3 consecutive turns with no visible output | Stop |
+| W10 | `repeat_tools` | 3 identical tool calls (name+args) | Nudge; 6 stops. New results (CI poll) continue |
 
 Defaults: `stallAfterMs = 15m`, `heartbeatAfterMs = 2m`, `loopRepeat = 3`,
 `maxRestarts = 3` (MAGI idea: wake at most three times, then a person).
+Bounded-autonomy thresholds are configurable; the defaults above match
+Factory Droid 1.0. Compaction summaries are budgeted at 16k tokens.
+Every stop / retry / nudge is a `usage_events` row (`kind`
+`autonomy_*`), a watchdog finding, and a progress `reason` the lead
+speaks.
+
+Worker model requests are append-only so the provider cache stays warm:
+newly loaded tools are appended at the end of the request, not inserted
+into the tool list, and volatile facts (git status, clocks) live in a
+tail segment. A cache-break monitor diffs each request against the
+previous one and records which segment broke the prefix. Cache-hit share
+is `cache_read_input_tokens / (read + creation + input)` from Anthropic
+usage. A failed request retries the same provider endpoint.
 
 Escalation is a structured finding the host turns into a supervisor inbox
 item / `ask_user` `stuck` (T33). Super-agent does not send chat itself.
@@ -718,11 +735,33 @@ type SandboxPort = Pick<
 >;
 ```
 
-Workers do not create machines. The host's `SandboxProvider` / box pool
-does. Super-agent stores `sandboxRef` and calls `ensureRunning` on wake.
+Workers on that box share **one host process** (`BoxDaemon`). Each worker
+is a lightweight session (worktree cwd, env, `AbortController`), not a
+new maka process. Per-session RSS is a small fraction of the ~232–278 MiB
+idle maka process baseline.
+
+`BoxPool` gives each tenant **one** long-lived Instabox box (mandate size,
+default 4/8192) shared by up to N workers (default 4). Admission still
+caps spend. Each worker execs with cwd `/work/<workerId>` (a git worktree
+of a cached base clone) and its own env (`npm_config_cache` is shared).
+Cross-worker paths are refused. Secrets stay on the host.
+
+Lifecycle: an activity lease is held and renewed while any worker is
+active. When all are idle, leases drop and the box suspends after 5
+minutes (or Instabox auto-suspends). `deleteAfterSeconds` is only a 7-day
+backstop, not a 30-minute kill. The next event `ensureRunning` / wakes
+the box and reports progress phase `waking` with the measured time. A
+gone or erroring box rebuilds from the latest base snapshot (taken after
+the base install), else a fresh create.
+
+Box id, state, and last wake/suspend times live in store JSON (a reserved
+retired worker row). No sqlite `user_version` bump. A box stuck in
+`suspending`/`resuming`, or a lease that was not released, is W-rule
+`box_stuck`. Cold create, wake, and snapshot-restore timings go on
+`usage_events` as `__box__:create|wake|restore`.
 
 The API key stays on the host. Isolation model I-series still apply. Super-agent
-does not add a second egress path.
+does not add a second egress path. LayerFS stays off.
 
 T32 (own computer) is after launch and is another `SandboxPort`. Not in P0–P3.
 
@@ -868,6 +907,9 @@ Filled in by the implementation PR; kept accurate here:
 | Owner pause | implemented. Verified stop, no W2 nudge, explicit resume only |
 | Freshness + lead channel | implemented. `reportToLead` re-reads live PR/CI; `LeadPort` is the only user channel; worker `userMessage` is dropped |
 | First-class progress | implemented. Named phases on worker JSON; ETA from phase samples / usage ledger / defaults; lead speaks on phase change, every 5 min on a long phase, and once when past ETA+margin (W1/W2); waiting on CI/review/human ≠ stuck. CLI `npm run status`; JSON/SSE `GET /v1/superagent/progress` |
+| Scheduler / admission queue | implemented. Task queue between Router spawn and worker. Priority + aging, size, deps, footprint conflict, reserved human slot, async start. States on ledger + `queue` in the progress snapshot. JSON document, no schema bump. See `docs/superagent/scheduler-router.md` |
+| Two-layer tunable Router | implemented. Fast Path (deterministic, zero model) then Slow Path (cheap router model) for new threads only. Modes off/observe/auto; observe is the new-tenant config default. Feedback few-shots. Per-layer drop metrics. Subscribed threads pass through with no Slow Path. `triggerId → threadId → workerId` recall query |
+| Cross-source merge + graded escalation | implemented. Programmatic same-ticket merge (path / fingerprint / ref / commit) then optional fuzzy Slow Path; observe suggests, auto attaches, split undoes. Cheap value/urgency/risk score; low archives, medium assigns, high is a waiting-human card on the progress snapshot. See `docs/superagent/intake-merge.md` |
 
 ## 16. Open questions — decisions recorded (revisit with the owner)
 
@@ -1045,7 +1087,7 @@ column. Flag if a later change needs `user_version` 3.
 ### 18.8 First-class progress
 
 A 40–50 minute silent run looks stuck. Each worker carries a step plan
-(`materialize`, `edit`, `install`, `test`, `push`, `pr`, `ci-wait`,
+(`waking`, `materialize`, `edit`, `install`, `test`, `push`, `pr`, `ci-wait`,
 `review-wait`, `merge-held`) on `worker.progress` (JSON only). The
 runtime emits structured views: phase `k/N`, percent, elapsed, ETA
 (median of completed phase samples on the tenant, else a weak mean of

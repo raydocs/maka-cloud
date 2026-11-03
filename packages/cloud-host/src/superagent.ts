@@ -41,6 +41,8 @@ export interface HostSuperagent {
   close(): void;
   backupTo(destination: string): Promise<void>;
   statusSnapshot(tenantId?: string): ReturnType<Superagent['statusSnapshot']>;
+  askWatchdog(tenantId: string, text: string): ReturnType<Superagent['askWatchdog']>;
+  instructWatchdog(tenantId: string, text: string): ReturnType<Superagent['instructWatchdog']>;
 }
 
 export function startHostSuperagent(
@@ -106,6 +108,8 @@ export function startHostSuperagent(
     close: () => agent.close(),
     backupTo: (destination) => store.backupTo?.(destination) ?? Promise.resolve(),
     statusSnapshot: (tenantId) => agent.statusSnapshot(tenantId),
+    askWatchdog: (tenantId, text) => agent.askWatchdog(tenantId, text),
+    instructWatchdog: (tenantId, text) => agent.instructWatchdog(tenantId, text),
   };
 }
 
@@ -133,6 +137,21 @@ export function instaboxSandboxPort(client: InstaboxClient): SandboxPort {
     deleteActivityLease: (machineId, holder) => client.deleteActivityLease(machineId, holder),
     suspend: async (machineId) => {
       await client.suspendMachine(machineId);
+    },
+    createMachine: async (request) => {
+      const created = await client.createMachine({
+        name: request.name,
+        metadata: request.metadata,
+        vcpus: request.vcpus,
+        memMiB: request.memMiB,
+        ...(request.snapshotId
+          ? { snapshotId: request.snapshotId }
+          : { templateId: request.templateId ?? 'universal' }),
+      });
+      return { id: created.machineId ?? created.id };
+    },
+    deleteMachine: async (machineId) => {
+      await client.deleteMachine(machineId);
     },
   };
 }

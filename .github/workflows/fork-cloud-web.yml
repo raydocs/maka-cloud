@@ -58,6 +58,7 @@ jobs:
           npm --workspace @maka/storage run build
           npm --workspace @maka/mcp run build
           npm --workspace @maka/runtime run build
+          npm --workspace @maka-cloud/maka-engine run build
           npm --workspace @maka-cloud/orchestrator run build
           npm --workspace @maka-cloud/modes run build
           npm --workspace @maka-cloud/memory run build
