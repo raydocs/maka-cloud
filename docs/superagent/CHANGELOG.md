@@ -8,7 +8,15 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
-## 2026-11-03 02:46 MST — superagent/coder-tool-loop
+## 2026-11-03 02:47 MST — superagent/harness-analysis — 747470a90
+
+- **What:** `tool-loading.test` reads the `load_tools` wire entry through a checked local instead of `tools[2]?.input_schema` cast to an object (biome `noUnsafeOptionalChaining`, which `npm run lint` in CI rejects). Correction to the entry below: its test split was `tool-loading.test` 14 and `prompt-cache.test` 5 (23 in all).
+- **Why:** keep the Linux `checks` lint step green.
+- **Tests:** `tool-loading.test` 14 passed; `biome lint` and `biome format` clean on `packages/cloud-superagent` and `docs/superagent`.
+- **Live:** n/a
+- **Migrations / risk:** none (test only).
+
+## 2026-11-03 02:46 MST — superagent/coder-tool-loop — 311089c47
 
 - **What:** multi-turn coder behind `MAKA_CLOUD_CODER_LOOP=1` (default off; needs `MAKA_CLOUD_LOOP_LIVE=1` and a key like the single-shot coder, which stays the default and the fallback when there is no box workspace). `ToolLoopCoder` (`coder-loop.ts`) gives the model `read_file`, `list_files`, `search`, `apply_patch` (unified diff through `git apply`), `write_file` and `run`, each a command in the box checkout (FakeSandbox or Instabox through `BoxWorkspace`), and loops read → edit → run until the configured test command exits 0 or a bound trips: 24 turns, 20 minutes, `autonomy.ts` rules (3 identical calls → nudge text after the tool results, 6 → stop; 3 turns with no visible output → stop; a stream silent for `streamSilenceMs` → dropped and the same body retried, 3 at most; a retryable provider error → same provider, same body, 1/2/4 s backoff). Over `compactAtTokens` the loop starts a fresh conversation from a 16k `compactHistory` summary instead of editing history. Every request is checked with `recordCacheBreak`; `toAnthropicLoopBody` keeps `tools` frozen, puts `cache_control` on the system block and top-level automatic caching on the tail, and passes content blocks (thinking included) back unchanged. `MAKA_CLOUD_TOOL_LOADING=1` starts with `read_file` + `run` + `load_tools` and loads the rest through `tool-loading.ts`. `AnthropicLoopModel` (`coder-model.ts`) streams `/v1/messages` with the key in the `x-api-key` header only and prices input, output, cache read and cache write per model. `CodingLoopHandler` passes the box workspace and test command to the coder, records a `coder-loop` evidence line, and hands a stopping incident and the autonomy counters to the runtime. `prompt-cache.ts` messages may carry content blocks; `BoxWorkspace.run` takes stdin. Also adds `docs/superagent/PROGRESS.md` (`34370de9b`).
 - **Why:** the single request that returned file JSON could not read, run tests, or try again. The bounds and the append-only request were defined but not attached to a loop.
