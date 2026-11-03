@@ -8,6 +8,15 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
+## 2026-11-02 17:19 MST — cursor/superagent-bounded-autonomy-51be — db85c62a7
+
+- **PR:** [#473](https://github.com/raydocs/maka-cloud/pull/473)
+- **What:** merge: cursor/superagent-shared-box-51be (#472) into Super-agent bounded-autonomy. Kept BoxPool and bounded autonomy / prompt-cache. Keep every CHANGELOG entry, newest first. This branch is now a descendant of #472, #471, #470, and main.
+- **Why:** Linearize the remaining stack so merging #470 → #471 → #472 → #473 cannot re-dirty the next PR. Linux-only gates.
+- **Tests:** 156 `@maka-cloud/superagent` tests passed after the merge
+- **Live:** n/a
+- **Migrations / risk:** none. JSON fields only.
+
 ## 2026-11-02 17:18 MST — cursor/superagent-shared-box-51be — 4bd2c5157
 
 - **PR:** [#472](https://github.com/raydocs/maka-cloud/pull/472)
