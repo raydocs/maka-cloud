@@ -8,6 +8,15 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
+## 2026-11-02 17:59 MST — cursor/superagent-decisions-policy-51be — 8df73c97e
+
+- **PR:** [#480](https://github.com/raydocs/maka-cloud/pull/480)
+- **What:** merge: cursor/superagent-review-verify-51be (#479) into Super-agent decisions-policy. Kept decisions book / must-ask / `superagent.rules.json` and every earlier stack hook. `statusSnapshot.decisions` stays escalate cards; must-ask uses `mustAskPending` / `decisionCitations`. Keep every CHANGELOG entry, newest first. This branch is now a descendant of #479 and below.
+- **Why:** One-pass linearization so #474 → #477 → #475 → #476 → #478 → #479 → #480 can merge in order without re-conflicts.
+- **Tests:** 288 `@maka-cloud/superagent` tests passed after the merge
+- **Live:** n/a
+- **Migrations / risk:** none. JSON fields only. New features stay default-off.
+
 ## 2026-11-02 17:53 MST — cursor/superagent-review-verify-51be — d2f66c8f1
 
 - **PR:** [#479](https://github.com/raydocs/maka-cloud/pull/479)
