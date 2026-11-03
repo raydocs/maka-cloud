@@ -13,6 +13,7 @@ import {
 } from './executor-budget.js';
 import type { CoderPort, CoderResult } from './loop.js';
 import type { SandboxPort } from './sandbox.js';
+import type { SuperagentStore } from './store.js';
 import type { Mandate, NormalizedEvent, Usage, WorkerRecord } from './types.js';
 
 const run = promisify(execFile);
@@ -89,6 +90,8 @@ export interface ExecutorSession {
   turns?: number;
   /** Instabox machine the session runs in; absent for a host process. */
   boxId?: string;
+  /** Tenant of the worker, so stored sessions stay per tenant. */
+  tenantId?: string;
 }
 
 export interface ExecutorStart {
@@ -369,29 +372,82 @@ export class FakeExecutor implements Executor {
   }
 }
 
-/** Keeps the worker → executor session mapping. Phase 3 persists it. */
+/** Keeps the worker → executor session mapping, per tenant. */
 export interface ExecutorSessionStore {
-  get(workerId: string): Promise<ExecutorSession | undefined>;
+  get(workerId: string, tenantId?: string): Promise<ExecutorSession | undefined>;
   put(session: ExecutorSession): Promise<void>;
-  delete(workerId: string): Promise<void>;
+  delete(workerId: string, tenantId?: string): Promise<void>;
 }
 
 export class MemoryExecutorSessionStore implements ExecutorSessionStore {
   private readonly rows = new Map<string, ExecutorSession>();
 
-  async get(workerId: string): Promise<ExecutorSession | undefined> {
-    const row = this.rows.get(workerId);
+  async get(workerId: string, tenantId = ''): Promise<ExecutorSession | undefined> {
+    const row = this.rows.get(`${tenantId}\0${workerId}`);
     return row ? { ...row } : undefined;
   }
 
   async put(session: ExecutorSession): Promise<void> {
-    this.rows.set(session.workerId, { ...session });
+    this.rows.set(`${session.tenantId ?? ''}\0${session.workerId}`, { ...session });
   }
 
-  async delete(workerId: string): Promise<void> {
-    this.rows.delete(workerId);
+  async delete(workerId: string, tenantId = ''): Promise<void> {
+    this.rows.delete(`${tenantId}\0${workerId}`);
   }
 }
+
+export const EXECUTOR_SESSIONS_DOCUMENT = 'executor-sessions';
+
+/**
+ * Sessions in the Super-agent store (one tenant document), so a restarted
+ * host finds each worker's session and resumes it instead of starting over.
+ */
+export class StoreExecutorSessionStore implements ExecutorSessionStore {
+  constructor(
+    private readonly store: Pick<SuperagentStore, 'getDocument' | 'putDocument'>,
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  async get(workerId: string, tenantId = ''): Promise<ExecutorSession | undefined> {
+    const row = this.read(tenantId)[workerId];
+    return row ? { ...row } : undefined;
+  }
+
+  async put(session: ExecutorSession): Promise<void> {
+    const tenantId = session.tenantId ?? '';
+    const rows = this.read(tenantId);
+    rows[session.workerId] = { ...session };
+    this.store.putDocument(tenantId, EXECUTOR_SESSIONS_DOCUMENT, JSON.stringify(rows), this.now());
+  }
+
+  async delete(workerId: string, tenantId = ''): Promise<void> {
+    const rows = this.read(tenantId);
+    if (!(workerId in rows)) return;
+    delete rows[workerId];
+    this.store.putDocument(tenantId, EXECUTOR_SESSIONS_DOCUMENT, JSON.stringify(rows), this.now());
+  }
+
+  private read(tenantId: string): Record<string, ExecutorSession> {
+    const raw = this.store.getDocument(tenantId, EXECUTOR_SESSIONS_DOCUMENT);
+    if (!raw) return {};
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      return parsed && typeof parsed === 'object'
+        ? (parsed as Record<string, ExecutorSession>)
+        : {};
+    } catch {
+      return {};
+    }
+  }
+}
+
+/**
+ * First turn of a stored session after a host restart (DSH 003, Restart).
+ * The executor may have pushed, commented or opened a PR before the host
+ * went down, so it checks before doing any of it again.
+ */
+export const RECOVERY_NOTE =
+  'The host restarted while this session was working. Before repeating any outside action (push, pull request, comment, review reply), check the working directory, `git status` and `git log`, and the pull request on GitHub for what already happened, then do only what is still missing.';
 
 export interface ExecutorRun {
   terminal: ExecutorTerminal;
@@ -458,6 +514,8 @@ export interface ExecutorCoderOptions {
  */
 export class ExecutorCoder implements CoderPort {
   private readonly sessions: ExecutorSessionStore;
+  /** Sessions started or resumed by this process; a stored one not here survived a restart. */
+  private readonly attached = new Set<string>();
 
   constructor(
     readonly executor: Executor,
@@ -483,14 +541,15 @@ export class ExecutorCoder implements CoderPort {
     const boxId = box ? worker.sandboxRef : undefined;
     if (box && !boxId) throw new Error('ExecutorCoder box mode needs worker.sandboxRef.');
     const workdir = box?.workdir ?? input.dir ?? (await mkdtemp(join(tmpdir(), 'maka-exec-')));
-    const existing = await this.sessions.get(worker.workerId);
-    const reuse = existing && existing.kind === this.executor.kind && existing.workdir === workdir;
-    const turn = reuse
-      ? await this.executor.send(existing, {
-          kind: inputKindOf(input.event),
-          text: input.brief,
-        })
-      : await this.executor.start({
+    const existing = await this.sessions.get(worker.workerId, worker.tenantId);
+    // A rebuilt box has lost the CLI's session files, so it starts over.
+    const reuse =
+      existing &&
+      existing.kind === this.executor.kind &&
+      existing.workdir === workdir &&
+      existing.boxId === boxId;
+    const turn = !reuse
+      ? await this.executor.start({
           workerId: worker.workerId,
           ticket: input.brief,
           mandate: worker.mandate,
@@ -498,7 +557,15 @@ export class ExecutorCoder implements CoderPort {
           ...(this.options.model ? { model: this.options.model } : {}),
           systemPrompt: executorSystemPrompt(worker.mandate, this.options.rules),
           ...(boxId ? { boxId } : {}),
-        });
+        })
+      : this.attached.has(existing.sessionId)
+        ? await this.executor.send(existing, {
+            kind: inputKindOf(input.event),
+            text: input.brief,
+          })
+        : await this.executor.resume(existing, `${RECOVERY_NOTE}\n\n${input.brief}`);
+    this.attached.add(turn.session.sessionId);
+    if (worker.tenantId) turn.session.tenantId = worker.tenantId;
     await this.sessions.put(turn.session);
     const spentTurns = reuse ? (existing.turns ?? 0) : 0;
     const budget = assignmentBudget(worker.mandate, worker.usage, spentTurns);

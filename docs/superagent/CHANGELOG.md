@@ -8,7 +8,24 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
-## 2026-11-03 03:47 MST — superagent/executor-bench
+## 2026-11-03 03:50 MST — superagent/executor-recovery
+
+- **What:** restart recovery and follow-up hand-back for executor sessions (Phase 3b).
+  - `StoreExecutorSessionStore` keeps each worker's executor session in the tenant's store document `executor-sessions` (`putDocument`; no schema change). Sessions now carry `tenantId`, and the session store is keyed per tenant.
+  - `ExecutorCoder` remembers the sessions this process started or resumed. A stored session it has not seen means the host restarted. That first turn is `resume` with `RECOVERY_NOTE` ahead of the brief: check the working directory, `git status` / `git log` and the pull request on GitHub before repeating any outside action. Later follow-ups (CI, review, other) go to the same session through `send`.
+  - A session whose `boxId` differs from the worker's box (the box was rebuilt) starts over, because the CLI's session files are gone.
+  - `createCoderFromEnv` takes an optional `sessions` store.
+  - `docs/superagent/dsh-gap.md` lists DSH 001–003 requirements against the code: what we have, what is partial, what is missing, with the next five steps.
+- **Why:** executor-decision.md: reliability follows DSH 003 (restart with a recovery note, follow-ups to the original session).
+- **Tests:** `executor.test` 10 passed, two of them new:
+  - After a restart, a new coder and executor on the same store resume the stored session with the note, and the next follow-up is `send` into the same session id. Another tenant's worker with the same id starts its own session.
+  - A session from a rebuilt box starts over.
+
+  Both new tests fail when `send` and box reuse are forced back to the old behavior. Package suite on macOS: 316 of 317. The only failure is `box-daemon` RSS, which reads `/proc` and runs on Linux only.
+- **Live:** n/a.
+- **Migrations / risk:** none. It uses a tenant JSON document and needs no `user_version` bump. Nothing changes until a caller passes a store-backed session store; the default stays in memory.
+
+## 2026-11-03 03:47 MST — superagent/executor-bench — 5ac5bd249
 
 - **What:** `npm run executor-bench` (`executor-bench.ts`) runs the Phase 6 benchmark with the same small task set for each executor: `fix-add`, `new-sub` and `fix-slug`, three Node repos with a failing test.
   - Each task gets a fresh Instabox and its own Super-agent. The act Mandate has budgets of $1, 2M tokens, 15 min and 60 turns, and the coding loop uploads the repo to the box.

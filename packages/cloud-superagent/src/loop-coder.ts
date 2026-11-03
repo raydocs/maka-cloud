@@ -2,7 +2,7 @@ import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { z } from 'zod';
 import { ClaudeCodeExecutor, type GatewayRoute } from './claude-code-executor.js';
-import { ExecutorCoder } from './executor.js';
+import { ExecutorCoder, type ExecutorSessionStore } from './executor.js';
 import { BoxProcessRunner } from './executor-process.js';
 import { BOX_REPO } from './loop-box.js';
 import type { SandboxPort } from './sandbox.js';
@@ -111,7 +111,7 @@ export const EXECUTOR_CLAUDE_SECRET_ENV = 'MAKA_CLOUD_EXECUTOR_CLAUDE_SECRET';
 export function createCoderFromEnv(
   env: NodeJS.ProcessEnv = process.env,
   fetchImpl: typeof fetch = fetch,
-  options: { sandbox?: SandboxPort } = {},
+  options: { sandbox?: SandboxPort; sessions?: ExecutorSessionStore } = {},
 ): { coder: CoderPort; kind: 'fake' | 'model' | 'claude-code' } {
   const executor = env[EXECUTOR_ENV]?.trim();
   if (executor === 'claude-code') {
@@ -134,7 +134,11 @@ export function createCoderFromEnv(
               }
             : {}),
         }),
-        sandbox ? { box: { sandbox, workdir: BOX_REPO } } : {},
+        {
+          ...(sandbox ? { box: { sandbox, workdir: BOX_REPO } } : {}),
+          // A store-backed session store lets a restarted host resume each session.
+          ...(options.sessions ? { sessions: options.sessions } : {}),
+        },
       ),
       kind: 'claude-code',
     };

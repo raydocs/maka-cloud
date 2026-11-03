@@ -571,10 +571,13 @@ export {
 } from './executor-bench.js';
 export {
   EXECUTOR_KINDS,
+  EXECUTOR_SESSIONS_DOCUMENT,
+  RECOVERY_NOTE,
   STATUS_MARKER,
   ExecutorCoder,
   FakeExecutor,
   MemoryExecutorSessionStore,
+  StoreExecutorSessionStore,
   addExecutorUsage,
   driveTurn,
   emptyExecutorUsage,

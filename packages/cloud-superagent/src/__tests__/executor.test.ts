@@ -3,9 +3,12 @@ import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import {
+  EXECUTOR_SESSIONS_DOCUMENT,
   ExecutorCoder,
   FakeExecutor,
+  RECOVERY_NOTE,
   STATUS_MARKER,
+  StoreExecutorSessionStore,
   driveTurn,
   eventsOf,
   executorSystemPrompt,
@@ -21,6 +24,7 @@ import {
   NodeFileTestPort,
   scratchFiles,
 } from '../loop.js';
+import { MemorySuperagentStore } from '../memory-store.js';
 import { FakeSandbox } from '../sandbox.js';
 import { actMandate, type NormalizedEvent, type WorkerRecord } from '../types.js';
 import { initLocalRepo } from '../workspace.js';
@@ -135,6 +139,70 @@ test('ExecutorCoder starts one session and sends follow-ups into the same sessio
     ],
   );
   assert.equal(new Set(executor.calls.map((call) => call.sessionId)).size, 1);
+});
+
+test('after a restart a stored session resumes with the recovery note; follow-ups stay in it', async () => {
+  const dir = await initLocalRepo(scratchFiles());
+  const store = new MemorySuperagentStore();
+  const before = new FakeExecutor({ files: { 'add.js': ADD_FIXED } });
+  await new ExecutorCoder(before, { sessions: new StoreExecutorSessionStore(store) }).apply({
+    dir,
+    brief: 'fix add',
+    event: event('pr_opened'),
+    worker: worker(),
+  });
+  const sessionId = before.calls[0]?.sessionId;
+  assert.ok(store.getDocument('t', EXECUTOR_SESSIONS_DOCUMENT)?.includes(sessionId as string));
+  assert.equal(store.getDocument('', EXECUTOR_SESSIONS_DOCUMENT), undefined, 'stored per tenant');
+
+  // A new process: new coder and executor, same store.
+  const after = new FakeExecutor({ files: { 'add.js': ADD_FIXED } });
+  const coder = new ExecutorCoder(after, { sessions: new StoreExecutorSessionStore(store) });
+  await coder.apply({ dir, brief: 'CI failed', event: event('ci_failed'), worker: worker() });
+  await coder.apply({ dir, brief: 'nit', event: event('review_comment'), worker: worker() });
+  assert.deepEqual(
+    after.calls.map((call) => [call.op, call.sessionId]),
+    [
+      ['resume', sessionId],
+      ['send', sessionId],
+    ],
+  );
+  assert.equal(after.calls[0]?.text, `${RECOVERY_NOTE}\n\nCI failed`);
+  assert.equal(after.calls[1]?.text, 'nit');
+
+  // Another tenant's worker with the same id does not see this session.
+  const other = new FakeExecutor({ files: { 'add.js': ADD_FIXED } });
+  await new ExecutorCoder(other, { sessions: new StoreExecutorSessionStore(store) }).apply({
+    dir,
+    brief: 'fix add',
+    event: event('pr_opened'),
+    worker: { ...worker(), tenantId: 't2' } as WorkerRecord,
+  });
+  assert.equal(other.calls[0]?.op, 'start');
+});
+
+test('a session from a box that was rebuilt starts over instead of resuming', async () => {
+  const store = new MemorySuperagentStore();
+  const sessions = new StoreExecutorSessionStore(store);
+  const sandbox = new FakeSandbox();
+  const boxed = (sandboxRef: string) => ({ ...worker(), sandboxRef }) as WorkerRecord;
+  const steps = () => [[{ type: 'ready', summary: 'ok' } as ExecutorEvent]];
+  // The fake box has no checkout to read changes from; only the session choice matters here.
+  const ignore = () => undefined;
+  const first = new FakeExecutor({ steps: steps() });
+  const box = { sandbox, workdir: '/w' };
+  await new ExecutorCoder(first, { sessions, box })
+    .apply({ brief: 'fix add', event: event('pr_opened'), worker: boxed('box-a') })
+    .catch(ignore);
+  assert.equal((await sessions.get('w1', 't'))?.boxId, 'box-a');
+  const second = new FakeExecutor({ steps: steps() });
+  await new ExecutorCoder(second, { sessions, box })
+    .apply({ brief: 'CI failed', event: event('ci_failed'), worker: boxed('box-b') })
+    .catch(ignore);
+  assert.deepEqual(
+    second.calls.map((call) => call.op),
+    ['start'],
+  );
 });
 
 test('different workers get different sessions', async () => {
