@@ -8,6 +8,15 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
+## 2026-11-02 17:51 MST — cursor/superagent-watchdog-duplex-51be — 7f0174146
+
+- **PR:** [#476](https://github.com/raydocs/maka-cloud/pull/476)
+- **What:** merge: cursor/superagent-byom-spec-51be (#475) into Super-agent watchdog-duplex. Kept conversational watchdog/duplex and BYOM/scheduler/graph/BoxPool/autonomy. Keep every CHANGELOG entry, newest first. This branch is now a descendant of #475, #477, #474, and main.
+- **Why:** One-pass linearization so #474 → #477 → #475 → #476 → #478 → #479 → #480 can merge in order without re-conflicts.
+- **Tests:** 233 `@maka-cloud/superagent` tests passed after the merge
+- **Live:** n/a
+- **Migrations / risk:** none. JSON fields only. New features stay default-off.
+
 ## 2026-11-02 17:49 MST — cursor/superagent-byom-spec-51be — 70bbaeba1
 
 - **PR:** [#475](https://github.com/raydocs/maka-cloud/pull/475)
