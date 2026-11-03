@@ -171,6 +171,29 @@ import {
   type WatchdogAnswer,
   type WatchdogNarrator,
 } from './watchdog-query.js';
+import {
+  DEFAULT_LEARNING,
+  formatLessonPrefix,
+  isWatchdogCorrectAction,
+  learningSettingsFrom,
+  lessonAuditDetail,
+  LessonBook,
+  proposalAuditDetail,
+  recallWithLessons,
+  reviewBounceOf,
+  stripLessonPrefix,
+  type LearningSettings,
+  type LessonRecord,
+  type SkillProposal,
+} from './lessons.js';
+import {
+  DEFAULT_PEER_REVIEW,
+  peerReviewSettingsFrom,
+  runPeerReview,
+  type PeerReviewInput,
+  type PeerReviewOutcome,
+  type PeerReviewSettings,
+} from './peer-review.js';
 
 export type IngestResult =
   | { result: 'rejected'; reason: string; judgeCalls: 0 }
@@ -319,6 +342,16 @@ export interface SuperagentOptions {
   targets?: ExecutionTargetResolver;
   /** Cheap watchdog narrator. Absent → deterministic fallback. */
   watchdogNarrator?: WatchdogNarrator;
+  /**
+   * Mistake book. Default off. Host passes this; the constructor never
+   * reads environment variables.
+   */
+  learning?: Partial<LearningSettings> | LearningSettings;
+  /**
+   * Cross-model review before push / open-PR. Default off. Host passes
+   * this; the constructor never reads environment variables.
+   */
+  peerReview?: Partial<PeerReviewSettings> | PeerReviewSettings;
 }
 
 export class Superagent {
@@ -347,6 +380,9 @@ export class Superagent {
   readonly byom: ByomHub | undefined;
   readonly targets: ExecutionTargetResolver;
   private readonly speculativeCleanup?: SpeculativeCleanup;
+  readonly learning: LearningSettings;
+  readonly peerReview: PeerReviewSettings;
+  readonly lessonsBook: LessonBook;
   private readonly liveFacts?: (worker: WorkerRecord) => Promise<Partial<LiveFacts>>;
   readonly escalations: StuckCard[] = [];
   /** Timer-loop findings the conversational watchdog can cite. */
@@ -413,10 +449,111 @@ export class Superagent {
       options.targets ??
       new DefaultExecutionResolver(this.sandbox, this.defaultSandboxRef, options.byom);
     this.watchdogNarrator = options.watchdogNarrator;
+    this.learning = options.learning ? learningSettingsFrom(options.learning) : DEFAULT_LEARNING;
+    this.peerReview = options.peerReview
+      ? peerReviewSettingsFrom(options.peerReview)
+      : DEFAULT_PEER_REVIEW;
+    this.lessonsBook = new LessonBook();
   }
 
   ledger(tenantId: string) {
     return this.store.tenantUsage(tenantId);
+  }
+
+  lessons(tenantId: string): LessonRecord[] {
+    this.hydrateLessons(tenantId);
+    return this.lessonsBook.list(tenantId);
+  }
+
+  lessonDocument(tenantId: string, repo = 'tenant'): string {
+    this.hydrateLessons(tenantId);
+    return this.lessonsBook.document(tenantId, repo);
+  }
+
+  proposals(tenantId: string): SkillProposal[] {
+    this.hydrateLessons(tenantId);
+    return this.lessonsBook.proposals(tenantId);
+  }
+
+  distillLessons(
+    tenantId: string,
+    repo = 'tenant',
+  ): { document: string; proposals: SkillProposal[]; groups: number } {
+    this.hydrateLessons(tenantId);
+    const at = this.now();
+    const result = this.lessonsBook.distill(tenantId, repo, at);
+    for (const proposal of result.proposals) {
+      this.audit(tenantId, null, 'lesson_proposed', at, {
+        ...proposalAuditDetail(proposal, { document: result.document, scope: repo }),
+      });
+    }
+    return result;
+  }
+
+  acceptLesson(
+    tenantId: string,
+    lessonId: string,
+  ): { ok: true; lesson: LessonRecord } | { ok: false; reason: string } {
+    this.hydrateLessons(tenantId);
+    const lesson = this.lessonsBook.setStatus(tenantId, lessonId, 'accepted');
+    if (!lesson) return { ok: false, reason: 'unknown_lesson' };
+    const at = this.now();
+    this.audit(tenantId, lesson.workerId, 'lesson_accepted', at, {
+      lessonId,
+      status: 'accepted',
+    });
+    return { ok: true, lesson };
+  }
+
+  rejectLesson(
+    tenantId: string,
+    lessonId: string,
+  ): { ok: true; lesson: LessonRecord } | { ok: false; reason: string } {
+    this.hydrateLessons(tenantId);
+    const lesson = this.lessonsBook.setStatus(tenantId, lessonId, 'rejected');
+    if (!lesson) return { ok: false, reason: 'unknown_lesson' };
+    const at = this.now();
+    this.audit(tenantId, lesson.workerId, 'lesson_rejected', at, {
+      lessonId,
+      status: 'rejected',
+    });
+    return { ok: true, lesson };
+  }
+
+  acceptProposal(
+    tenantId: string,
+    proposalId: string,
+  ): { ok: true; proposal: SkillProposal } | { ok: false; reason: string } {
+    this.hydrateLessons(tenantId);
+    const proposal = this.lessonsBook.setProposalStatus(tenantId, proposalId, 'accepted');
+    if (!proposal) return { ok: false, reason: 'unknown_proposal' };
+    const at = this.now();
+    this.audit(tenantId, null, 'lesson_accepted', at, {
+      proposalId,
+      status: 'accepted',
+      applied: false,
+    });
+    return { ok: true, proposal };
+  }
+
+  rejectProposal(
+    tenantId: string,
+    proposalId: string,
+  ): { ok: true; proposal: SkillProposal } | { ok: false; reason: string } {
+    this.hydrateLessons(tenantId);
+    const proposal = this.lessonsBook.setProposalStatus(tenantId, proposalId, 'rejected');
+    if (!proposal) return { ok: false, reason: 'unknown_proposal' };
+    const at = this.now();
+    this.audit(tenantId, null, 'lesson_rejected', at, {
+      proposalId,
+      status: 'rejected',
+    });
+    return { ok: true, proposal };
+  }
+
+  recallLesson(tenantId: string, lessonId: string): string | undefined {
+    this.hydrateLessons(tenantId);
+    return this.lessonsBook.recall(tenantId, lessonId);
   }
 
   async ingest(input: IngestInput): Promise<IngestResult> {
@@ -1230,6 +1367,21 @@ export class Superagent {
     if (!decided.ok) return decided;
     const worker = this.store.worker(tenantId, decided.approval.workerId);
     if (!worker) return { ok: false, reason: 'worker_gone' };
+    if (this.learning.enabled) {
+      this.recordLesson({
+        tenantId,
+        triggerEventId: this.putInternalEvent(worker, 'approval_denied', at, [
+          ['kind', decided.approval.kind],
+          ['boundText', decided.approval.boundText],
+        ]),
+        cause: 'approval_denied',
+        mistake: `Owner denied ${decided.approval.kind}: ${decided.approval.boundText}`,
+        correct: 'Ask before irreversible work; wait for an exact-text grant.',
+        scope: worker.subject.repo ?? 'tenant',
+        workerId: worker.workerId,
+        at,
+      });
+    }
     await this.retire(worker, at, 'approval_denied');
     this.audit(tenantId, worker.workerId, 'denied', at, { approvalId });
     return { ok: true, workerId: worker.workerId };
@@ -1261,6 +1413,18 @@ export class Superagent {
       sha: receipt.sha,
       verdict: receipt.verdict,
     });
+    if (receipt.verdict === 'BLOCK' && this.learning.enabled) {
+      this.recordLesson({
+        tenantId,
+        triggerEventId: worker.lastEventId ?? this.ids.event(),
+        cause: 'review_rejected',
+        mistake: receipt.summary,
+        correct: 'Address every BLOCK finding before proposing merge.',
+        scope: worker.subject.repo ?? 'tenant',
+        workerId,
+        at,
+      });
+    }
     return { ok: true, receipt };
   }
 
@@ -1973,6 +2137,7 @@ export class Superagent {
       updatedAt: at,
       retiredAt: null,
     };
+    if (this.learning.enabled) this.injectLessons(worker);
     this.store.putWorker(worker);
     if (extras.subscribe !== false) {
       this.store.putSubscription({
@@ -2112,6 +2277,7 @@ export class Superagent {
 
     const event = coalesceInbox(events);
     worker.lastEventId = event.eventId;
+    if (this.learning.enabled) this.noteBounce(worker, event, at);
     try {
       const result = await this.handler.handle(this.context(worker, event), event);
       const halt = await this.applyResult(worker, result, at);
@@ -2146,9 +2312,14 @@ export class Superagent {
     at: number,
   ): Promise<boolean> {
     if (result.memory !== undefined) {
-      const spilled = spillMemory(result.memory, worker.spills ?? [], at);
+      const body = stripLessonPrefix(worker.lessonPrefix, result.memory);
+      const spilled = spillMemory(body, worker.spills ?? [], at);
       worker.memory = spilled.inline;
       worker.spills = spilled.spills;
+      if (this.learning.enabled) {
+        const pushed = /(?:^|\s)pushed ([0-9a-f]{7,40})\b/i.exec(result.memory);
+        if (pushed?.[1]) worker.lastPushSha = pushed[1];
+      }
     }
     if (result.plan !== undefined) worker.plan = result.plan;
     if (result.progressUpdate) await this.recordProgress(worker, result.progressUpdate, at);
@@ -2303,6 +2474,7 @@ export class Superagent {
     this.audit(current.tenantId, current.workerId, 'restart', at, {
       generation: current.generation,
     });
+    this.recordWatchdogLesson(current, 'restart', 'Watchdog restarted the worker.', at);
     await this.drain(current.tenantId, current.workerId);
   }
 
@@ -2338,6 +2510,7 @@ export class Superagent {
     current.updatedAt = at;
     this.store.putWorker(current);
     this.audit(current.tenantId, current.workerId, 'stopped', at, { reason });
+    this.recordWatchdogLesson(current, 'stop', reason, at);
   }
 
   private async nudge(worker: WorkerRecord, at: number, detail: string): Promise<void> {
@@ -2366,6 +2539,18 @@ export class Superagent {
       nudges: current.nudges,
       detail,
     });
+    if (this.learning.enabled) {
+      this.recordLesson({
+        tenantId: current.tenantId,
+        triggerEventId: event.eventId,
+        cause: 'watchdog_correct',
+        mistake: `Watchdog nudged: ${detail}`,
+        correct: 'Make visible progress or declare a wait (CI/review/human).',
+        scope: current.subject.repo ?? 'tenant',
+        workerId: current.workerId,
+        at,
+      });
+    }
   }
 
   private markStuck(worker: WorkerRecord, at: number): void {
@@ -2375,6 +2560,7 @@ export class Superagent {
     current.updatedAt = at;
     this.store.putWorker(current);
     this.audit(current.tenantId, current.workerId, 'stuck', at, {});
+    this.recordWatchdogLesson(current, 'escalate', 'Watchdog marked the worker stuck.', at);
   }
 
   private async collectReview(
@@ -2398,6 +2584,18 @@ export class Superagent {
       sha: receipt.sha,
       verdict: receipt.verdict,
     });
+    if (receipt.verdict === 'BLOCK' && this.learning.enabled) {
+      this.recordLesson({
+        tenantId: worker.tenantId,
+        triggerEventId: worker.lastEventId ?? this.ids.event(),
+        cause: 'review_rejected',
+        mistake: receipt.summary,
+        correct: 'Address every BLOCK finding before proposing merge.',
+        scope: worker.subject.repo ?? 'tenant',
+        workerId: worker.workerId,
+        at,
+      });
+    }
   }
 
   private async readLive(worker: WorkerRecord, at: number): Promise<LiveFacts> {
@@ -2432,7 +2630,11 @@ export class Superagent {
       event,
       sandbox: this.sandboxFor(worker),
       orgSecrets: this.orgSecrets,
-      recall: () => recallMemory(worker),
+      recall: () => recallWithLessons(worker, recallMemory),
+      recallLesson: (lessonId) => this.recallLesson(worker.tenantId, lessonId),
+      peerReview: this.peerReview.enabled
+        ? (input) => this.reviewBeforePublish(worker, input)
+        : undefined,
       reportProgress: async (patch) => {
         const live = this.store.worker(worker.tenantId, worker.workerId);
         if (!live) return;
@@ -2623,6 +2825,209 @@ export class Superagent {
     }
   }
 
+  private hydrateLessons(tenantId: string): void {
+    if (this.lessonsBook.hydrated(tenantId)) return;
+    this.lessonsBook.loadFromAudit(this.store.audit(tenantId));
+    this.lessonsBook.markHydrated(tenantId);
+  }
+
+  private injectLessons(worker: WorkerRecord): void {
+    this.hydrateLessons(worker.tenantId);
+    const accepted = this.lessonsBook.acceptedFor(worker.tenantId, worker.subject.repo);
+    const { prefix } = formatLessonPrefix(accepted, this.learning.injectBudget);
+    if (!prefix) return;
+    worker.lessonPrefix = prefix;
+    worker.lessonRefs = accepted.map((row) => row.lessonId);
+  }
+
+  private noteBounce(worker: WorkerRecord, event: NormalizedEvent, at: number): void {
+    const review = reviewBounceOf(event);
+    if (review) {
+      this.recordLesson({
+        tenantId: worker.tenantId,
+        triggerEventId: event.eventId,
+        cause: review,
+        mistake: fieldLabel(event, 'comment') || event.summary,
+        correct: 'Address the review findings before pushing again.',
+        scope: worker.subject.repo ?? 'tenant',
+        workerId: worker.workerId,
+        at,
+      });
+      return;
+    }
+    if (event.type === 'ci_failed' && (worker.lastPushSha || /pushed /i.test(worker.memory))) {
+      worker.ciFailedEventId = event.eventId;
+      return;
+    }
+    if (event.type === 'ci_passed' && worker.ciFailedEventId) {
+      this.recordLesson({
+        tenantId: worker.tenantId,
+        triggerEventId: worker.ciFailedEventId,
+        cause: 'ci_failed_then_fixed',
+        mistake: `CI failed after push ${worker.lastPushSha ?? ''}`.trim(),
+        correct: fieldLabel(event, 'sha')
+          ? `Landed a fix that made CI pass at ${fieldLabel(event, 'sha')}.`
+          : 'Re-run the repo tests on the box before pushing.',
+        scope: worker.subject.repo ?? 'tenant',
+        workerId: worker.workerId,
+        at,
+      });
+      worker.ciFailedEventId = null;
+    }
+  }
+
+  private recordWatchdogLesson(
+    worker: WorkerRecord,
+    action: string,
+    detail: string,
+    at: number,
+  ): void {
+    if (!this.learning.enabled || !isWatchdogCorrectAction(action)) return;
+    this.recordLesson({
+      tenantId: worker.tenantId,
+      triggerEventId: this.putInternalEvent(worker, 'watchdog_correct', at, [
+        ['action', action],
+        ['detail', detail],
+      ]),
+      cause: 'watchdog_correct',
+      mistake: `Watchdog ${action}: ${detail}`,
+      correct: 'Keep a heartbeat, declare waits, and stay inside the mandate budget.',
+      scope: worker.subject.repo ?? 'tenant',
+      workerId: worker.workerId,
+      at,
+    });
+  }
+
+  private recordLesson(draft: Parameters<LessonBook['record']>[0]): LessonRecord | undefined {
+    if (!this.learning.enabled) return undefined;
+    this.hydrateLessons(draft.tenantId);
+    const lesson = this.lessonsBook.record(draft, this.learning.scrub);
+    const already = this.store
+      .audit(draft.tenantId)
+      .some(
+        (row) =>
+          row.kind === 'lesson_recorded' && row.detail.triggerEventId === draft.triggerEventId,
+      );
+    if (!already) {
+      this.audit(draft.tenantId, draft.workerId ?? null, 'lesson_recorded', draft.at, {
+        ...lessonAuditDetail(lesson),
+      });
+    }
+    if (
+      this.learning.distillAfter > 0 &&
+      this.lessonsBook.recordedCount(draft.tenantId) % this.learning.distillAfter === 0
+    ) {
+      this.distillLessons(draft.tenantId, draft.scope || 'tenant');
+    }
+    return lesson;
+  }
+
+  private putInternalEvent(
+    worker: WorkerRecord,
+    type: string,
+    at: number,
+    fields: Array<[string, string]>,
+  ): string {
+    const eventId = this.ids.event();
+    this.store.putEvent({
+      eventId,
+      tenantId: worker.tenantId,
+      source: 'internal',
+      type,
+      subject: worker.subject,
+      idempotencyKey: `${type}:${worker.workerId}:${eventId}`,
+      actor: { login: 'system', kind: 'system' },
+      occurredAt: at,
+      receivedAt: at,
+      summary: type.replaceAll('_', ' '),
+      fields,
+      closesSubject: false,
+    });
+    return eventId;
+  }
+
+  private async reviewBeforePublish(
+    worker: WorkerRecord,
+    input: PeerReviewInput,
+  ): Promise<PeerReviewOutcome> {
+    const live = this.store.worker(worker.tenantId, worker.workerId) ?? worker;
+    const at = this.now();
+    const outcome = await runPeerReview({
+      settings: this.peerReview,
+      diff: input.diff,
+      repo: input.repo ?? live.subject.repo,
+      currentRounds: live.peerReviewRounds ?? 0,
+    });
+    if (outcome.usage && !outcome.skipped) {
+      this.chargeUsage(live, outcome.usage, at);
+      worker.usage = live.usage;
+    }
+    if (outcome.skipped) {
+      this.audit(live.tenantId, live.workerId, 'peer_review_skipped', at, {
+        reason: outcome.skipped,
+      });
+      return outcome;
+    }
+    live.peerReviewRounds = outcome.rounds;
+    worker.peerReviewRounds = outcome.rounds;
+    this.store.putWorker(live);
+    this.audit(live.tenantId, live.workerId, 'peer_review', at, {
+      severity: outcome.severity,
+      waiting: outcome.waiting,
+      rounds: outcome.rounds,
+      tokens: outcome.usage?.tokens ?? 0,
+      usdMicros: outcome.usage?.usdMicros ?? 0,
+    });
+    if (outcome.severity === 'block' && this.learning.enabled) {
+      this.recordLesson({
+        tenantId: live.tenantId,
+        triggerEventId: this.putInternalEvent(live, 'peer_review_block', at, [
+          ['severity', outcome.severity],
+          ['feedback', outcome.feedback.slice(0, 400)],
+        ]),
+        cause: 'peer_review',
+        mistake: outcome.feedback,
+        correct: outcome.correct ?? 'Fix blocking peer-review findings before push.',
+        scope: live.subject.repo ?? input.repo ?? 'tenant',
+        workerId: live.workerId,
+        at,
+      });
+    }
+    return outcome;
+  }
+
+  private chargeUsage(
+    worker: WorkerRecord,
+    usage: Partial<WorkerRecord['usage']>,
+    at: number,
+  ): void {
+    const delta = {
+      tokens: usage.tokens ?? 0,
+      usdMicros: usage.usdMicros ?? 0,
+      wallMs: usage.wallMs ?? 0,
+    };
+    worker.usage = {
+      tokens: worker.usage.tokens + delta.tokens,
+      usdMicros: worker.usage.usdMicros + delta.usdMicros,
+      wallMs: worker.usage.wallMs + delta.wallMs,
+      inputTokens: (worker.usage.inputTokens ?? 0) + (usage.inputTokens ?? 0),
+      outputTokens: (worker.usage.outputTokens ?? 0) + (usage.outputTokens ?? 0),
+    };
+    this.store.putUsage(worker.tenantId, worker.workerId, worker.usage, at);
+    this.store.appendUsageEvent({
+      tenantId: worker.tenantId,
+      workerId: worker.workerId,
+      ...delta,
+      at,
+    });
+    this.metering.record({
+      tenantId: worker.tenantId,
+      workerId: worker.workerId,
+      ...delta,
+      at,
+    });
+  }
+
   private audit(
     tenantId: string,
     workerId: string | null,
@@ -2639,4 +3044,8 @@ export class Superagent {
       detail,
     });
   }
+}
+
+function fieldLabel(event: NormalizedEvent, label: string): string {
+  return event.fields.find(([name]) => name === label)?.[1] ?? '';
 }

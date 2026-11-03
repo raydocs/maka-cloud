@@ -8,7 +8,15 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
-## 2026-11-02 17:57 MST — cursor/superagent-wiring-51be
+## 2026-11-02 17:59 MST — cursor/superagent-wiring-51be
+
+- **What:** merge `cursor/superagent-learning-review-51be` (#478) into the wiring branch. Mistake book and cross-model review stay off unless the host passes `learning` / `peerReview`. Scheduler, BYOM, duplex, and pause verification stay.
+- **Why:** Linearize batch 2 in order. sqlite `user_version` stays 2.
+- **Tests:** conflict resolution only; suites run after the remaining tips merge.
+- **Live:** n/a
+- **Migrations / risk:** none. No `user_version` bump.
+
+## 2026-11-02 17:57 MST — cursor/superagent-wiring-51be — 859f44d78
 
 - **What:** merge `cursor/superagent-watchdog-duplex-51be` (#476) into the wiring branch. Kept scheduler, intake, BYOM, and speculative fields next to duplex `seenEventIds` / conversational watchdog status. Pause still refuses until the box is verified stopped.
 - **Why:** Linearize batch 2 onto the wiring branch in the agreed order. sqlite `user_version` stays 2.
@@ -23,6 +31,15 @@ a heading time is more than five minutes off that SHA's committer date.
 - **Tests:** conflict resolution only; suites run after the remaining tips merge.
 - **Live:** n/a
 - **Migrations / risk:** none. No `user_version` bump.
+
+## 2026-11-02 13:29 MST — cursor/superagent-learning-review-51be — 66178a088
+
+- **PR:** [#478](https://github.com/raydocs/maka-cloud/pull/478)
+- **What:** Optional mistake book (off by default) records a lesson when work is bounced — review changes/reject, CI fail-then-fix after a worker push, owner deny, watchdog correction, peer-review BLOCK. Distill merges repo-level lessons and emits skill/prompt diffs that are never auto-applied. Accepted lessons inject as an append-only id+summary prefix via existing spill/recall. Optional cross-model review (off by default, default 2 rounds) runs a different model on the diff before push/PR; blocking findings bounce the worker, then wait on a human; tokens go to the usage ledger. Tests use `FakePeerReviewClient`. Constructor does not read env; host passes flags. No sqlite `user_version` bump (audit + worker JSON).
+- **Why:** Self-learning from bounced work and a second-model review gate, without touching parallel scheduler/watchdog/BYOM/box branches.
+- **Tests:** `@maka-cloud/superagent` typecheck + `node --test` + biome format
+- **Live:** n/a
+- **Migrations / risk:** none. Defaults false. No server/deploy/billing change.
 
 ## 2026-11-02 13:26 MST — cursor/superagent-intake-merge-51be — e45c5fc4f
 
@@ -69,6 +86,14 @@ a heading time is more than five minutes off that SHA's committer date.
 - **Live:** n/a
 - **Migrations / risk:** none. `documents` is `CREATE TABLE IF NOT EXISTS`. Schema version stays 2.
 
+## 2026-11-02 12:13 MST — cursor/superagent-real-loop-51be — b87e48b09
+
+- **PR:** [#471](https://github.com/raydocs/maka-cloud/pull/471)
+- **What:** Host stack test ticks twice for W2 (nudge, then escalate → stuck card), matching `stuck.test.ts` / `watchdog.test.ts`. Forwarded from #466: harness cleanup kills `.setup-*` install dirs and retries `fs.rm` on ENOTEMPTY.
+- **Why:** CI `test` on #471 run 41497463473: `the stack always starts Super-agent in process and a stalled worker is a stuck card` expected a card after one tick (`0 !== 1`). Real, deterministic — 3fd50604e made first stall a nudge. CI `test` on #466 run 41415227391: `cancel while the CLI is being installed releases everything` after-hook `ENOTEMPTY` on `work/.setup-claude`. Flake in a test we own; assertions unchanged. #464 run 41415226108 `drains a retraction started before /new re-keys` is an upstream `packages/cli` TUI flake (1453/1457 passed; prior host SHA green). iOS on #464–#466 cancelled at 45m after `simctl install` printed `Authorization is required to install the packages` — self-hosted Mac, no Maestro assertion, needs a human.
+- **Tests:** cloud-host stack stuck-card; cloud-runners cancel-while-install
+- **Live:** n/a
+- **Migrations / risk:** none. Test-only.
 ## 2026-11-02 11:06 MST — cursor/superagent-real-loop-51be — 4b2c813e3
 
 - **PR:** [#471](https://github.com/raydocs/maka-cloud/pull/471)

@@ -221,9 +221,11 @@ export async function setup(options: SetupOptions = {}): Promise<Harness> {
       return names.filter((name) => name.startsWith(`${vendor}-`) && name.endsWith('.argv')).length;
     },
     async cleanup() {
-      // Kill anything a test left running before the files go away.
+      // Kill anything a test left running before the files go away, including
+      // `.setup-*` install dirs (hidden, so they used to be skipped). A leftover
+      // writer there makes `fs.rm` throw ENOTEMPTY.
       for (const dir of await fs.readdir(root).catch(() => [] as string[])) {
-        if (!dir.startsWith('.'))
+        if (!dir.startsWith('.') || dir.startsWith('.setup-'))
           await runners.fleet
             .machine(fake.machineId)
             .kill(dir)
@@ -238,8 +240,8 @@ export async function setup(options: SetupOptions = {}): Promise<Harness> {
         } catch {}
       }
       await fake.close();
-      await fs.rm(logRoot, { recursive: true, force: true });
-      await fs.rm(tmp, { recursive: true, force: true });
+      await fs.rm(logRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+      await fs.rm(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     },
   };
 }

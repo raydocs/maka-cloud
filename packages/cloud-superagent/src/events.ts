@@ -370,6 +370,8 @@ function githubReview(
         ['reviewer', data.sender.login],
         ['comment', clip(body)],
         ['file', data.comment?.path ?? ''],
+        ['state', (data.review?.state ?? '').toLowerCase()],
+        ['action', data.action],
       ],
       closesSubject: false,
     }),
