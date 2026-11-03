@@ -50,6 +50,8 @@ export type DuplexStep =
       plan?: string;
       progressUpdate?: ProgressPatch;
       usage?: Partial<Usage>;
+      /** When set, the loop returns this result instead of a progress-only ack. */
+      result?: HandlerResult;
     };
 
 export interface DuplexContext {
@@ -202,6 +204,7 @@ export class DuplexLoop implements WorkerHandler {
       if ('usage' in step && step.usage) usage = { ...usage, ...step.usage };
 
       if (step.kind === 'done') {
+        if (step.result) return step.result;
         return { progress: true, memory, plan, progressUpdate, usage };
       }
 

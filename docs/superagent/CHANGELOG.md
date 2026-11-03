@@ -8,6 +8,22 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
+## 2026-11-02 18:37 MST — cursor/superagent-wiring-51be
+
+- **What:** merge the updated `cursor/superagent-decisions-policy-51be` tip (`3c7049b04`), which already contains scheduler, intake, BYOM, duplex, lessons, and review-verify. Kept decision-card wiring (`recordFromCardResolution`, must-ask rows on `statusSnapshot.decisions`), host flags default off, and `CodingLoopHandler` on `DuplexLoop`. Speculative still runs only after a cross-source merge misses. sqlite `user_version` stays 2.
+- **Why:** The linearized tip moved after the first merge of #480. Bring that tip in with git merge only.
+- **Tests:** `@maka-cloud/superagent` `test:dist` 292 passed. Host config, feature-flag, and stack suites passed.
+- **Live:** n/a
+- **Migrations / risk:** none. No `user_version` bump.
+
+## 2026-11-02 18:28 MST — cursor/superagent-wiring-51be — 4212b2578
+
+- **What:** Wire the second batch into one runtime. `resolveDecisionCard` calls `recordFromCardResolution` (`accept` → decided, `reject` → refused, `archive` leaves no standing row). Must-ask rows are copied onto `statusSnapshot.decisions` and still listed on `mustAskPending`. An exact ledger hit does not open another escalation card. Speculative outbound and a Safety hold still produce one card at most. Host `startStack` passes BYOM, the peer-review client, the `/version` probe (skipped when no endpoint is configured), the weekly sweep timer, and rules-file load plus hot reload, each behind its flag and default off. Constructors do not read env. `CodingLoopHandler` runs through `DuplexLoop`; pause still refuses until the box is verified stopped. sqlite `user_version` stays 2.
+- **Why:** The feature branches stay default-off until this wiring turns them on together.
+- **Tests:** `@maka-cloud/superagent` wiring suite and `@maka-cloud/host` feature-flag suite.
+- **Live:** n/a
+- **Migrations / risk:** none. No `user_version` bump. No server, deploy, secret, or billing change.
+
 ## 2026-11-02 18:15 MST — cursor/superagent-decisions-policy-51be — ef272e026
 
 - **PR:** [#480](https://github.com/raydocs/maka-cloud/pull/480)
@@ -116,6 +132,14 @@ a heading time is more than five minutes off that SHA's committer date.
 - **Live:** n/a
 - **Migrations / risk:** none
 
+## 2026-11-02 18:09 MST — cursor/superagent-wiring-51be — 6b5713fae
+
+- **What:** merge `cursor/superagent-decisions-policy-51be` (#480) into the wiring branch. Decision ledger, must-ask, and routing rules sit beside the scheduler, escalation cards, BYOM, duplex, lessons, and release verify. One `applyAction` gates must-ask, Safety, and speculative outbound, so a speculative block does not open a second card. sqlite `user_version` stays 2.
+- **Why:** Linearize batch 2 in order (#479 then #480).
+- **Tests:** conflict resolution only; wiring tests follow in the next commit.
+- **Live:** n/a
+- **Migrations / risk:** none. No `user_version` bump.
+
 ## 2026-11-02 18:09 MST — cursor/superagent-byom-spec-51be — d6ada5292
 
 - **PR:** [#475](https://github.com/raydocs/maka-cloud/pull/475)
@@ -161,6 +185,22 @@ a heading time is more than five minutes off that SHA's committer date.
 - **Live:** n/a
 - **Migrations / risk:** none
 
+## 2026-11-02 18:00 MST — cursor/superagent-wiring-51be — d92ec7bfc
+
+- **What:** merge `cursor/superagent-review-verify-51be` (#479) into the wiring branch. Release verify and the weekly sweep stay off unless the host passes them. Peer-review stats and release-verify records clone with the worker. sqlite `user_version` stays 2.
+- **Why:** Linearize batch 2 in order (#478 then #479).
+- **Tests:** conflict resolution only; suites run after the decisions tip merges.
+- **Live:** n/a
+- **Migrations / risk:** none. No `user_version` bump.
+
+## 2026-11-02 17:59 MST — cursor/superagent-wiring-51be — e3c3de629
+
+- **What:** merge `cursor/superagent-learning-review-51be` (#478) into the wiring branch. Mistake book and cross-model review stay off unless the host passes `learning` / `peerReview`. Scheduler, BYOM, duplex, and pause verification stay.
+- **Why:** Linearize batch 2 in order. sqlite `user_version` stays 2.
+- **Tests:** conflict resolution only; suites run after the remaining tips merge.
+- **Live:** n/a
+- **Migrations / risk:** none. No `user_version` bump.
+
 ## 2026-11-02 17:59 MST — cursor/superagent-decisions-policy-51be — 8df73c97e
 
 - **PR:** [#480](https://github.com/raydocs/maka-cloud/pull/480)
@@ -170,6 +210,21 @@ a heading time is more than five minutes off that SHA's committer date.
 - **Live:** n/a
 - **Migrations / risk:** none. JSON fields only. New features stay default-off.
 
+## 2026-11-02 17:57 MST — cursor/superagent-wiring-51be — 859f44d78
+
+- **What:** merge `cursor/superagent-watchdog-duplex-51be` (#476) into the wiring branch. Kept scheduler, intake, BYOM, and speculative fields next to duplex `seenEventIds` / conversational watchdog status. Pause still refuses until the box is verified stopped.
+- **Why:** Linearize batch 2 onto the wiring branch in the agreed order. sqlite `user_version` stays 2.
+- **Tests:** conflict resolution only; suites run after the remaining tips merge.
+- **Live:** n/a
+- **Migrations / risk:** none. No `user_version` bump.
+
+## 2026-11-02 17:55 MST — cursor/superagent-wiring-51be — a8560951c
+
+- **What:** merge `cursor/superagent-byom-spec-51be` (#475) into the wiring branch (already #477, which contains #474). Kept the scheduler queue and graded escalation, and kept BYOM / speculative spawn. Speculative runs only after a cross-source merge misses. `spawn` is async so a paired device can be chosen at admission. sqlite `user_version` stays 2.
+- **Why:** #480 does not yet contain the other batch-2 branches. The wiring branch merges those tips in order and will merge newer tips later.
+- **Tests:** conflict resolution only; suites run after the remaining tips merge.
+- **Live:** n/a
+- **Migrations / risk:** none. No `user_version` bump.
 ## 2026-11-02 17:53 MST — cursor/superagent-review-verify-51be — d2f66c8f1
 
 - **PR:** [#479](https://github.com/raydocs/maka-cloud/pull/479)

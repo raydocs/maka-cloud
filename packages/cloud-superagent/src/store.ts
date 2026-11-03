@@ -92,14 +92,6 @@ export function cloneWorker(worker: WorkerRecord): WorkerRecord {
     routeRule: worker.routeRule
       ? { ...worker.routeRule, skills: worker.routeRule.skills?.slice() }
       : undefined,
-    peerReviewStats: worker.peerReviewStats
-      ? {
-          ...worker.peerReviewStats,
-          openFindings: [...worker.peerReviewStats.openFindings],
-        }
-      : undefined,
-    releaseVerify: worker.releaseVerify ? { ...worker.releaseVerify } : undefined,
-    seenEventIds: worker.seenEventIds ? [...worker.seenEventIds] : undefined,
     executionTarget: worker.executionTarget ? { ...worker.executionTarget } : undefined,
     speculative: worker.speculative
       ? {
@@ -107,6 +99,14 @@ export function cloneWorker(worker: WorkerRecord): WorkerRecord {
           cost: worker.speculative.cost ? { ...worker.speculative.cost } : undefined,
         }
       : undefined,
+    seenEventIds: worker.seenEventIds ? [...worker.seenEventIds] : undefined,
+    peerReviewStats: worker.peerReviewStats
+      ? {
+          ...worker.peerReviewStats,
+          openFindings: [...worker.peerReviewStats.openFindings],
+        }
+      : undefined,
+    releaseVerify: worker.releaseVerify ? { ...worker.releaseVerify } : undefined,
     autonomy: worker.autonomy
       ? {
           ...worker.autonomy,

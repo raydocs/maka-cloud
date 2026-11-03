@@ -121,8 +121,8 @@ export interface StatusSnapshot {
     action?: { kind: string; ok: boolean; workerId?: string; reason?: string };
   };
   /**
-   * Pending must-ask holds from this package. #477 uses `decisions` for
-   * DecisionCard[]; keep the names distinct so the branches can merge.
+   * Pending must-ask holds. Distinct from escalation `decisions` so both
+   * can sit on one snapshot.
    */
   mustAskPending?: import('./decisions.js').MustAskPending[];
   decisionCitations?: Array<{ workerId?: string; entryId: string; polarity?: string }>;

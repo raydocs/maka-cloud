@@ -59,6 +59,6 @@ the same store will not re-apply those ids.
 - `tick()` still owns W1–W6. Ask is read-only.
 - `coalesceInbox` prefers a preempt event, then `approval_granted`, then
   the latest row. Drain of a sleeping worker is unchanged.
-- CodingLoopHandler is not converted. Duplex is opt-in via `handler`.
+- CodingLoopHandler runs through DuplexLoop (inbox at the step boundary, cancel preempts before the coding step). Pause still refuses until the box is verified stopped.
 - No BoxPool / scheduler / prompt-cache work. Those land on other
   branches.

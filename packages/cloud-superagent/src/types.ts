@@ -270,6 +270,8 @@ export interface WorkerRecord {
   lastLive?: { sha?: string; ci?: string; prMerged?: boolean; at: number };
   /** Named step plan + heartbeat. JSON only; no schema bump. */
   progress?: import('./progress.js').WorkerProgress;
+  /** Instabox (default) or a paired BYOM device. JSON only; no schema bump. */
+  executionTarget?: import('./execution-target.js').ExecutionTargetRef;
   /** Declarative routing rule that spawned this worker. JSON only. */
   routeRule?: {
     ruleId: string;
@@ -278,6 +280,12 @@ export interface WorkerRecord {
     skills?: string[];
     objectId?: string;
   };
+  /** Speculative attempt. JSON only; no schema bump. Default unset (off). */
+  speculative?: import('./speculative.js').SpeculativeMeta;
+  /** Duplex: event ids already applied. JSON only; no schema bump. */
+  seenEventIds?: string[];
+  /** Owner/watchdog cancel; the running loop preempts then retires. */
+  cancelRequested?: boolean;
   /**
    * Stable lesson prefix (refs + summaries, or refs only when over budget).
    * JSON only; no schema bump. Recall prepends this and never rewrites it.
@@ -297,14 +305,6 @@ export interface WorkerRecord {
   releaseVerify?: import('./release-verify.js').ReleaseVerifyRecord;
   /** Merge commit SHA after Done / live read. JSON only. */
   mergeSha?: string;
-  /** Duplex: event ids already applied. JSON only; no schema bump. */
-  seenEventIds?: string[];
-  /** Owner/watchdog cancel; the running loop preempts then retires. */
-  cancelRequested?: boolean;
-  /** Instabox (default) or a paired BYOM device. JSON only; no schema bump. */
-  executionTarget?: import('./execution-target.js').ExecutionTargetRef;
-  /** Speculative attempt. JSON only; no schema bump. Default unset (off). */
-  speculative?: import('./speculative.js').SpeculativeMeta;
   /** Bounded autonomy + prompt-cache counters. JSON only; no schema bump. */
   autonomy?: AutonomyState;
   /** Copy of the tenant box (JSON). Source of truth is SuperagentStore.tenantBox. */
