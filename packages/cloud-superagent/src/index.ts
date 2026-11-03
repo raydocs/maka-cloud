@@ -554,6 +554,23 @@ export {
   workerWorkDir,
 } from './box-pool.js';
 export { BoxDaemon, formatMiB, readVmRss, type BoxSession } from './box-daemon.js';
+export {
+  LOAD_TOOLS_NAME,
+  LOAD_TOOLS_TOOL,
+  MAX_QUERY_MATCHES,
+  catalogIndex,
+  createToolCatalog,
+  firstTurnRequest,
+  handleLoadTools,
+  isCallable,
+  loadStats,
+  toAnthropicTools,
+  type LoadStats,
+  type LoadToolsContentBlock,
+  type LoadToolsInput,
+  type LoadToolsResult,
+  type ToolCatalog,
+} from './tool-loading.js';
 export { evaluateWorker, reportsWaiting, runWatchdog } from './watchdog.js';
 export {
   DUPLEX_ACK,
