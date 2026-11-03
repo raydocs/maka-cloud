@@ -229,7 +229,11 @@ export function footprintsOverlap(left: readonly string[], right: readonly strin
   return left.some((a) => right.some((b) => pathOverlaps(a, b)));
 }
 
-export function effectiveRank(task: Pick<ScheduledTask, 'priority' | 'queuedAt'>, now: number, ageEveryMs: number): number {
+export function effectiveRank(
+  task: Pick<ScheduledTask, 'priority' | 'queuedAt'>,
+  now: number,
+  ageEveryMs: number,
+): number {
   const base = PRIORITY_RANK[task.priority];
   const boosts = ageEveryMs <= 0 ? 0 : Math.floor(Math.max(0, now - task.queuedAt) / ageEveryMs);
   return Math.min(PRIORITY_RANK.urgent, base + boosts);
@@ -300,7 +304,11 @@ export function formatQueueLine(view: QueueView): string {
 
 export type GateReason =
   | { ok: true }
-  | { ok: false; reason: string; state: Exclude<ScheduledTaskState, 'admitted' | 'running' | 'done'> };
+  | {
+      ok: false;
+      reason: string;
+      state: Exclude<ScheduledTaskState, 'admitted' | 'running' | 'done'>;
+    };
 
 export function startGate(task: ScheduledTask, facts: SchedulerFacts, now: number): GateReason {
   const start = task.start;
@@ -577,7 +585,8 @@ export class Scheduler {
 
     const refresh = (): void => {
       for (const task of snapshot.tasks) {
-        if (task.state === 'done' || task.state === 'running' || task.state === 'admitted') continue;
+        if (task.state === 'done' || task.state === 'running' || task.state === 'admitted')
+          continue;
         const gate = this.gate(task, snapshot, ctx, at);
         if (gate.ok) continue;
         if (task.state !== gate.state || task.reason !== gate.reason) {
@@ -604,7 +613,10 @@ export class Scheduler {
           this.gate(row, snapshot, ctx, at).ok,
       );
       const backgroundLive = live.filter((row) => !row.reserved).length;
-      const backgroundCap = Math.max(0, this.settings.maxWorkers - this.settings.reservedHumanSlots);
+      const backgroundCap = Math.max(
+        0,
+        this.settings.maxWorkers - this.settings.reservedHumanSlots,
+      );
       const eligible = orderTasks(
         snapshot.tasks.filter((row) => {
           if (row.state === 'done' || row.state === 'running' || row.state === 'admitted') {
@@ -682,7 +694,9 @@ export class Scheduler {
     if (!deps.ok) return deps;
     const boxes = boxGate(ctx);
     if (!boxes.ok) return boxes;
-    const live = snapshot.tasks.filter((row) => row.state === 'running' || row.state === 'admitted');
+    const live = snapshot.tasks.filter(
+      (row) => row.state === 'running' || row.state === 'admitted',
+    );
     const budget = budgetGate(task, live, ctx, this.settings.budget, at);
     if (!budget.ok) return budget;
     const footprint = footprintGate(task, live);

@@ -34,8 +34,18 @@ export function loadRecall(store: SuperagentStore, tenantId: string): RecallChai
   }
 }
 
-export function saveRecall(store: SuperagentStore, tenantId: string, links: RecallChain[], at: number): void {
-  store.putDocument(tenantId, RECALL_DOCUMENT, JSON.stringify({ links: links.slice(-MAX_LINKS) }), at);
+export function saveRecall(
+  store: SuperagentStore,
+  tenantId: string,
+  links: RecallChain[],
+  at: number,
+): void {
+  store.putDocument(
+    tenantId,
+    RECALL_DOCUMENT,
+    JSON.stringify({ links: links.slice(-MAX_LINKS) }),
+    at,
+  );
 }
 
 export function appendRecall(
