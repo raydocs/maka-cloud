@@ -87,6 +87,7 @@ export function cloneWorker(worker: WorkerRecord): WorkerRecord {
           cost: worker.speculative.cost ? { ...worker.speculative.cost } : undefined,
         }
       : undefined,
+    seenEventIds: worker.seenEventIds ? [...worker.seenEventIds] : undefined,
     progress: worker.progress
       ? {
           ...worker.progress,

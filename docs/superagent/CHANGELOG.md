@@ -8,7 +8,15 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
-## 2026-11-02 17:55 MST — cursor/superagent-wiring-51be
+## 2026-11-02 17:57 MST — cursor/superagent-wiring-51be
+
+- **What:** merge `cursor/superagent-watchdog-duplex-51be` (#476) into the wiring branch. Kept scheduler, intake, BYOM, and speculative fields next to duplex `seenEventIds` / conversational watchdog status. Pause still refuses until the box is verified stopped.
+- **Why:** Linearize batch 2 onto the wiring branch in the agreed order. sqlite `user_version` stays 2.
+- **Tests:** conflict resolution only; suites run after the remaining tips merge.
+- **Live:** n/a
+- **Migrations / risk:** none. No `user_version` bump.
+
+## 2026-11-02 17:55 MST — cursor/superagent-wiring-51be — a8560951c
 
 - **What:** merge `cursor/superagent-byom-spec-51be` (#475) into the wiring branch (already #477, which contains #474). Kept the scheduler queue and graded escalation, and kept BYOM / speculative spawn. Speculative runs only after a cross-source merge misses. `spawn` is async so a paired device can be chosen at admission. sqlite `user_version` stays 2.
 - **Why:** #480 does not yet contain the other batch-2 branches. The wiring branch merges those tips in order and will merge newer tips later.
@@ -33,6 +41,15 @@ a heading time is more than five minutes off that SHA's committer date.
 - **Tests:** `@maka-cloud/superagent` byom suite: default refuse `sh` / `bash` / `sh -c` / pipes; allow when `allowShell` is on; existing jail / HMAC / offline / pairing tests unchanged.
 - **Live:** n/a
 - **Migrations / risk:** none. Existing paired devices stay `allowShell: false`. Owners who need a shell opt in per device.
+
+## 2026-11-02 12:26 MST — cursor/superagent-watchdog-duplex-51be — 656e7d7cc
+
+- **PR:** [#476](https://github.com/raydocs/maka-cloud/pull/476)
+- **What:** Conversational watchdog (ask/instruct on the existing progress API + `status` CLI; ledger / incidents / worker state / trigger→thread→worker citations; cheap model optional, deterministic fallback default; nudge/pause/resume/cancel/stuck-check only on explicit instruct). Full-duplex workers (`DuplexLoop`: mid-run inbox at the next step, `start()` → `started`, cancel/correct preempt, `seenEventIds` idempotency, progress ack `received, will apply at next step`). Design: `docs/superagent/watchdog-duplex.md`.
+- **Why:** User-approved task: queryable watchdog + async ReAct mid-run delivery, additive against parallel BoxPool / scheduler branches.
+- **Tests:** `@maka-cloud/superagent` `test:dist` (watchdog-query + duplex). cloud-server progress ask/instruct route test.
+- **Live:** n/a
+- **Migrations / risk:** none. Worker JSON only (`seenEventIds`, `cancelRequested`). No sqlite `user_version` bump. Watchdog `tick()` stays a separate timer loop.
 
 ## 2026-11-02 12:25 MST — cursor/superagent-byom-spec-51be — ca33ac59d
 

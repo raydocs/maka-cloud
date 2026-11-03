@@ -156,6 +156,8 @@ export {
   DEFAULT_LIVE_SMOKE_TEMPLATE,
   FakeSandbox,
   HttpSandbox,
+  type SandboxJob,
+  type SandboxStartResult,
   InstaboxCredentialsError,
   InstaboxHttpError,
   instaboxApiFromEnv,
@@ -441,6 +443,33 @@ export {
 } from './metrics.js';
 export { evaluateWorker, reportsWaiting, runWatchdog } from './watchdog.js';
 export {
+  DUPLEX_ACK,
+  DuplexLoop,
+  isPreemptEvent,
+  isToolStart,
+  orderInbox,
+  preemptKind,
+  rememberEventIds,
+  startSandboxTool,
+  type DuplexContext,
+  type DuplexProvider,
+  type DuplexStep,
+  type ToolStartResult,
+} from './duplex.js';
+export {
+  answerWatchdog,
+  collectWatchdogContext,
+  commandRefusedAsk,
+  createWatchdogNarratorFromEnv,
+  formatWatchdogAnswer,
+  formatWatchdogFallback,
+  parseWatchdogText,
+  recallChain,
+  type WatchdogAnswer,
+  type WatchdogIntent,
+  type WatchdogNarrator,
+} from './watchdog-query.js';
+export {
   DEFAULT_PHASE_MS,
   DEFAULT_PROGRESS,
   DEFAULT_STILL_EVERY_MS,
@@ -477,6 +506,7 @@ export {
   handleProgressRequest as handleProgressHttp,
   runStatusCli,
   writeProgressResponse,
+  type ProgressHandlers,
 } from './status.js';
 export {
   createWorkspaceStore,
