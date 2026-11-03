@@ -52,7 +52,7 @@ export function estimateTokens(text: string): number {
  */
 export function compactHistory(
   messages: ReadonlyArray<{ role: string; content: string }>,
-  budgetTokens = DEFAULT_AUTONOMY.compactionSummaryTokens,
+  budgetTokens: number = DEFAULT_AUTONOMY.compactionSummaryTokens,
 ): { messages: Array<{ role: string; content: string }>; summarized: boolean; tokens: number } {
   const clone = messages.map((row) => ({ ...row }));
   const total = clone.reduce((sum, row) => sum + estimateTokens(row.content), 0);

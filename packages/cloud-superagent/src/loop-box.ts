@@ -166,8 +166,12 @@ export class BoxWorkspace {
     return result.stdout;
   }
 
-  async run(command: string, timeoutSeconds = 180): Promise<SandboxExecResult> {
-    return this.exec(command, { cwd: BOX_REPO, timeoutSeconds });
+  async run(command: string, timeoutSeconds = 180, stdin?: string): Promise<SandboxExecResult> {
+    return this.exec(command, {
+      cwd: BOX_REPO,
+      timeoutSeconds,
+      ...(stdin === undefined ? {} : { stdin }),
+    });
   }
 
   async pullPatch(): Promise<string> {
