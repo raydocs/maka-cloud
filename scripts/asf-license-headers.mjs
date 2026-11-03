@@ -259,6 +259,8 @@ export const exclusionRules = [
         '.github/workflows/fork-cloud-mobile.yml',
         '.github/workflows/fork-deploy-rehearsal.yml',
         '.dockerignore',
+        'scripts/cloud-maka-engine-boundary.mjs',
+        'scripts/cloud-maka-engine-boundary.test.mjs',
       )(path) ||
       startsWith('docs/fork')(path) ||
       startsWith('docs/superagent')(path) ||

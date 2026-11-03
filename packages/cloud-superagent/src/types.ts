@@ -159,6 +159,14 @@ export interface WorkerRecord {
   progress?: import('./progress.js').WorkerProgress;
   /** Instabox (default) or a paired BYOM device. JSON only; no schema bump. */
   executionTarget?: import('./execution-target.js').ExecutionTargetRef;
+  /** Declarative routing rule that spawned this worker. JSON only. */
+  routeRule?: {
+    ruleId: string;
+    model?: string;
+    reasoning?: 'low' | 'medium' | 'high';
+    skills?: string[];
+    objectId?: string;
+  };
   /** Speculative attempt. JSON only; no schema bump. Default unset (off). */
   speculative?: import('./speculative.js').SpeculativeMeta;
   /** Duplex: event ids already applied. JSON only; no schema bump. */
@@ -278,6 +286,11 @@ export interface OrgSecretPort {
 export interface ProposedAction {
   kind: ApprovalKind;
   boundText: string;
+  /** Must-ask category when the handler already classified the action. */
+  category?: string;
+  object?: string;
+  path?: string;
+  tags?: string[];
 }
 
 export interface HandlerResult {

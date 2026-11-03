@@ -8,7 +8,15 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
-## 2026-11-02 18:00 MST — cursor/superagent-wiring-51be
+## 2026-11-02 18:09 MST — cursor/superagent-wiring-51be
+
+- **What:** merge `cursor/superagent-decisions-policy-51be` (#480) into the wiring branch. Decision ledger, must-ask, and routing rules sit beside the scheduler, escalation cards, BYOM, duplex, lessons, and release verify. One `applyAction` gates must-ask, Safety, and speculative outbound, so a speculative block does not open a second card. sqlite `user_version` stays 2.
+- **Why:** Linearize batch 2 in order (#479 then #480).
+- **Tests:** conflict resolution only; wiring tests follow in the next commit.
+- **Live:** n/a
+- **Migrations / risk:** none. No `user_version` bump.
+
+## 2026-11-02 18:00 MST — cursor/superagent-wiring-51be — d92ec7bfc
 
 - **What:** merge `cursor/superagent-review-verify-51be` (#479) into the wiring branch. Release verify and the weekly sweep stay off unless the host passes them. Peer-review stats and release-verify records clone with the worker. sqlite `user_version` stays 2.
 - **Why:** Linearize batch 2 in order (#478 then #479).
@@ -40,6 +48,15 @@ a heading time is more than five minutes off that SHA's committer date.
 - **Live:** n/a
 - **Migrations / risk:** none. No `user_version` bump.
 
+## 2026-11-02 14:10 MST — cursor/superagent-decisions-policy-51be — dc4783aa1
+
+- **PR:** none (base `cursor/superagent-real-loop-51be`)
+- **What:** Decision ledger (human-only decided/refused, tenant+repo, exact match auto-applies, fuzzy hints only). Must-ask whitelist (delete/deploy/spend/outbound/direction/secrets/permissions/migration/force-push); tenant may tighten, never loosen; always-ask delete_data / rotate_secrets / spend. Declarative `superagent.rules.json` with schema, hot reload, event envelope; miss falls through to the existing Router. Progress cites ledger ids. #477 card adapters (`cardDraftFromMustAsk`, `recordFromCardResolution`) without taking `statusSnapshot.decisions`.
+- **Why:** Paid cloud employee: ask once, remember, do not re-ask; irreversible actions always wait; routing rules as a file.
+- **Tests:** `@maka-cloud/superagent` typecheck + `node --test` + biome on the package
+- **Live:** n/a
+- **Migrations / risk:** none. No sqlite `user_version` bump. Ledger is memory + optional JSON + existing audit rows.
+
 ## 2026-11-02 14:10 MST — cursor/superagent-review-verify-51be — 9f917ea19
 
 - **PR:** [#479](https://github.com/raydocs/maka-cloud/pull/479)
@@ -48,6 +65,24 @@ a heading time is more than five minutes off that SHA's committer date.
 - **Tests:** `@maka-cloud/superagent` typecheck + `node --test` + biome format
 - **Live:** n/a
 - **Migrations / risk:** none. Defaults false. No server/deploy/billing change. No sqlite `user_version` bump.
+
+## 2026-11-02 13:42 MST — cursor/superagent-real-loop-51be — 1157d2ea8
+
+- **PR:** [#471](https://github.com/raydocs/maka-cloud/pull/471)
+- **What:** Removed leftover `AGENTS.md` conflict markers on the `asf-license-headers` fork-delta row. Kept both `docs/superagent` and `scripts/cloud-maka-engine-boundary.mjs` exclusions.
+- **Why:** The main-merge commit resolved the T34/MakaEngine table but left a second hunk at line 65.
+- **Tests:** none (docs table only)
+- **Live:** n/a
+- **Migrations / risk:** none
+
+## 2026-11-02 13:39 MST — cursor/superagent-real-loop-51be — 90bb34bd6
+
+- **PR:** [#471](https://github.com/raydocs/maka-cloud/pull/471)
+- **What:** Merge `origin/main` `6682cdc34` (PR #469 MakaEngine) into Super-agent real-loop. Kept MakaEngine and T34 P3 (`superagent` before `runners`). `AGENTS.md` and `package.json` conflicted; both sides kept.
+- **Why:** #469 landed on main; the stack PRs were DIRTY. User asked to merge main up the stack and keep MakaEngine.
+- **Tests:** conflict resolution only; prior head `50b582a0c` already had `test` green
+- **Live:** n/a
+- **Migrations / risk:** none. Inherits #469 MakaEngine. No sqlite change.
 
 ## 2026-11-02 13:29 MST — cursor/superagent-learning-review-51be — 66178a088
 

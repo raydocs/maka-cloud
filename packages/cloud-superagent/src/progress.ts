@@ -57,6 +57,8 @@ export const DEFAULT_PROGRESS: ProgressSettings = {
 export interface WaitingOn {
   kind: WaitingKind;
   detail: string;
+  /** Standing decision ledger id, when the wait cites a human decision. */
+  decisionEntryId?: string;
 }
 
 export interface WorkerProgress {
@@ -96,6 +98,7 @@ export interface ProgressView {
   heartbeatAt: number;
   look: ProgressLook;
   waiting?: WaitingOn;
+  decisionEntryId?: string;
 }
 
 export interface StatusSnapshot {
@@ -111,6 +114,12 @@ export interface StatusSnapshot {
     source: 'model' | 'fallback';
     action?: { kind: string; ok: boolean; workerId?: string; reason?: string };
   };
+  /**
+   * Pending must-ask holds. Distinct from escalation `decisions` so both
+   * can sit on one snapshot.
+   */
+  mustAskPending?: import('./decisions.js').MustAskPending[];
+  decisionCitations?: Array<{ workerId?: string; entryId: string; polarity?: string }>;
 }
 
 export function isProgressPhase(value: string): value is ProgressPhase {
@@ -198,8 +207,13 @@ export function applyProgressPatch(
   }
   if (patch.activity !== undefined) base.lastActivity = clipActivity(patch.activity);
   if (patch.waiting === null) delete base.waiting;
-  else if (patch.waiting) base.waiting = { ...patch.waiting };
-  else if (isWaitingPhase(base.phase) && !base.waiting) {
+  else if (patch.waiting) {
+    base.waiting = {
+      kind: patch.waiting.kind,
+      detail: patch.waiting.detail,
+      ...(patch.waiting.decisionEntryId ? { decisionEntryId: patch.waiting.decisionEntryId } : {}),
+    };
+  } else if (isWaitingPhase(base.phase) && !base.waiting) {
     base.waiting = waitingOf(base.phase);
   }
   if (phaseChanged && isWaitingPhase(base.phase) && !base.waiting) {
@@ -358,6 +372,9 @@ export function viewOf(
     heartbeatAt: progress.heartbeatAt,
     look,
     ...(waiting ? { waiting } : {}),
+    ...(progress.waiting?.decisionEntryId
+      ? { decisionEntryId: progress.waiting.decisionEntryId }
+      : {}),
   };
 }
 
@@ -426,19 +443,20 @@ export function formatElapsed(ms: number): string {
 }
 
 export function formatProgressLine(view: ProgressView): string {
+  const cite = view.decisionEntryId ? `  decision ${view.decisionEntryId}` : '';
   if (view.look === 'waiting' && view.waiting) {
-    return `${view.workerId}  waiting on ${view.waiting.kind}: ${view.waiting.detail}  last: ${view.lastActivity}`;
+    return `${view.workerId}  waiting on ${view.waiting.kind}: ${view.waiting.detail}  last: ${view.lastActivity}${cite}`;
   }
   if (view.look === 'stuck') {
-    return `${view.workerId}  looks stuck  ${view.phase} ${view.k}/${view.n}  last: ${view.lastActivity}`;
+    return `${view.workerId}  looks stuck  ${view.phase} ${view.k}/${view.n}  last: ${view.lastActivity}${cite}`;
   }
   if (view.look === 'paused') {
-    return `${view.workerId}  paused  ${view.phase} ${view.k}/${view.n}`;
+    return `${view.workerId}  paused  ${view.phase} ${view.k}/${view.n}${cite}`;
   }
   if (view.look === 'done') {
-    return `${view.workerId}  done`;
+    return `${view.workerId}  done${cite}`;
   }
-  return `${view.workerId}  ${formatProgressBar(view.percent)} ${view.percent}%  ${view.k}/${view.n} ${view.phase}  ${formatElapsed(view.elapsedMs)}  eta ${formatElapsed(view.etaMs)}  last: ${view.lastActivity}`;
+  return `${view.workerId}  ${formatProgressBar(view.percent)} ${view.percent}%  ${view.k}/${view.n} ${view.phase}  ${formatElapsed(view.elapsedMs)}  eta ${formatElapsed(view.etaMs)}  last: ${view.lastActivity}${cite}`;
 }
 
 export function formatStatusText(snapshot: StatusSnapshot): string {
@@ -448,6 +466,9 @@ export function formatStatusText(snapshot: StatusSnapshot): string {
     .filter((row) => row.state === 'pending')
     .map(formatDecisionLine);
   const lines = [...workers, ...queue, ...decisions];
+  for (const row of snapshot.mustAskPending ?? []) {
+    lines.push(`${row.pendingId}  waiting on human: ${row.category}  ${row.boundText}`);
+  }
   if (lines.length === 0) return 'no live workers';
   return lines.join('\n');
 }

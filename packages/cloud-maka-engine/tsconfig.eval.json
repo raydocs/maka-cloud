@@ -1,0 +1,6 @@
+{
+  "extends": "./tsconfig.json",
+  "include": ["src/eval-api.ts"],
+  "exclude": [],
+  "references": [{ "path": "../core" }, { "path": "../storage" }, { "path": "../runtime" }]
+}
