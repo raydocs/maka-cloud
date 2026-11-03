@@ -779,8 +779,11 @@ is `packages/cloud-runners/scripts/layerfs-gates.mjs` (`--local` in CI,
 
 ### P4 — paid layer
 
-Org secrets, per-tenant ledger (T17), PR evidence block, Inline & Spill for
-long tool output. Still no pricing code unless the owner picks a provider.
+Per-tenant usage ledger is package-local SQLite (`usage_events` in
+`superagent.db`, schema 2). Additive; **does not need a cloud-server
+migration**. Org Secrets stay an interface (`UnconfiguredOrgSecrets`).
+Workers can emit evidence blocks in their output. Inline & Spill and
+pricing stay unimplemented unless the owner picks a provider.
 
 ### P5 — optional hi evaluation
 
@@ -804,7 +807,9 @@ Filled in by the implementation PR; kept accurate here:
 | Watchdog W1–W6 | implemented |
 | Mandate + approval gate + audit | implemented |
 | Tenant scoping | implemented |
-| Metering hooks | implemented (record only) |
+| Metering hooks | implemented; P4 append-only tenant ledger in `superagent.db` (`usage_events`, schema 2). **No cloud-server migration** |
+| Org Secrets | interface only (`UnconfiguredOrgSecrets`); never returns a raw secret |
+| Evidence blocks | `HandlerResult.evidence` → worker output / stuck card |
 | `WorkspaceStore` + `GitCloneStore` | implemented; runners default; coding playbook `prepareHostWorkspace` |
 | `LayerFsStore` | metadata adapter; live mount throws; gate 3 harness `--local` |
 | `SandboxPort` | interface + fake; no live Instabox |

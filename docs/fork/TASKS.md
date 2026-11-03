@@ -1055,7 +1055,8 @@ against the DSH prototype's full-access operator user.
   watchdog emits T33 stuck cards; `ModelJudge` takes an injectable client
   (`HeuristicJudge` stays default).
 - Persistence: package-local SQLite (`superagent.db` next to the server
-  dir), not a `cloud-server` migration.
+  dir), not a `cloud-server` migration. P4 adds `usage_events` as schema
+  2 in that same file (additive). **No cloud-server migration.**
 - `WorkspaceStore`: git clone default on the T6 fleet; LayerFS adapter
   compiled, off, no FUSE/Docker/server. Spike harness:
   `packages/cloud-runners/scripts/layerfs-gates.mjs` (four gates; `--local`

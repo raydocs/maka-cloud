@@ -22,11 +22,14 @@ import {
   type HandlerResult,
   type IdFactory,
   type MeteringHooks,
+  type OrgSecretPort,
   type RouterJudge,
   type WatchdogFinding,
   type WatchdogSettings,
   type WorkerHandler,
 } from './types.js';
+import { mergeEvidence } from './evidence.js';
+import { UnconfiguredOrgSecrets } from './secrets.js';
 import { type StuckCard, stuckCardOf } from './stuck.js';
 import { runWatchdog } from './watchdog.js';
 
@@ -69,6 +72,8 @@ export interface SuperagentOptions {
   metering?: MeteringHooks;
   /** Host turns escalate/stop findings into a T33 stuck card. */
   onEscalate?: (card: StuckCard) => void;
+  /** Interface only. Default refuses every inject. */
+  orgSecrets?: OrgSecretPort;
 }
 
 export class Superagent {
@@ -80,6 +85,7 @@ export class Superagent {
   readonly watchdogSettings: WatchdogSettings;
   readonly metering: MeteringHooks;
   readonly safety: Safety;
+  readonly orgSecrets: OrgSecretPort;
   readonly escalations: StuckCard[] = [];
   judgeCalls = 0;
   private readonly now: () => number;
@@ -96,6 +102,11 @@ export class Superagent {
     this.metering = options.metering ?? { record() {} };
     this.safety = new Safety(this.store, this.ids, this.watchdogSettings.approvalTtlMs);
     this.onEscalate = options.onEscalate;
+    this.orgSecrets = options.orgSecrets ?? new UnconfiguredOrgSecrets();
+  }
+
+  ledger(tenantId: string) {
+    return this.store.tenantUsage(tenantId);
   }
 
   async ingest(input: IngestInput): Promise<IngestResult> {
@@ -302,6 +313,7 @@ export class Superagent {
       lastStepSignature: null,
       stepRepeats: 0,
       usage: emptyUsage(),
+      evidence: [],
       createdAt: at,
       updatedAt: at,
       retiredAt: null,
@@ -388,17 +400,31 @@ export class Superagent {
         worker.stepRepeats = 1;
       }
     }
+    if (result.evidence && result.evidence.length > 0) {
+      worker.evidence = mergeEvidence(worker.evidence ?? [], result.evidence);
+    }
     if (result.usage) {
+      const delta = {
+        tokens: result.usage.tokens ?? 0,
+        usdMicros: result.usage.usdMicros ?? 0,
+        wallMs: result.usage.wallMs ?? 0,
+      };
       worker.usage = {
-        tokens: worker.usage.tokens + (result.usage.tokens ?? 0),
-        usdMicros: worker.usage.usdMicros + (result.usage.usdMicros ?? 0),
-        wallMs: worker.usage.wallMs + (result.usage.wallMs ?? 0),
+        tokens: worker.usage.tokens + delta.tokens,
+        usdMicros: worker.usage.usdMicros + delta.usdMicros,
+        wallMs: worker.usage.wallMs + delta.wallMs,
       };
       this.store.putUsage(worker.tenantId, worker.workerId, worker.usage, at);
+      this.store.appendUsageEvent({
+        tenantId: worker.tenantId,
+        workerId: worker.workerId,
+        ...delta,
+        at,
+      });
       this.metering.record({
         tenantId: worker.tenantId,
         workerId: worker.workerId,
-        ...worker.usage,
+        ...delta,
         at,
       });
       const budget = overBudget(worker);

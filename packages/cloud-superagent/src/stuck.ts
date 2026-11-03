@@ -1,3 +1,4 @@
+import { formatEvidence } from './evidence.js';
 import type { WatchdogFinding, WatchdogRule, WorkerRecord } from './types.js';
 
 /** T33 `ask_user` reason. A stuck report is never an approval. */
@@ -28,6 +29,7 @@ export interface StuckCard {
   generation: number;
   idleMinutes: number;
   options: StuckOption[];
+  evidence: string;
 }
 
 export const DEFAULT_STUCK_OPTIONS: readonly StuckOption[] = [
@@ -70,6 +72,7 @@ export function stuckCardOf(worker: WorkerRecord, finding: WatchdogFinding, at: 
     generation: finding.generation,
     idleMinutes: Math.max(0, Math.floor((at - worker.lastProgressAt) / 60_000)),
     options: [...DEFAULT_STUCK_OPTIONS],
+    evidence: formatEvidence(worker.evidence ?? []),
   };
 }
 
@@ -79,5 +82,6 @@ export function formatStuckAsk(card: StuckCard): string {
       ? 'nothing recorded'
       : card.tried.map((line, index) => `${index + 1}. ${line}`).join(' ');
   const same = card.sameFailure ? ' sameFailure.' : '';
-  return `This worker is stuck (${card.rule}). Tried: ${tried}. Where: ${card.where}. Diagnosis: ${card.diagnosis}.${same}`;
+  const proof = card.evidence ? `\n${card.evidence}` : '';
+  return `This worker is stuck (${card.rule}). Tried: ${tried}. Where: ${card.where}. Diagnosis: ${card.diagnosis}.${same}${proof}`;
 }

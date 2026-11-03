@@ -8,6 +8,24 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
+## 2026-11-02 16:53 MST — cursor/superagent-ledger-51be — cdec5b8b5
+
+- **PR:** [#466](https://github.com/raydocs/maka-cloud/pull/466)
+- **What:** Merge `origin/main` `e83340599` (PR #465 Super-agent workspaces) into Super-agent ledger. CHANGELOG conflicted; both sides kept, newest first.
+- **Why:** #465 landed on main; this PR was DIRTY. User asked to merge main forward and report Linux-green SHAs.
+- **Tests:** conflict resolution only; prior head `9a9f8ba87` already had Linux CI green or in progress
+- **Live:** n/a
+- **Migrations / risk:** none
+
+## 2026-11-02 16:01 MST — cursor/superagent-ledger-51be — 56d1a02e4
+
+- **PR:** [#466](https://github.com/raydocs/maka-cloud/pull/466)
+- **What:** Merge `origin/main` `4f54c25dc` (PR #464 Super-agent host) into Super-agent ledger. Kept T34 P3 (`superagent` before `runners`). `AGENTS.md` T34 wording and CHANGELOG conflicted; ours plus #464's changelog entry kept.
+- **Why:** #464 landed on main. User asked to merge main up the remaining stack immediately.
+- **Tests:** conflict resolution only; prior head `708b62670` already had non-iOS CI green
+- **Live:** n/a
+- **Migrations / risk:** none
+
 ## 2026-11-02 16:00 MST — cursor/superagent-workspaces-51be — 3dc73baac
 
 - **PR:** [#465](https://github.com/raydocs/maka-cloud/pull/465)
@@ -16,6 +34,15 @@ a heading time is more than five minutes off that SHA's committer date.
 - **Tests:** conflict resolution only; prior head `19bf5136f` already had non-iOS CI green
 - **Live:** n/a
 - **Migrations / risk:** none
+
+## 2026-11-02 13:38 MST — cursor/superagent-ledger-51be — d12b53238
+
+- **PR:** [#466](https://github.com/raydocs/maka-cloud/pull/466)
+- **What:** Merge `origin/main` `6682cdc34` (PR #469 MakaEngine) into Super-agent ledger. Kept MakaEngine and T34 P3 (`superagent` before `runners`). `AGENTS.md` and `package.json` conflicted; both sides kept. `docs/superagent` joins the ASF header exclusion.
+- **Why:** #469 landed on main; this PR was DIRTY. Prior `test` on `7f900d01c` (run 41507887910) failed three desktop e2e cold-start specs (`composer-directory-reference`, `composer-session-reference`, `expected-failure-feedback`) — splash only, 20s composer timeout. Unrelated to the ledger; `cloud-runners` cancel-install passed. Not a test we own; merge retriggers CI. Assertions unchanged.
+- **Tests:** conflict resolution only
+- **Live:** n/a
+- **Migrations / risk:** none. Inherits #469 MakaEngine. No sqlite change.
 
 ## 2026-11-02 13:38 MST — cursor/superagent-workspaces-51be — b10cab40f
 
