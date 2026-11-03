@@ -52,6 +52,14 @@ export interface SuperagentStore {
     events: number;
   };
 
+  /**
+   * Tenant JSON documents (scheduler queue, router config). Not a schema
+   * migration: sqlite uses `documents` created IF NOT EXISTS, no user_version bump.
+   */
+  putDocument(tenantId: string, kind: string, json: string, at: number): void;
+  getDocument(tenantId: string, kind: string): string | undefined;
+  listDocumentTenants(kind?: string): string[];
+
   /** Tenant box JSON. No sqlite schema bump — reserved retired worker row. */
   putTenantBox(box: TenantBoxRecord): void;
   tenantBox(tenantId: string): TenantBoxRecord | undefined;

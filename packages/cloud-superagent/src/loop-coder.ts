@@ -97,7 +97,9 @@ export function createCoderFromEnv(
   const hasKey = Boolean(env.ANTHROPIC_API_KEY?.trim() || env.MAKA_CLOUD_JUDGE_API_KEY?.trim());
   if (!live || !hasKey) return { coder: new FakeCoder(), kind: 'fake' };
   const client = createJudgeClientFromEnv(env, fetchImpl, { maxTokens: CODER_MAX_TOKENS });
-  return { coder: new HttpCoder((prompt) => client.completeDetailed(prompt)), kind: 'model' };
+  const detailed = client.completeDetailed?.bind(client);
+  if (!detailed) throw new Error('Coder needs a judge client that implements completeDetailed.');
+  return { coder: new HttpCoder((prompt) => detailed(prompt)), kind: 'model' };
 }
 
 async function snapshotFiles(dir: string): Promise<string> {

@@ -1,3 +1,4 @@
+import type { ModelRef } from './intake.js';
 import { HeuristicJudge, ModelJudge, type JudgeClient, type ModelCompletion } from './router.js';
 import type { RouterJudge } from './types.js';
 
@@ -123,26 +124,193 @@ export class FetchJudgeClient implements JudgeClient {
   }
 }
 
+export class FakeJudgeClient implements JudgeClient {
+  readonly prompts: string[] = [];
+  constructor(
+    private readonly reply:
+      | string
+      | ((prompt: string) => string) = '{"action":"ignore","reason":"fake"}',
+  ) {}
+  async complete(prompt: string): Promise<string> {
+    this.prompts.push(prompt);
+    return typeof this.reply === 'function' ? this.reply(prompt) : this.reply;
+  }
+  async completeDetailed(prompt: string): Promise<ModelCompletion> {
+    const text = await this.complete(prompt);
+    return {
+      text,
+      usage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        tokens: 0,
+        usdMicros: 0,
+        wallMs: 0,
+        model: 'fake',
+      },
+    };
+  }
+}
+
+export class FetchOpenAiJudgeClient implements JudgeClient {
+  readonly model: string;
+  private readonly apiKey: string;
+  private readonly baseUrl: string;
+  private readonly fetchImpl: typeof fetch;
+
+  constructor(options: FetchJudgeClientOptions) {
+    if (!options.apiKey) throw new Error('FetchOpenAiJudgeClient requires an API key.');
+    this.apiKey = options.apiKey;
+    this.baseUrl = (options.baseUrl ?? 'https://api.openai.com').replace(/\/+$/, '');
+    this.model = options.model ?? 'gpt-4.1-mini';
+    this.fetchImpl = options.fetch ?? fetch;
+  }
+
+  async complete(prompt: string): Promise<string> {
+    return (await this.completeDetailed(prompt)).text;
+  }
+
+  async completeDetailed(prompt: string): Promise<ModelCompletion> {
+    const started = Date.now();
+    const response = await this.fetchImpl(`${this.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${this.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: this.model,
+        max_tokens: 256,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      throw new Error(`Judge provider HTTP ${response.status}: ${text.slice(0, 200)}`);
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = undefined;
+    }
+    const message = openAiText(parsed) || text;
+    return {
+      text: message,
+      usage: parseMessagesUsage(toAnthropicUsage(parsed), this.model, Date.now() - started),
+    };
+  }
+}
+
+export function routerModelRefFromEnv(env: NodeJS.ProcessEnv = process.env): ModelRef {
+  const provider = (env.MAKA_CLOUD_ROUTER_PROVIDER ?? 'anthropic').trim().toLowerCase();
+  return {
+    provider:
+      provider === 'openai' || provider === 'gateway' || provider === 'fake'
+        ? provider
+        : 'anthropic',
+    model:
+      env.MAKA_CLOUD_ROUTER_MODEL?.trim() ||
+      env.MAKA_CLOUD_JUDGE_MODEL?.trim() ||
+      env.MAKA_CLOUD_SUMMARY_MODEL?.trim() ||
+      DEFAULT_JUDGE_MODEL,
+    ...(env.MAKA_CLOUD_ROUTER_BASE_URL?.trim() ||
+    env.MAKA_CLOUD_JUDGE_BASE_URL?.trim() ||
+    env.ANTHROPIC_BASE_URL?.trim()
+      ? {
+          baseUrl: (
+            env.MAKA_CLOUD_ROUTER_BASE_URL?.trim() ||
+            env.MAKA_CLOUD_JUDGE_BASE_URL?.trim() ||
+            env.ANTHROPIC_BASE_URL?.trim() ||
+            ''
+          ).replace(/\/+$/, ''),
+        }
+      : {}),
+    apiKeyEnv: env.MAKA_CLOUD_ROUTER_API_KEY
+      ? 'MAKA_CLOUD_ROUTER_API_KEY'
+      : env.MAKA_CLOUD_JUDGE_API_KEY
+        ? 'MAKA_CLOUD_JUDGE_API_KEY'
+        : 'ANTHROPIC_API_KEY',
+  };
+}
+
+export function workerModelRefFromEnv(env: NodeJS.ProcessEnv = process.env): ModelRef {
+  return {
+    provider:
+      (env.MAKA_CLOUD_WORKER_PROVIDER ?? 'anthropic').trim().toLowerCase() === 'openai'
+        ? 'openai'
+        : 'anthropic',
+    model:
+      env.MAKA_CLOUD_WORKER_MODEL?.trim() || env.MAKA_CLOUD_LOOP_MODEL?.trim() || 'claude-opus-4-6',
+    ...(env.MAKA_CLOUD_WORKER_BASE_URL?.trim()
+      ? { baseUrl: env.MAKA_CLOUD_WORKER_BASE_URL.trim().replace(/\/+$/, '') }
+      : {}),
+    apiKeyEnv: env.MAKA_CLOUD_WORKER_API_KEY ? 'MAKA_CLOUD_WORKER_API_KEY' : 'ANTHROPIC_API_KEY',
+  };
+}
+
+export function createJudgeClientFromRef(
+  ref: ModelRef,
+  env: NodeJS.ProcessEnv = process.env,
+  fetchImpl: typeof fetch = fetch,
+  extras: { maxTokens?: number } = {},
+): JudgeClient {
+  if (ref.provider === 'fake') return new FakeJudgeClient();
+  const keyName =
+    ref.apiKeyEnv ?? (ref.provider === 'openai' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY');
+  const apiKey = env[keyName]?.trim() || '';
+  if (!apiKey) {
+    throw new Error(
+      `Router model needs ${keyName}. Put the key in the environment, not in config.`,
+    );
+  }
+  if (ref.provider === 'openai') {
+    return new FetchOpenAiJudgeClient({
+      apiKey,
+      baseUrl: ref.baseUrl,
+      model: ref.model,
+      fetch: fetchImpl,
+    });
+  }
+  return new FetchJudgeClient({
+    apiKey,
+    baseUrl: ref.baseUrl,
+    model: ref.model,
+    fetch: fetchImpl,
+    ...(extras.maxTokens !== undefined ? { maxTokens: extras.maxTokens } : {}),
+  });
+}
+
 export function createJudgeClientFromEnv(
   env: NodeJS.ProcessEnv = process.env,
   fetchImpl: typeof fetch = fetch,
   extras: { maxTokens?: number } = {},
-): FetchJudgeClient {
-  const apiKey = env.MAKA_CLOUD_JUDGE_API_KEY?.trim() || env.ANTHROPIC_API_KEY?.trim() || '';
+): JudgeClient {
+  const ref = routerModelRefFromEnv(env);
+  if (ref.provider === 'fake') return new FakeJudgeClient();
+  const apiKey =
+    env.MAKA_CLOUD_ROUTER_API_KEY?.trim() ||
+    env.MAKA_CLOUD_JUDGE_API_KEY?.trim() ||
+    env.ANTHROPIC_API_KEY?.trim() ||
+    '';
   if (!apiKey) {
     throw new Error(
-      'ModelJudge needs MAKA_CLOUD_JUDGE_API_KEY or ANTHROPIC_API_KEY. HeuristicJudge stays the default; set MAKA_CLOUD_SUPERAGENT_JUDGE=model only when a key is present.',
+      'ModelJudge needs MAKA_CLOUD_ROUTER_API_KEY, MAKA_CLOUD_JUDGE_API_KEY or ANTHROPIC_API_KEY. HeuristicJudge stays the default; set MAKA_CLOUD_SUPERAGENT_JUDGE=model only when a key is present.',
     );
   }
   const baseUrl = (
+    env.MAKA_CLOUD_ROUTER_BASE_URL?.trim() ||
     env.MAKA_CLOUD_JUDGE_BASE_URL?.trim() ||
     env.ANTHROPIC_BASE_URL?.trim() ||
     DEFAULT_ANTHROPIC_BASE_URL
   ).replace(/\/+$/, '');
   const model =
+    env.MAKA_CLOUD_ROUTER_MODEL?.trim() ||
     env.MAKA_CLOUD_JUDGE_MODEL?.trim() ||
     env.MAKA_CLOUD_SUMMARY_MODEL?.trim() ||
     DEFAULT_JUDGE_MODEL;
+  if (ref.provider === 'openai') {
+    return new FetchOpenAiJudgeClient({ apiKey, baseUrl, model, fetch: fetchImpl });
+  }
   return new FetchJudgeClient({
     apiKey,
     baseUrl,
@@ -162,7 +330,11 @@ export function createJudgeFromEnv(
   fetchImpl: typeof fetch = fetch,
 ): RouterJudge {
   const kind = (env.MAKA_CLOUD_SUPERAGENT_JUDGE ?? '').trim().toLowerCase();
-  const hasKey = Boolean(env.MAKA_CLOUD_JUDGE_API_KEY?.trim() || env.ANTHROPIC_API_KEY?.trim());
+  const hasKey = Boolean(
+    env.MAKA_CLOUD_ROUTER_API_KEY?.trim() ||
+      env.MAKA_CLOUD_JUDGE_API_KEY?.trim() ||
+      env.ANTHROPIC_API_KEY?.trim(),
+  );
   if (kind === 'heuristic' || (kind === '' && !hasKey)) return new HeuristicJudge();
   if (kind === 'model') return new ModelJudge(createJudgeClientFromEnv(env, fetchImpl));
   if (kind === '' || kind === 'prefilter') {
@@ -174,6 +346,25 @@ export function createJudgeFromEnv(
   throw new Error(
     `MAKA_CLOUD_SUPERAGENT_JUDGE must be heuristic, prefilter or model, not ${kind}.`,
   );
+}
+
+function openAiText(body: unknown): string {
+  if (typeof body !== 'object' || body === null || !('choices' in body)) return '';
+  const choices = (body as { choices?: Array<{ message?: { content?: unknown } }> }).choices;
+  const content = choices?.[0]?.message?.content;
+  return typeof content === 'string' ? content : '';
+}
+
+function toAnthropicUsage(body: unknown): unknown {
+  if (typeof body !== 'object' || body === null || !('usage' in body)) return body;
+  const usage = (body as { usage?: { prompt_tokens?: unknown; completion_tokens?: unknown } })
+    .usage;
+  return {
+    usage: {
+      input_tokens: usage?.prompt_tokens,
+      output_tokens: usage?.completion_tokens,
+    },
+  };
 }
 
 function textOf(raw: string): string {

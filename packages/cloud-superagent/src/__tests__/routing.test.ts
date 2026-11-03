@@ -158,10 +158,15 @@ test('spawn admission caps concurrent Instabox boxes', async () => {
   const first = await agent.ingest(github(TENANT, 'box-a', 'issues', issuePayload('opened', 30)));
   assert.equal(first.result, 'spawned');
   const second = await agent.ingest(github(TENANT, 'box-b', 'issues', issuePayload('opened', 31)));
-  assert.equal(second.result, 'ignored');
-  if (second.result !== 'ignored') return;
+  assert.equal(second.result, 'queued');
+  if (second.result !== 'queued') return;
   assert.equal(second.reason, 'box_cap');
+  assert.equal(second.state, 'queued');
   assert.equal(second.judgeCalls, 1);
+  assert.equal(
+    agent.queueOf(TENANT).some((row) => row.reason === 'box_cap'),
+    true,
+  );
 });
 
 test('spawn admission refuses work after the tenant spend cap', async () => {
@@ -179,7 +184,8 @@ test('spawn admission refuses work after the tenant spend cap', async () => {
   const first = await agent.ingest(github(TENANT, 'cap-a', 'issues', issuePayload('opened', 40)));
   assert.equal(first.result, 'spawned');
   const second = await agent.ingest(github(TENANT, 'cap-b', 'issues', issuePayload('opened', 41)));
-  assert.equal(second.result, 'ignored');
-  if (second.result !== 'ignored') return;
+  assert.equal(second.result, 'queued');
+  if (second.result !== 'queued') return;
   assert.equal(second.reason, 'spend_cap');
+  assert.equal(second.state, 'blocked');
 });

@@ -1,7 +1,46 @@
 import type { IngestInput } from './events.js';
 import { normalize } from './events.js';
 import { defaultIds } from './ids.js';
-import { admit, admitSpawn, HeuristicJudge, isStatusAsk } from './router.js';
+import {
+  belowSensitivity,
+  bumpIntake,
+  classifyDecision,
+  defaultTenantRouterConfig,
+  fewShotPrompt,
+  parseIntakeState,
+  parseRouterCommand,
+  parseRouterConfig,
+  patchRouterConfig,
+  recordDecision,
+  recordFeedback,
+  suggestedRuleLines,
+  strengthFor,
+  fastPathDrop,
+  type IntakeState,
+  type RouterClass,
+  type RouterMode,
+  type TenantRouterConfig,
+  INTAKE_DOCUMENT,
+  ROUTER_DOCUMENT,
+} from './intake.js';
+import { appendRecall, followRecallInStore, type RecallQuery } from './recall-chain.js';
+import { admitSpawn, HeuristicJudge, isStatusAsk } from './router.js';
+import {
+  estimateFootprint,
+  estimatePriority,
+  estimateSize,
+  isHumanEvent,
+  mergeSettings,
+  Scheduler,
+  type ScheduledTask,
+  type ScheduledTaskState,
+  type SchedulerSettings,
+  type StartCondition,
+  type TaskDependency,
+  type TaskPriority,
+  type TaskSize,
+  waitMsOf,
+} from './scheduler.js';
 import { overBudget, Safety } from './safety.js';
 import type { SuperagentStore } from './store.js';
 import { MemorySuperagentStore } from './memory-store.js';
@@ -73,9 +112,30 @@ export type IngestResult =
   | { result: 'ignored'; reason: string; eventId?: string; judgeCalls: number }
   | { result: 'passthrough'; eventId: string; workerIds: string[]; judgeCalls: 0 }
   | { result: 'answered'; eventId: string; text: string; judgeCalls: number }
-  | { result: 'spawned'; eventId: string; workerId: string; judgeCalls: number };
+  | { result: 'spawned'; eventId: string; workerId: string; judgeCalls: number }
+  | {
+      result: 'queued';
+      eventId: string;
+      taskId: string;
+      state: ScheduledTaskState;
+      reason: string;
+      waitMs: number;
+      judgeCalls: number;
+    }
+  | {
+      result: 'would_accept';
+      eventId: string;
+      classification: RouterClass;
+      reason: string;
+      confidence: number;
+      judgeCalls: number;
+    };
 
 /** Collapse a worker inbox into one event. Approval wins over the latest row. */
+function handledIdsOf(event: NormalizedEvent): string[] {
+  return [event.eventId, event.idempotencyKey];
+}
+
 export function coalesceInbox(events: NormalizedEvent[]): NormalizedEvent {
   if (events.length === 0) throw new Error('coalesceInbox needs events');
   const first = events[0];
@@ -142,6 +202,13 @@ export interface SuperagentOptions {
   liveFacts?: (worker: WorkerRecord) => Promise<Partial<LiveFacts>>;
   /** Phase-change / still / looks-stuck cadence. Quiet otherwise. */
   progress?: Partial<ProgressSettings>;
+  /**
+   * Ingest default is `auto` so existing tests keep spawning. New persisted
+   * tenant configs default to `observe` (`defaultTenantRouterConfig`).
+   */
+  router?: { mode?: RouterMode; sensitivity?: number };
+  scheduler?: Partial<SchedulerSettings>;
+  intake?: { maxUnownedPerMinute?: number };
   /** Stream silence / repeat / compaction thresholds. */
   autonomy?: Partial<AutonomySettings>;
   /**
@@ -168,6 +235,9 @@ export class Superagent {
   readonly reviewer: ReviewerPort | undefined;
   readonly doneWorld: DoneWorld;
   readonly progressSettings: ProgressSettings;
+  readonly scheduler: Scheduler;
+  readonly routerDefaults: { mode: RouterMode; sensitivity?: number };
+  readonly intakeLimits: { maxUnownedPerMinute?: number };
   private readonly liveFacts?: (worker: WorkerRecord) => Promise<Partial<LiveFacts>>;
   readonly escalations: StuckCard[] = [];
   judgeCalls = 0;
@@ -217,6 +287,24 @@ export class Superagent {
     this.doneWorld = defaultDoneWorld(options.doneWorld ?? {});
     this.progressSettings = { ...DEFAULT_PROGRESS, ...options.progress };
     this.liveFacts = options.liveFacts;
+    this.routerDefaults = {
+      mode: options.router?.mode ?? 'auto',
+      sensitivity: options.router?.sensitivity,
+    };
+    this.intakeLimits = { ...options.intake };
+    this.scheduler = new Scheduler(
+      this.store,
+      this.ids,
+      this.now,
+      mergeSettings(options.scheduler),
+      (change) => {
+        this.audit(change.tenantId, null, `scheduler_${change.state}`, change.at, {
+          taskId: change.taskId,
+          reason: change.reason ?? '',
+          waitMs: change.waitMs,
+        });
+      },
+    );
   }
 
   ledger(tenantId: string) {
@@ -231,19 +319,33 @@ export class Superagent {
     const stored = this.store.putEvent(event);
     if (stored === 'duplicate') {
       const existing = this.store.eventByIdempotency(event.tenantId, event.idempotencyKey);
-      this.audit(event.tenantId, null, 'duplicate', at, { key: event.idempotencyKey });
+      this.recordIntake(
+        event.tenantId,
+        {
+          layer: 'fast',
+          reason: 'duplicate',
+          kind: 'drop',
+        },
+        [event.idempotencyKey],
+        at,
+      );
+      this.audit(event.tenantId, null, 'duplicate', at, {
+        key: event.idempotencyKey,
+        layer: 'fast',
+      });
       return { result: 'duplicate', eventId: existing?.eventId ?? event.eventId, judgeCalls: 0 };
     }
+    this.scheduler.noteEvent(event);
     if (event.type === 'ping' || event.subject === null) {
-      this.audit(event.tenantId, null, 'ignored', at, {
-        reason: event.type === 'ping' ? 'ping' : 'no_subject',
-      });
-      return {
-        result: 'ignored',
-        reason: event.type === 'ping' ? 'ping' : 'no_subject',
-        eventId: event.eventId,
-        judgeCalls: 0,
-      };
+      const reason = event.type === 'ping' ? 'ping' : 'no_subject';
+      this.recordIntake(
+        event.tenantId,
+        { layer: 'fast', reason, kind: 'drop' },
+        handledIdsOf(event),
+        at,
+      );
+      this.audit(event.tenantId, null, 'ignored', at, { reason, layer: 'fast' });
+      return { result: 'ignored', reason, eventId: event.eventId, judgeCalls: 0 };
     }
 
     const subscribers = this.store.liveSubscribers(event.tenantId, event.subject.key);
@@ -254,6 +356,13 @@ export class Superagent {
       if (owned) {
         const reported = await this.reportToLead(event.tenantId, owned.workerId);
         if (reported.ok) {
+          this.linkRecall(event.tenantId, {
+            triggerId: event.eventId,
+            threadId: event.subject.key,
+            workerId: owned.workerId,
+            layer: 'passthrough',
+            at,
+          });
           this.audit(event.tenantId, owned.workerId, 'answered', at, { reason: 'status' });
           return {
             result: 'answered',
@@ -270,33 +379,194 @@ export class Superagent {
         this.store.enqueue(sub.workerId, event.eventId, at);
         await this.drain(event.tenantId, sub.workerId);
         workerIds.push(sub.workerId);
+        this.linkRecall(event.tenantId, {
+          triggerId: event.eventId,
+          threadId: event.subject.key,
+          workerId: sub.workerId,
+          layer: 'passthrough',
+          at,
+        });
       }
+      this.recordIntake(
+        event.tenantId,
+        { layer: 'passthrough', reason: 'subscribed', kind: 'passthrough' },
+        handledIdsOf(event),
+        at,
+      );
       this.audit(event.tenantId, workerIds[0] ?? null, 'passthrough', at, {
         eventId: event.eventId,
         workers: workerIds.length,
+        layer: 'passthrough',
+        threadId: event.subject.key,
       });
+      await this.admitTenant(event.tenantId);
       return { result: 'passthrough', eventId: event.eventId, workerIds, judgeCalls: 0 };
     }
 
+    const intake = this.intakeState(event.tenantId);
+    const routerCfg = this.routerConfig(event.tenantId);
     const meter = this.metering.admit?.(event.tenantId) === 'stop';
-    const admission = admit(event, this.admission, meter);
-    if (!admission.ok) {
-      this.audit(event.tenantId, null, 'filtered', at, { reason: admission.reason });
-      return { result: 'ignored', reason: admission.reason, eventId: event.eventId, judgeCalls: 0 };
+    const fast = fastPathDrop({
+      event,
+      policy: this.admission,
+      meteringStop: meter,
+      rules: routerCfg.rules,
+      mode: this.effectiveRouterMode(event.tenantId),
+      handledIds: intake.handledIds,
+      slowAt: intake.slowAt,
+      maxUnownedPerMinute: this.intakeLimits.maxUnownedPerMinute,
+      now: at,
+    });
+    if (fast.drop) {
+      this.recordIntake(
+        event.tenantId,
+        { layer: 'fast', reason: fast.reason, kind: 'drop' },
+        handledIdsOf(event),
+        at,
+      );
+      this.audit(event.tenantId, null, 'filtered', at, { reason: fast.reason, layer: 'fast' });
+      await this.admitTenant(event.tenantId);
+      return { result: 'ignored', reason: fast.reason, eventId: event.eventId, judgeCalls: 0 };
     }
 
     this.judgeCalls += 1;
+    this.recordIntake(event.tenantId, { layer: 'slow', reason: 'call', kind: 'call' }, [], at);
     const decision = await this.judge.decide(event, {
       workers: this.store.workers(event.tenantId),
+      fewShot: fewShotPrompt(routerCfg),
+      suggestions: suggestedRuleLines(routerCfg),
+      queue: this.scheduler
+        .tasks(event.tenantId)
+        .filter((row) => row.state !== 'done')
+        .map((row) => `${row.taskId} ${row.state} ${row.title}`)
+        .join('\n'),
     });
-    if (decision.action === 'ignore') {
-      this.audit(event.tenantId, null, 'ignored', at, { reason: decision.reason });
-      return { result: 'ignored', reason: decision.reason, eventId: event.eventId, judgeCalls: 1 };
+    const classified = classifyDecision(event, decision);
+    const decisionId = this.ids.decision();
+    this.linkRecall(event.tenantId, {
+      triggerId: event.eventId,
+      threadId: event.subject.key,
+      workerId: null,
+      decisionId,
+      layer: 'slow',
+      at,
+    });
+
+    if (
+      decision.action === 'ignore' ||
+      (classified.class === 'not_accepted' &&
+        decision.action !== 'answer' &&
+        decision.action !== 'spawn')
+    ) {
+      this.rememberDecision(event.tenantId, {
+        decisionId,
+        at,
+        eventId: event.eventId,
+        class: classified.class,
+        action: 'ignore',
+        confidence: classified.confidence,
+        reason: classified.reason,
+        mode: this.effectiveRouterMode(event.tenantId),
+        summary: event.summary,
+      });
+      this.recordIntake(
+        event.tenantId,
+        { layer: 'slow', reason: classified.reason, kind: 'drop' },
+        handledIdsOf(event),
+        at,
+      );
+      this.audit(event.tenantId, null, 'ignored', at, {
+        reason: classified.reason,
+        layer: 'slow',
+        decisionId,
+      });
+      return {
+        result: 'ignored',
+        reason: classified.reason,
+        eventId: event.eventId,
+        judgeCalls: 1,
+      };
     }
     if (decision.action === 'answer') {
+      this.rememberDecision(event.tenantId, {
+        decisionId,
+        at,
+        eventId: event.eventId,
+        class: classified.class,
+        action: 'answer',
+        confidence: classified.confidence,
+        reason: classified.reason,
+        mode: this.effectiveRouterMode(event.tenantId),
+        summary: event.summary,
+      });
       await this.lead.speak({ tenantId: event.tenantId, text: decision.text });
-      this.audit(event.tenantId, null, 'answered', at, {});
+      this.audit(event.tenantId, null, 'answered', at, { layer: 'slow', decisionId });
       return { result: 'answered', eventId: event.eventId, text: decision.text, judgeCalls: 1 };
+    }
+
+    if (belowSensitivity(classified, routerCfg.sensitivity)) {
+      this.rememberDecision(event.tenantId, {
+        decisionId,
+        at,
+        eventId: event.eventId,
+        class: 'not_accepted',
+        action: 'ignore',
+        confidence: classified.confidence,
+        reason: 'below_sensitivity',
+        mode: this.effectiveRouterMode(event.tenantId),
+        summary: event.summary,
+      });
+      this.recordIntake(
+        event.tenantId,
+        { layer: 'slow', reason: 'below_sensitivity', kind: 'drop' },
+        handledIdsOf(event),
+        at,
+      );
+      this.audit(event.tenantId, null, 'ignored', at, {
+        reason: 'below_sensitivity',
+        layer: 'slow',
+        decisionId,
+      });
+      return {
+        result: 'ignored',
+        reason: 'below_sensitivity',
+        eventId: event.eventId,
+        judgeCalls: 1,
+      };
+    }
+
+    if (this.effectiveRouterMode(event.tenantId) === 'observe') {
+      this.rememberDecision(event.tenantId, {
+        decisionId,
+        at,
+        eventId: event.eventId,
+        class: classified.class,
+        action: 'would_accept',
+        confidence: classified.confidence,
+        reason: classified.reason,
+        mode: 'observe',
+        summary: event.summary,
+      });
+      this.recordIntake(
+        event.tenantId,
+        { layer: 'slow', reason: 'would_accept', kind: 'would_accept' },
+        handledIdsOf(event),
+        at,
+      );
+      this.audit(event.tenantId, null, 'would_accept', at, {
+        reason: classified.reason,
+        decisionId,
+        class: classified.class,
+        confidence: classified.confidence,
+      });
+      return {
+        result: 'would_accept',
+        eventId: event.eventId,
+        classification: classified.class,
+        reason: classified.reason,
+        confidence: classified.confidence,
+        judgeCalls: 1,
+      };
     }
 
     const existing = this.store.liveWorkerBySubject(event.tenantId, event.subject.key);
@@ -323,8 +593,7 @@ export class Superagent {
         .filter((row) => isLiveState(row.state) && row.sandboxRef).length,
       wouldCreateTenantBox: this.store.tenantBox(event.tenantId) === undefined,
     });
-    if (!spawnGate.ok) {
-      this.audit(event.tenantId, null, 'filtered', at, { reason: spawnGate.reason });
+    if (!spawnGate.ok && spawnGate.reason === 'worker_cap') {
       return {
         result: 'ignored',
         reason: spawnGate.reason,
@@ -332,15 +601,68 @@ export class Superagent {
         judgeCalls: 1,
       };
     }
-
-    const worker = this.spawn(event, decision.mandate, at);
-    this.store.enqueue(worker.workerId, event.eventId, at);
-    await this.drain(event.tenantId, worker.workerId);
-    this.audit(event.tenantId, worker.workerId, 'spawned', at, { subject: event.subject.key });
-    return {
-      result: 'spawned',
+    const reserved = isHumanEvent(event);
+    const task = this.scheduler.enqueue({
+      tenantId: event.tenantId,
       eventId: event.eventId,
-      workerId: worker.workerId,
+      subject: event.subject,
+      title: decision.title,
+      mandate: strengthFor(classified, decision.mandate),
+      priority: estimatePriority(event, reserved),
+      size: estimateSize(event),
+      footprint: estimateFootprint(event, decision.mandate),
+      reserved,
+      source: event.source,
+    });
+    this.rememberDecision(event.tenantId, {
+      decisionId,
+      at,
+      eventId: event.eventId,
+      class: classified.class,
+      action: 'spawn',
+      confidence: classified.confidence,
+      reason: classified.reason,
+      mode: this.effectiveRouterMode(event.tenantId),
+      summary: event.summary,
+    });
+    this.linkRecall(event.tenantId, {
+      triggerId: event.eventId,
+      threadId: event.subject.key,
+      workerId: null,
+      taskId: task.taskId,
+      decisionId,
+      layer: 'slow',
+      at,
+    });
+    await this.admitTenant(event.tenantId);
+    const live = this.scheduler.task(event.tenantId, task.taskId);
+    if (live?.workerId && (live.state === 'running' || live.state === 'done')) {
+      this.recordIntake(
+        event.tenantId,
+        { layer: 'slow', reason: 'spawn', kind: 'accept' },
+        handledIdsOf(event),
+        at,
+      );
+      return {
+        result: 'spawned',
+        eventId: event.eventId,
+        workerId: live.workerId,
+        judgeCalls: 1,
+      };
+    }
+    this.recordIntake(
+      event.tenantId,
+      { layer: 'slow', reason: live?.reason ?? 'queued', kind: 'accept' },
+      handledIdsOf(event),
+      at,
+    );
+    return {
+      result: 'queued',
+      eventId: event.eventId,
+      taskId: task.taskId,
+      state: live?.state ?? 'queued',
+      reason: live?.reason ?? 'queued',
+      waitMs: live ? waitMsOf(live, at) : 0,
       judgeCalls: 1,
     };
   }
@@ -354,13 +676,150 @@ export class Superagent {
   }
 
   statusSnapshot(tenantId?: string): StatusSnapshot {
-    return statusSnapshotOf(
+    const snap = statusSnapshotOf(
       this.store,
       this.now(),
       this.progressSettings,
       this.watchdogSettings,
       tenantId,
     );
+    const queue =
+      tenantId === undefined ? this.scheduler.allViews(this.now()) : this.scheduler.views(tenantId);
+    const intake = tenantId ? this.intakeMetrics(tenantId) : undefined;
+    return { ...snap, queue, ...(intake ? { intake } : {}) };
+  }
+
+  routerConfig(tenantId: string): TenantRouterConfig {
+    return parseRouterConfig(this.store.getDocument(tenantId, ROUTER_DOCUMENT), tenantId);
+  }
+
+  effectiveRouterMode(tenantId: string): RouterMode {
+    const stored = this.store.getDocument(tenantId, ROUTER_DOCUMENT);
+    if (stored) return parseRouterConfig(stored, tenantId).mode;
+    return this.routerDefaults.mode;
+  }
+
+  ensureRouterConfig(tenantId: string): TenantRouterConfig {
+    const existing = this.store.getDocument(tenantId, ROUTER_DOCUMENT);
+    if (existing) return parseRouterConfig(existing, tenantId);
+    const created = defaultTenantRouterConfig(tenantId);
+    this.store.putDocument(tenantId, ROUTER_DOCUMENT, JSON.stringify(created), this.now());
+    return created;
+  }
+
+  setRouterConfig(
+    tenantId: string,
+    patch: Partial<Pick<TenantRouterConfig, 'mode' | 'sensitivity' | 'rules' | 'models'>>,
+  ): TenantRouterConfig {
+    const next = patchRouterConfig(this.routerConfig(tenantId), patch);
+    this.store.putDocument(tenantId, ROUTER_DOCUMENT, JSON.stringify(next), this.now());
+    return next;
+  }
+
+  intakeMetrics(tenantId: string) {
+    return this.intakeState(tenantId).metrics;
+  }
+
+  followRecall(tenantId: string, query: RecallQuery) {
+    return followRecallInStore(this.store, tenantId, query);
+  }
+
+  queueOf(tenantId: string) {
+    return this.scheduler.views(tenantId);
+  }
+
+  recordRouterFeedback(
+    tenantId: string,
+    input: { decisionId: string; verdict: 'correct' | 'wrong'; note?: string },
+  ) {
+    const at = this.now();
+    const next = recordFeedback(this.routerConfig(tenantId), {
+      id: this.ids.decision(),
+      at,
+      decisionId: input.decisionId,
+      verdict: input.verdict,
+      ...(input.note ? { note: input.note } : {}),
+    });
+    this.store.putDocument(tenantId, ROUTER_DOCUMENT, JSON.stringify(next), at);
+    this.audit(tenantId, null, 'router_feedback', at, {
+      decisionId: input.decisionId,
+      verdict: input.verdict,
+    });
+    return next;
+  }
+
+  handleRouterCommand(tenantId: string, text: string) {
+    const parsed = parseRouterCommand(text);
+    if (!parsed) return { ok: false as const, reason: 'unknown_command' };
+    if (parsed.kind === 'feedback') {
+      return {
+        ok: true as const,
+        config: this.recordRouterFeedback(tenantId, parsed),
+      };
+    }
+    if (parsed.kind === 'mode') {
+      return { ok: true as const, config: this.setRouterConfig(tenantId, { mode: parsed.mode }) };
+    }
+    return {
+      ok: true as const,
+      config: this.setRouterConfig(tenantId, { sensitivity: parsed.value }),
+    };
+  }
+
+  async enqueueTask(input: {
+    tenantId: string;
+    eventId?: string;
+    subject: import('./types.js').Subject;
+    title: string;
+    mandate: import('./types.js').Mandate;
+    priority?: TaskPriority;
+    size?: TaskSize;
+    dependencies?: TaskDependency[];
+    footprint?: string[];
+    start?: StartCondition;
+    reserved?: boolean;
+    source?: import('./types.js').EventSource;
+  }): Promise<ScheduledTask> {
+    let eventId = input.eventId;
+    if (!eventId) {
+      const at = this.now();
+      const event = {
+        eventId: this.ids.event(),
+        tenantId: input.tenantId,
+        source: input.source ?? ('internal' as const),
+        type: 'task_enqueued',
+        subject: input.subject,
+        idempotencyKey: `task:${input.tenantId}:${this.ids.task()}`,
+        actor: { login: 'system', kind: 'system' as const },
+        occurredAt: at,
+        receivedAt: at,
+        summary: input.title,
+        fields: [],
+        closesSubject: false,
+      };
+      this.store.putEvent(event);
+      eventId = event.eventId;
+    }
+    const task = this.scheduler.enqueue({ ...input, eventId });
+    this.linkRecall(input.tenantId, {
+      triggerId: eventId,
+      threadId: input.subject.key,
+      workerId: null,
+      taskId: task.taskId,
+      layer: 'slow',
+      at: this.now(),
+    });
+    await this.admitTenant(input.tenantId);
+    return this.scheduler.task(input.tenantId, task.taskId) ?? task;
+  }
+
+  async admitQueued(tenantId?: string): Promise<string[]> {
+    if (tenantId) return this.admitTenant(tenantId);
+    const ids: string[] = [];
+    for (const id of this.scheduler.tenants()) {
+      ids.push(...(await this.admitTenant(id)));
+    }
+    return ids;
   }
 
   async restore(): Promise<{ resumed: number }> {
@@ -371,6 +830,7 @@ export class Superagent {
         resumed += 1;
       }
     }
+    await this.admitQueued();
     return { resumed };
   }
 
@@ -436,6 +896,7 @@ export class Superagent {
       if (!isLiveState(worker.state)) continue;
       await this.refreshProgressSpeak(worker, at);
     }
+    await this.admitQueued();
     return findings;
   }
 
@@ -611,6 +1072,80 @@ export class Superagent {
 
   close(): void {
     this.store.close();
+  }
+
+  private async admitTenant(tenantId: string): Promise<string[]> {
+    const picked = this.scheduler.pickAdmittable(tenantId, this.admitContext(tenantId));
+    const workerIds: string[] = [];
+    for (const task of picked) {
+      const event = this.store.event(tenantId, task.eventId);
+      if (!event?.subject) {
+        this.scheduler.markBlocked(tenantId, task.taskId, 'missing_event');
+        continue;
+      }
+      if (this.store.liveWorkerBySubject(tenantId, event.subject.key)) {
+        this.scheduler.markBlocked(tenantId, task.taskId, 'already_owned');
+        continue;
+      }
+      const at = this.now();
+      const worker = this.spawn(event, task.mandate, at);
+      this.scheduler.markRunning(tenantId, task.taskId, worker.workerId);
+      this.linkRecall(tenantId, {
+        triggerId: event.eventId,
+        threadId: event.subject.key,
+        workerId: worker.workerId,
+        taskId: task.taskId,
+        layer: 'slow',
+        at,
+      });
+      this.store.enqueue(worker.workerId, event.eventId, at);
+      await this.drain(tenantId, worker.workerId);
+      this.audit(tenantId, worker.workerId, 'spawned', at, {
+        subject: event.subject.key,
+        taskId: task.taskId,
+      });
+      workerIds.push(worker.workerId);
+    }
+    return workerIds;
+  }
+
+  private admitContext(tenantId: string) {
+    return {
+      boxedLive: this.boxPool
+        ? this.store.allTenantBoxes().length
+        : this.store.allWorkers().filter((row) => isLiveState(row.state) && row.sandboxRef).length,
+      wouldBox: Boolean(this.boxPool || this.defaultSandboxRef),
+      tenantUsage: this.store.tenantUsage(tenantId),
+      usageEvents: this.store.usageEvents(tenantId),
+      policy: this.admission,
+    };
+  }
+
+  private intakeState(tenantId: string): IntakeState {
+    return parseIntakeState(this.store.getDocument(tenantId, INTAKE_DOCUMENT));
+  }
+
+  private recordIntake(
+    tenantId: string,
+    event: Parameters<typeof bumpIntake>[1],
+    ids: string[],
+    at: number,
+  ): void {
+    const next = bumpIntake(this.intakeState(tenantId), event, ids, at);
+    this.store.putDocument(tenantId, INTAKE_DOCUMENT, JSON.stringify(next), at);
+  }
+
+  private rememberDecision(tenantId: string, row: Parameters<typeof recordDecision>[1]): void {
+    const stored = this.store.getDocument(tenantId, ROUTER_DOCUMENT);
+    const base = stored
+      ? parseRouterConfig(stored, tenantId)
+      : { ...defaultTenantRouterConfig(tenantId), mode: this.effectiveRouterMode(tenantId) };
+    const next = recordDecision(base, row);
+    this.store.putDocument(tenantId, ROUTER_DOCUMENT, JSON.stringify(next), row.at);
+  }
+
+  private linkRecall(tenantId: string, link: Parameters<typeof appendRecall>[2]): void {
+    appendRecall(this.store, tenantId, link);
   }
 
   private spawn(
@@ -927,6 +1462,8 @@ export class Superagent {
       }
     }
     this.audit(current.tenantId, current.workerId, 'retired', at, { reason });
+    this.scheduler.markDone(current.tenantId, current.workerId);
+    await this.admitTenant(current.tenantId);
   }
 
   private async stop(worker: WorkerRecord, at: number, reason: string): Promise<void> {

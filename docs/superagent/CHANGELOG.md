@@ -8,6 +8,42 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
+## 2026-11-02 18:14 MST — cursor/superagent-scheduler-router-51be — 2b177c2d8
+
+- **PR:** [#474](https://github.com/raydocs/maka-cloud/pull/474)
+- **What:** merge: origin/cursor/superagent-scheduler-router-51be format-fix (`5e8282663`) with the local format-fix. Same biome output; both CHANGELOG entries kept.
+- **Why:** Remote landed a parallel format fix; git merge only, no rebase/force-push.
+- **Tests:** format:check clean
+- **Live:** n/a
+- **Migrations / risk:** none
+
+## 2026-11-02 18:09 MST — cursor/superagent-scheduler-router-51be — 5e8282663
+
+- **PR:** [#474](https://github.com/raydocs/maka-cloud/pull/474)
+- **What:** Biome format the scheduler / intake / recall / runtime / WorkStatus files so CI `format:check` passes after the main merge.
+- **Why:** CI `test` on `227e6f9c6` failed at Check formatting (10 files).
+- **Tests:** biome check clean on the 10 files
+- **Live:** n/a
+- **Migrations / risk:** none. Format only.
+
+## 2026-11-02 18:08 MST — cursor/superagent-scheduler-router-51be — 3524bb276
+
+- **PR:** [#474](https://github.com/raydocs/maka-cloud/pull/474)
+- **What:** biome format on scheduler/intake/recall/runtime/judge-client and the queue-row web line so Linux `format:check` passes. No behavior change.
+- **Why:** CI `test` job failed on formatting after the main merge, not on tests.
+- **Tests:** `@maka-cloud/superagent` suite re-run after format
+- **Live:** n/a
+- **Migrations / risk:** none
+
+## 2026-11-02 17:45 MST — cursor/superagent-scheduler-router-51be — 4c5cb40e3
+
+- **PR:** [#474](https://github.com/raydocs/maka-cloud/pull/474)
+- **What:** merge: origin/main (`7feb8b4cf`, #473) into Super-agent scheduler-router. Kept scheduler/intake documents and BoxPool/autonomy hooks. Shared-box `worker_cap` still ignores at ingest; `box_cap`/`spend_cap` still queue. Keep every CHANGELOG entry, newest first. This branch is now a descendant of main.
+- **Why:** One-pass linearization so #474 → #477 → #475 → #476 → #478 → #479 → #480 can merge in order without re-conflicts.
+- **Tests:** 177 `@maka-cloud/superagent` tests passed after the merge
+- **Live:** n/a
+- **Migrations / risk:** none. JSON fields only. New features stay default-off.
+
 ## 2026-11-02 17:19 MST — cursor/superagent-bounded-autonomy-51be — db85c62a7
 
 - **PR:** [#473](https://github.com/raydocs/maka-cloud/pull/473)
@@ -271,6 +307,15 @@ Keep every CHANGELOG entry, newest first.
 - **Live:** n/a
 - **Migrations / risk:** none. Inherits #469 MakaEngine. No sqlite change.
 
+## 2026-11-02 12:19 MST — cursor/superagent-scheduler-router-51be — 3f12cbe39
+
+- **PR:** [#474](https://github.com/raydocs/maka-cloud/pull/474)
+- **What:** Scheduler / admission queue (priority, size, deps, footprint, reserved human slot, aging, async start) and a two-layer tunable Router (Fast Path drops, Slow Path classify + observe/auto/off + feedback). Subscribed threads skip the router model. Recall chain `triggerId → threadId → workerId`. Queue + intake metrics on the progress snapshot. JSON `documents` table, no `user_version` bump.
+- **Why:** User-approved P1 (2 Nov 2026) plus DSH Fast/Slow Path alignment.
+- **Tests:** new scheduler / intake / recall suites; existing routing box/spend caps now expect `queued`. FakeSandbox + FakeJudgeClient.
+- **Live:** n/a
+- **Migrations / risk:** none. `documents` is `CREATE TABLE IF NOT EXISTS`. Schema version stays 2.
+
 ## 2026-11-02 12:15 MST — cursor/superagent-bounded-autonomy-51be — 0b00eb643
 
 - **PR:** [#473](https://github.com/raydocs/maka-cloud/pull/473)
@@ -486,4 +531,3 @@ Keep every CHANGELOG entry, newest first.
 - **Tests:** host / superagent suites on that branch
 - **Live:** n/a
 - **Migrations / risk:** none
-

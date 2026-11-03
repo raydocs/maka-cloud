@@ -1,3 +1,5 @@
+import type { IntakeMetrics } from './intake.js';
+import { formatQueueLine, type QueueView } from './scheduler.js';
 import type { SuperagentStore } from './store.js';
 import type { UsageEntry, WorkerRecord, WorkerState } from './types.js';
 
@@ -103,6 +105,8 @@ export interface ProgressView {
 export interface StatusSnapshot {
   at: number;
   workers: ProgressView[];
+  queue?: QueueView[];
+  intake?: IntakeMetrics;
 }
 
 export function isProgressPhase(value: string): value is ProgressPhase {
@@ -439,8 +443,11 @@ export function formatProgressLine(view: ProgressView): string {
 }
 
 export function formatStatusText(snapshot: StatusSnapshot): string {
-  if (snapshot.workers.length === 0) return 'no live workers';
-  return snapshot.workers.map(formatProgressLine).join('\n');
+  const workers = snapshot.workers.map(formatProgressLine);
+  const queue = (snapshot.queue ?? []).map(formatQueueLine);
+  const lines = [...workers, ...queue];
+  if (lines.length === 0) return 'no live workers';
+  return lines.join('\n');
 }
 
 export function encodeProgressSse(snapshot: StatusSnapshot, id = 1): string {

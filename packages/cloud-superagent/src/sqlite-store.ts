@@ -104,6 +104,25 @@ CREATE TABLE usage_events (
   at INTEGER NOT NULL
 );
 CREATE INDEX usage_events_tenant ON usage_events (tenant_id, at);
+
+CREATE TABLE IF NOT EXISTS documents (
+  tenant_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  json TEXT NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (tenant_id, kind)
+);
+`;
+
+/** JSON documents. Additive, no user_version bump. */
+const DOCUMENTS_SQL = `
+CREATE TABLE IF NOT EXISTS documents (
+  tenant_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  json TEXT NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (tenant_id, kind)
+);
 `;
 
 const USAGE_EVENTS_V2 = `
@@ -168,6 +187,8 @@ export function openSuperagentDatabase(path: string): DatabaseSync {
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec('COMMIT');
   }
+  // Queue / router JSON. Not a schema migration; user_version stays 2.
+  db.exec(DOCUMENTS_SQL);
   return db;
 }
 
@@ -325,6 +346,16 @@ export class SqliteSuperagentStore implements SuperagentStore {
         wallMs: row.wall_ms,
         at: row.at,
       });
+    }
+    for (const row of this.db
+      .prepare('SELECT tenant_id, kind, json, updated_at FROM documents')
+      .all() as Array<{
+      tenant_id: string;
+      kind: string;
+      json: string;
+      updated_at: number;
+    }>) {
+      this.memory.putDocument(row.tenant_id, row.kind, row.json, row.updated_at);
     }
   }
 
@@ -538,6 +569,26 @@ export class SqliteSuperagentStore implements SuperagentStore {
 
   tenantUsage(tenantId: string) {
     return this.memory.tenantUsage(tenantId);
+  }
+
+  putDocument(tenantId: string, kind: string, json: string, at: number): void {
+    this.memory.putDocument(tenantId, kind, json, at);
+    this.db
+      .prepare(
+        `INSERT INTO documents (tenant_id, kind, json, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(tenant_id, kind) DO UPDATE SET
+           json=excluded.json, updated_at=excluded.updated_at`,
+      )
+      .run(tenantId, kind, json, at);
+  }
+
+  getDocument(tenantId: string, kind: string): string | undefined {
+    return this.memory.getDocument(tenantId, kind);
+  }
+
+  listDocumentTenants(kind?: string): string[] {
+    return this.memory.listDocumentTenants(kind);
   }
 
   putTenantBox(box: TenantBoxRecord): void {

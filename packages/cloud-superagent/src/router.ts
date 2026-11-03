@@ -139,9 +139,14 @@ function field(event: NormalizedEvent, label: string): string {
 
 export class RecordingJudge implements RouterJudge {
   readonly calls: NormalizedEvent[] = [];
+  readonly prompts: string[] = [];
   constructor(public inner: RouterJudge = new HeuristicJudge()) {}
-  async decide(event: NormalizedEvent, ctx: { workers: WorkerRecord[] }): Promise<RouterDecision> {
+  async decide(
+    event: NormalizedEvent,
+    ctx: { workers: WorkerRecord[]; fewShot?: string; suggestions?: string },
+  ): Promise<RouterDecision> {
     this.calls.push(event);
+    if (ctx.fewShot) this.prompts.push(ctx.fewShot);
     return this.inner.decide(event, ctx);
   }
 }
@@ -196,7 +201,10 @@ export class ModelJudge implements RouterJudge {
     private readonly options: ModelJudgeOptions = {},
   ) {}
 
-  async decide(event: NormalizedEvent, ctx: { workers: WorkerRecord[] }): Promise<RouterDecision> {
+  async decide(
+    event: NormalizedEvent,
+    ctx: { workers: WorkerRecord[]; fewShot?: string; suggestions?: string; queue?: string },
+  ): Promise<RouterDecision> {
     const at = this.options.now?.() ?? Date.now();
     const heuristic = await this.fallback.decide(event, ctx);
     if (this.options.prefilter && heuristic.action === 'ignore') {
@@ -215,7 +223,9 @@ export class ModelJudge implements RouterJudge {
     const notes = await inspectNotes(this.options.inspect, event);
     let raw: string;
     try {
-      raw = await this.client.complete(promptOf(event, notes));
+      raw = await this.client.complete(
+        promptOf(event, notes, ctx.fewShot, ctx.suggestions, ctx.queue),
+      );
     } catch {
       this.log.push({
         at,
@@ -277,13 +287,24 @@ export function parseModelDecision(
   };
 }
 
-function promptOf(event: NormalizedEvent, inspect = ''): string {
+function promptOf(
+  event: NormalizedEvent,
+  inspect = '',
+  fewShot = '',
+  suggestions = '',
+  queue = '',
+): string {
   return [
     'Decide ignore, answer, or spawn for this unowned event.',
+    'This is the Slow Path: a new thread or cross-task coordination. Subscribed follow-ups never reach you.',
+    'Classify the request as explicit, inferred, or not-accepted. Include confidence 0..1.',
     'Reply with JSON only: {"action":"ignore"|"answer"|"spawn","reason":"...","text":"...","title":"...","intensity":"observe"|"act","confidence":0.0}.',
     `type=${event.type} source=${event.source} actor=${event.actor.login} subject=${event.subject?.key ?? ''}`,
     `summary=${event.summary}`,
     inspect,
+    queue && `Open tasks (coordination):\n${queue}`,
+    fewShot && `Prior feedback (few-shot):\n${fewShot}`,
+    suggestions && `Rule suggestions from wrong feedback:\n${suggestions}`,
   ]
     .filter(Boolean)
     .join('\n');
