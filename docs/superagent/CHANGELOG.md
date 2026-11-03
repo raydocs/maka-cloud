@@ -80,6 +80,15 @@ a heading time is more than five minutes off that SHA's committer date.
 - **Live:** n/a
 - **Migrations / risk:** none. Format only.
 
+## 2026-11-02 18:09 MST — cursor/superagent-watchdog-duplex-51be — 9adc07fd2
+
+- **PR:** [#476](https://github.com/raydocs/maka-cloud/pull/476)
+- **What:** biome-format the linearized Super-agent files CI rejected after the #475 merge (intake/scheduler/judge-client/runtime and their tests). No behavior change.
+- **Why:** `npm run format:check` failed on `88ffc5f36`; the merge brought long lines biome wraps.
+- **Tests:** `biome format` on the 9 reported files; `format:check` clean
+- **Live:** n/a
+- **Migrations / risk:** none
+
 ## 2026-11-02 18:08 MST — cursor/superagent-scheduler-router-51be — 3524bb276
 
 - **PR:** [#474](https://github.com/raydocs/maka-cloud/pull/474)
