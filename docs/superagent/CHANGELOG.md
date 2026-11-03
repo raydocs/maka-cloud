@@ -8,7 +8,15 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
-## 2026-11-02 18:37 MST — cursor/superagent-wiring-51be
+## 2026-11-03 03:06 MST — superagent/executor
+
+- **What:** the executor seam from `executor-decision.md`. `executor.ts` defines `Executor` (`start` / `send` / `resume` / `stop`, each turn an async stream of normalised events: `progress`, `usage` deltas, and one terminal `ready` / `needs-person` (structured question with options and reason) / `blocked` / `failed`), the `ExecutorSession` record the host keeps, `executorSystemPrompt` (Mandate and team rules as a byte-stable prefix, plus the `MAKA_STATUS {json}` status-line contract and `parseStatusLine`), `FakeExecutor` (scripted events per turn, or write known files and report ready) and `ExecutorCoder`, which runs any executor behind the loop's `CoderPort`: the first event of a worker starts a session, later ones (`ci_failed` → `ci`, `review_*` → `review`, else `follow-up`) go to the same session through `send`. `FakeCoder` is now `ExecutorCoder` over `FakeExecutor` (same files, summary and usage as before). `CodingLoopHandler` hands executors the host checkout even when tests run in the box (`CoderPort.wantsWorkdir`), and when the executor ends with `needs-person` or `blocked` it records the question as evidence and waits on a human (`review-wait`, waiting `human`) without testing or pushing; `failed` reports no progress so the watchdog retries. Also fills the missing SHA on the 2026-11-02 18:37 heading (`303d685eb`).
+- **Why:** Super-agent schedules and authorizes; Claude Code and Codex do the coding behind one interface, and CI stays offline through the fake executor.
+- **Tests:** `executor.test` 8 passed (status-line parsing, stable system prompt, turn without a result → failed, `gitChanged`, session reuse through `send` with the right input kinds, one session per worker, needs-person / blocked / failed in the loop without push). Package suite on macOS: 299 of 300; the one failure is `box-daemon` RSS, which reads `/proc` (Linux only).
+- **Live:** n/a (fake executor only).
+- **Migrations / risk:** none. No flag, no store change, no `user_version` bump. The default coder path is unchanged apart from `FakeCoder` now writing through `FakeExecutor`.
+
+## 2026-11-02 18:37 MST — cursor/superagent-wiring-51be — 303d685eb
 
 - **What:** merge the updated `cursor/superagent-decisions-policy-51be` tip (`3c7049b04`), which already contains scheduler, intake, BYOM, duplex, lessons, and review-verify. Kept decision-card wiring (`recordFromCardResolution`, must-ask rows on `statusSnapshot.decisions`), host flags default off, and `CodingLoopHandler` on `DuplexLoop`. Speculative still runs only after a cross-source merge misses. sqlite `user_version` stays 2.
 - **Why:** The linearized tip moved after the first merge of #480. Bring that tip in with git merge only.
