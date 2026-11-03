@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { HeuristicJudge, ModelJudge, parseModelDecision } from '../router.js';
+import { FakeRouterInspect } from '../router-inspect.js';
 import { github, issuePayload, rig, TENANT } from './harness.js';
 
 test('ModelJudge without a client throws and HeuristicJudge stays the default', async () => {
@@ -89,4 +90,59 @@ test('a client failure falls back, and ignore/answer parse from fenced JSON', as
     text: 'No worker yet.',
   });
   assert.equal(parseModelDecision('{"action":"answer"}', event), undefined);
+});
+
+test('ModelJudge prefilter skips the model on a heuristic ignore and logs confidence', async () => {
+  let called = 0;
+  const judge = new ModelJudge(
+    {
+      async complete() {
+        called += 1;
+        return '{"action":"spawn","title":"should not run"}';
+      },
+    },
+    new HeuristicJudge(),
+    { prefilter: true, inspect: new FakeRouterInspect('log', 'CI: green') },
+  );
+  const decision = await judge.decide(
+    {
+      eventId: 'evt',
+      tenantId: TENANT,
+      source: 'github',
+      type: 'ping',
+      subject: null,
+      idempotencyKey: 'k',
+      actor: { login: 'alice', kind: 'user' },
+      occurredAt: 1,
+      receivedAt: 1,
+      summary: 'noise',
+      fields: [],
+      closesSubject: false,
+    },
+    { workers: [] },
+  );
+  // ping is not a HeuristicJudge type — it returns ignore/no_work
+  assert.equal(decision.action, 'ignore');
+  assert.equal(called, 0);
+  assert.equal(judge.log[0]?.source, 'prefilter');
+  assert.equal(judge.log[0]?.confidence, 0.9);
+});
+
+test('parseModelDecision keeps a confidence score', () => {
+  const event = {
+    eventId: 'evt',
+    tenantId: TENANT,
+    source: 'chat' as const,
+    type: 'user_message',
+    subject: null,
+    idempotencyKey: 'k',
+    actor: { login: 'alice' as const, kind: 'user' as const },
+    occurredAt: 1,
+    receivedAt: 1,
+    summary: 'x',
+    fields: [] as Array<[string, string]>,
+    closesSubject: false,
+  };
+  const parsed = parseModelDecision('{"action":"ignore","reason":"dup","confidence":0.4}', event);
+  assert.deepEqual(parsed, { action: 'ignore', reason: 'dup', confidence: 0.4 });
 });

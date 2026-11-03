@@ -94,9 +94,45 @@ test('a running worker with no progress inside the stall window is stuck', async
     lastHeartbeatAt: time.now,
   });
   time.advance(2_000);
-  const findings = await agent.tick();
+  const nudged = await agent.tick();
   assert.equal(
-    findings.some((row) => row.rule === 'stuck' && row.workerId === opened.workerId),
+    nudged.some((row) => row.rule === 'stuck' && row.action === 'nudge'),
     true,
   );
+  assert.notEqual(agent.worker(TENANT, opened.workerId)?.state, 'stuck');
+  time.advance(2_000);
+  const findings = await agent.tick();
+  assert.equal(
+    findings.some(
+      (row) =>
+        row.rule === 'stuck' && row.action === 'escalate' && row.workerId === opened.workerId,
+    ),
+    true,
+  );
+  assert.equal(agent.worker(TENANT, opened.workerId)?.state, 'stuck');
+});
+
+test('W2 skips a worker that self-reports waiting', async () => {
+  const { agent, store, time } = rig({
+    watchdog: { stallAfterMs: 1_000, heartbeatAfterMs: 60_000, loopRepeat: 9 },
+  });
+  const opened = await agent.ingest(github(TENANT, 'w', 'issues', issuePayload('opened', 6)));
+  assert.equal(opened.result, 'spawned');
+  if (opened.result !== 'spawned') return;
+  const worker = agent.worker(TENANT, opened.workerId);
+  assert.ok(worker);
+  store.putWorker({
+    ...worker,
+    state: 'running',
+    memory: 'waiting on review',
+    lastProgressAt: time.now - 5,
+    lastHeartbeatAt: time.now,
+  });
+  time.advance(2_000);
+  const findings = await agent.tick();
+  assert.equal(
+    findings.some((row) => row.workerId === opened.workerId),
+    false,
+  );
+  assert.equal(agent.worker(TENANT, opened.workerId)?.state, 'running');
 });

@@ -23,6 +23,7 @@ export const WORKER_STATES = [
   'sleeping',
   'waking',
   'awaiting_approval',
+  'paused',
   'stuck',
   'crashed',
   'retiring',
@@ -100,12 +101,23 @@ export interface Mandate {
   authority: Authority;
   budgets: { tokens?: number; usd?: number; wallMs?: number };
   strength: Strength;
+  /**
+   * When true, mergeGate treats an empty Checks/Statuses list as green.
+   * Scratch / no-CI repos only. Default is refuse (`no-checks` is not green).
+   */
+  allowNoCi?: boolean;
+  /** Owner may pause this worker. Default true. Set false to refuse pause. */
+  ownerPause?: boolean;
 }
 
 export interface Usage {
   tokens: number;
   usdMicros: number;
   wallMs: number;
+  /** Messages API `usage.input_tokens` when a model call recorded them. */
+  inputTokens?: number;
+  /** Messages API `usage.output_tokens` when a model call recorded them. */
+  outputTokens?: number;
 }
 
 export interface MemorySpill {
@@ -133,6 +145,18 @@ export interface WorkerRecord {
   lastHeartbeatAt: number;
   lastStepSignature: string | null;
   stepRepeats: number;
+  /** W2 nudges already delivered. One nudge, then escalate. JSON only; no schema bump. */
+  nudges?: number;
+  /** Done is a claim until signals read back live. JSON only; no schema bump. */
+  doneClaim?: import('./done.js').DoneClaim;
+  /** CLEAR/BLOCK receipts pinned to a head SHA. JSON only; no schema bump. */
+  reviewReceipts?: import('./review.js').ReviewReceipt[];
+  pausedFrom?: WorkerState;
+  /** Pause is recorded only after the worker is verified stopped. */
+  pausedVerified?: boolean;
+  lastLive?: { sha?: string; ci?: string; prMerged?: boolean; at: number };
+  /** Named step plan + heartbeat. JSON only; no schema bump. */
+  progress?: import('./progress.js').WorkerProgress;
   usage: Usage;
   evidence: EvidenceBlock[];
   createdAt: number;
@@ -233,11 +257,22 @@ export interface HandlerResult {
   memory?: string;
   plan?: string;
   transcriptPointer?: string;
+  workspaceRef?: string | null;
+  sandboxRef?: string | null;
   progress?: boolean;
   stepSignature?: string;
   usage?: Partial<Usage>;
   evidence?: EvidenceBlock[];
   action?: ProposedAction;
+  /** Mid-run phase / activity. Superagent persists it on the worker JSON. */
+  progressUpdate?: import('./progress.js').ProgressPatch;
+  /** Claim only. Superagent re-reads signals before retiring. */
+  done?: import('./done.js').DoneClaim;
+  /**
+   * Forbidden. Workers have no outbound user channel. Superagent drops this
+   * and audits `worker_outbound_refused`.
+   */
+  userMessage?: string;
 }
 
 export interface WorkerContext {
@@ -247,6 +282,15 @@ export interface WorkerContext {
   orgSecrets: OrgSecretPort;
   /** Chain of Recall: spilled chunks plus the inline window. */
   recall: () => string;
+  /**
+   * Persist a phase / activity / waiting heartbeat. Not a user channel —
+   * Superagent may speak through `LeadPort` after it writes the store.
+   */
+  reportProgress?: (patch: import('./progress.js').ProgressPatch) => Promise<void>;
+  /**
+   * Intentionally absent: workers have no outbound user channel.
+   * `LeadPort.speak` lives on Superagent, never here.
+   */
 }
 
 export interface WorkerHandler {
@@ -254,9 +298,18 @@ export interface WorkerHandler {
 }
 
 export type RouterDecision =
-  | { action: 'ignore'; reason: string }
-  | { action: 'answer'; text: string }
-  | { action: 'spawn'; mandate: Mandate; title: string };
+  | { action: 'ignore'; reason: string; confidence?: number }
+  | { action: 'answer'; text: string; confidence?: number }
+  | { action: 'spawn'; mandate: Mandate; title: string; confidence?: number };
+
+export interface JudgeLogEntry {
+  at: number;
+  eventType: string;
+  action: 'ignore' | 'answer' | 'spawn';
+  source: 'heuristic' | 'model' | 'prefilter';
+  confidence?: number;
+  reason?: string;
+}
 
 export interface RouterJudge {
   decide(event: NormalizedEvent, ctx: { workers: WorkerRecord[] }): Promise<RouterDecision>;
@@ -267,6 +320,10 @@ export interface AdmissionPolicy {
   selfLogins?: string[];
   denyUnownedBots?: boolean;
   allowSources?: EventSource[];
+  /** Live workers with a sandboxRef (or about to get one) allowed at once. */
+  maxBoxes?: number;
+  /** Tenant ledger cap in USD. Spawn is refused when usage already meets it. */
+  spendCapUsd?: number;
 }
 
 export interface WatchdogSettings {
@@ -281,7 +338,7 @@ export interface WatchdogFinding {
   rule: WatchdogRule;
   tenantId: string;
   workerId: string;
-  action: 'restart' | 'escalate' | 'retire' | 'stop';
+  action: 'restart' | 'escalate' | 'retire' | 'stop' | 'nudge';
   generation: number;
   detail: string;
 }
@@ -314,6 +371,7 @@ export const LIVE_STATES: readonly WorkerState[] = [
   'sleeping',
   'waking',
   'awaiting_approval',
+  'paused',
   'stuck',
   'crashed',
 ];

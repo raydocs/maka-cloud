@@ -468,6 +468,9 @@ export async function startStack(
     cloud = await startCloud({
       modelAvailable: () => Boolean(env.ANTHROPIC_API_KEY?.trim() || env.OPENAI_API_KEY?.trim()),
       quota: quotaSource(journal, invites!, config.spend),
+      progress: {
+        snapshot: (owner) => superagentRt?.agent.statusSnapshot(owner) ?? { at: 0, workers: [] },
+      },
       ...(push === undefined ? {} : { push }),
       ...(signInOn ? { auth } : {}),
       ...(duties === undefined ? {} : { duties: duties.service }),

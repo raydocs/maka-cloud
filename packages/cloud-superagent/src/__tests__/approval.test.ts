@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { mergeBoundText } from '../loop.js';
+import { FakeReviewer } from '../review.js';
 import { actMandate, observeMandate } from '../types.js';
 import { github, prPayload, REPO, rig, TENANT } from './harness.js';
 
-const MERGE = 'Merge PR #12 into main';
+const MERGE = mergeBoundText(REPO, 12, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
 
 test('merge is held until the owner approves the exact bound text', async () => {
-  const { agent, handler, judge } = rig();
+  const { agent, handler, judge } = rig({ reviewer: new FakeReviewer() });
   judge.inner = {
     async decide() {
       return { action: 'spawn', mandate: actMandate([REPO], 'explicit'), title: 'PR' };
@@ -39,7 +41,7 @@ test('merge is held until the owner approves the exact bound text', async () => 
 });
 
 test('observe intensity refuses merge without opening an approval', async () => {
-  const { agent, handler, judge } = rig();
+  const { agent, handler, judge } = rig({ reviewer: new FakeReviewer() });
   judge.inner = {
     async decide() {
       return { action: 'spawn', mandate: observeMandate([REPO]), title: 'watch' };

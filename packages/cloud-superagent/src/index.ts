@@ -4,23 +4,38 @@ export {
   RecordingHandler,
   SilentHandler,
   Superagent,
+  coalesceInbox,
   type IngestResult,
   type SuperagentOptions,
 } from './runtime.js';
 export {
   admit,
+  admitSpawn,
   HeuristicJudge,
   ModelJudge,
   type JudgeClient,
+  type ModelCompletion,
+  type ModelJudgeOptions,
   parseModelDecision,
   RecordingJudge,
+  isStatusAsk,
+  isStatusAskText,
 } from './router.js';
+export {
+  FakeRouterInspect,
+  LocalRouterInspect,
+  inspectNotes,
+  type RouterInspect,
+} from './router-inspect.js';
 export {
   createJudgeClientFromEnv,
   createJudgeFromEnv,
   DEFAULT_ANTHROPIC_BASE_URL,
   DEFAULT_JUDGE_MODEL,
+  CODER_MAX_TOKENS,
   FetchJudgeClient,
+  estimateUsdMicros,
+  parseMessagesUsage,
 } from './judge-client.js';
 export {
   DEFAULT_STUCK_OPTIONS,
@@ -78,6 +93,35 @@ export {
   type LocalLoopOptions,
   type LocalLoopReport,
 } from './local-loop.js';
+export {
+  defaultDoneWorld,
+  gitUnpushed,
+  readDoneFile,
+  verifyDone,
+  DONE_KINDS,
+  type DoneClaim,
+  type DoneKind,
+  type DoneSignal,
+  type DoneWorld,
+} from './done.js';
+export {
+  FakeReviewer,
+  hasClearReceipt,
+  parseReviewVerdict,
+  prRef,
+  receiptFromReview,
+  type ReviewReceipt,
+  type ReviewerPort,
+} from './review.js';
+export { formatLeadReport, freshnessOf, type LiveFacts } from './freshness.js';
+export {
+  RecordingLead,
+  SilentLead,
+  workerOutboundText,
+  type LeadMessage,
+  type LeadPort,
+} from './lead.js';
+export { boxLooksRunning, isPauseActive, resumeState, PAUSE_ACTIVE } from './pause.js';
 export { overBudget, RISKY_ACTIONS, Safety } from './safety.js';
 export { MemorySuperagentStore } from './memory-store.js';
 export {
@@ -121,6 +165,7 @@ export type {
   OrgSecretPort,
   OrgSecretRef,
   OrgSecretResult,
+  JudgeLogEntry,
   TenantUsage,
   ProposedAction,
   RouterDecision,
@@ -132,7 +177,110 @@ export type {
   WorkerRecord,
   WorkerState,
 } from './types.js';
-export { evaluateWorker, runWatchdog } from './watchdog.js';
+export {
+  ADD_BROKEN,
+  ADD_FIXED,
+  ADD_TEST,
+  scratchFiles,
+  CodingLoopHandler,
+  FakeCoder,
+  NoopCoder,
+  FakeGitHost,
+  NodeFileTestPort,
+  mayPush,
+  mergeAction,
+  mergeBoundText,
+  parseMergeBound,
+  workerBranch,
+  emptyTimings,
+  formatModelUsage,
+  formatTimings,
+  LOOP_TIMING_PHASES,
+  type CoderPort,
+  type GitHostPort,
+  type LoopPorts,
+  type LoopTimings,
+  type TestPort,
+} from './loop.js';
+export {
+  BOX_REPO,
+  BoxWorkspace,
+  applyBoxPatch,
+  assertSafeCloneTarget,
+  formatBoxExec,
+  isPublicCloneUrl,
+  packTar,
+  type BoxExecLog,
+} from './loop-box.js';
+export { HttpCoder, createCoderFromEnv, parseCoderJson } from './loop-coder.js';
+export {
+  GITHUB_TOKEN_ENV,
+  LOOP_REPO_ENV,
+  LOOP_SEED_ENV,
+  HttpGitHost,
+  createGitHostFromEnv,
+  evaluateMergeGate,
+  githubTokenProblem,
+  summarizeCi,
+  type CiStatus,
+  type CiVerdict,
+  type MergeGateResult,
+} from './loop-github.js';
+export {
+  formatRealLoopReport,
+  runRealLoop,
+  runRealLoopCli,
+  scratchAddRepo,
+  type RealLoopOptions,
+  type RealLoopReport,
+} from './real-loop.js';
+export {
+  formatMetricsMarkdown,
+  runMetrics,
+  runMetricsCli,
+  type MetricsCase,
+  type MetricsOptions,
+  type MetricsReport,
+} from './metrics.js';
+export { evaluateWorker, reportsWaiting, runWatchdog } from './watchdog.js';
+export {
+  DEFAULT_PHASE_MS,
+  DEFAULT_PROGRESS,
+  DEFAULT_STILL_EVERY_MS,
+  PROGRESS_PHASES,
+  WAITING_PHASES,
+  applyProgressPatch,
+  cloneProgress,
+  defaultPhases,
+  encodeProgressSse,
+  estimatePhaseMs,
+  formatLeadProgress,
+  formatProgressBar,
+  formatProgressLine,
+  formatStatusText,
+  historicalPhaseMs,
+  looksStuck,
+  nextLeadKind,
+  progressWaiting,
+  startProgress,
+  statusSnapshotOf,
+  viewOf,
+  wantsProgressSse,
+  type ProgressLook,
+  type ProgressPatch,
+  type ProgressPhase,
+  type ProgressSettings,
+  type ProgressView,
+  type StatusSnapshot,
+  type WaitingKind,
+  type WorkerProgress,
+} from './progress.js';
+export {
+  PROGRESS_HTTP_PATH,
+  handleProgressRequest as handleProgressHttp,
+  runStatusCli,
+  writeProgressResponse,
+} from './status.js';
 export {
   createWorkspaceStore,
   GitCloneStore,

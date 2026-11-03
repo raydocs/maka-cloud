@@ -44,7 +44,8 @@ listener is for laptop replay only.
 | Name | Why |
 |---|---|
 | `MAKA_CLOUD_SUPERAGENT_ACTORS` | Comma-separated logins allowed to spawn. Empty = any non-bot (still filtered). |
-| `MAKA_CLOUD_SUPERAGENT_JUDGE=model` plus a judge key | Cheap Router model. Heuristic stays default. |
+| Judge key (`ANTHROPIC_API_KEY` / `MAKA_CLOUD_JUDGE_API_KEY`) | `createJudgeFromEnv` uses ModelJudge with a heuristic prefilter. `=heuristic` / `=model` force one path. |
+| `MAKA_GITHUB_TOKEN` + `MAKA_CLOUD_LOOP_REPO` | Fine-grained PAT (`github_pat_`) for the live real-loop GitHub host. |
 | `MAKA_CLOUD_ORG_SECRET_*` / `MAKA_CLOUD_ORG_SECRETS_FILE` | Local Org Secrets. Instabox org-secret injection is still not assumed. |
 | `OPENAI_API_KEY` | Only if a Codex / OpenAI mode is in `MAKA_CLOUD_MODES`. |
 | Web Push (`CLOUD_PUSH_*`) | Spend alerts. Not P0. |
@@ -80,7 +81,50 @@ listener is for laptop replay only.
    a PR on the scratch repo from an allowed actor and confirm a worker row
    in `superagent.db`.
 
-5. **Spend cap.** Gateway and invite daily/monthly limits stay in force.
+5. **Real loop (fake first, then live).** Agents do not run the live path.
+   ```bash
+   npm run real-loop -w @maka-cloud/superagent
+   ```
+   Expect `ok: true`, `boxed: true`, `coder: fake`, `git: fake`, a `timings:`
+   line (`create/materialize/edit/test/diff/destroy`), `usage:` / `ledger:`
+   lines, in-box execs with `exit=`, and steps including
+   `box-materialize → box-edit → box-test` then
+   `push → pr → ci-resume → review-resume → merge-held → merge-approved`.
+   Push is the box `git diff --cached` applied to a clean host checkout.
+
+   Live public repo in the box (owner only; no GitHub token):
+   ```bash
+   export MAKA_CLOUD_LOOP_LIVE=1
+   export INSTABOX_API_KEY='…'
+   export MAKA_CLOUD_LOOP_CLONE_URL='https://github.com/owner/scratch.git'
+   # export MAKA_CLOUD_LOOP_INSTALL='npm ci'
+   # export MAKA_CLOUD_LOOP_TEST='npm test'
+   npm run real-loop -w @maka-cloud/superagent
+   ```
+   Expect the box created, public clone + tests inside it, then destroyed.
+
+   Live scratch + optional model / GitHub (empty private repo is OK):
+   ```bash
+   export MAKA_CLOUD_LOOP_LIVE=1
+   export INSTABOX_API_KEY='…'
+   # export ANTHROPIC_API_KEY='…'
+   # export MAKA_GITHUB_TOKEN='github_pat_…'
+   # export MAKA_CLOUD_LOOP_REPO='raydocs/maka-loop-scratch'
+   # export MAKA_CLOUD_LOOP_SEED=1
+   npm run real-loop -w @maka-cloud/superagent
+   ```
+   Expect the box created and destroyed, `usage:` from the Messages API when
+   a model key is set, `ci: no-checks` when the repo has no Actions, and
+   merge held on the head SHA (never auto-merged; empty checks are not
+   green unless the scratch mandate sets `allowNoCi`).
+
+6. **Metrics harness (fakes only).**
+   ```bash
+   npm run metrics -w @maka-cloud/superagent -- --n 3 --parallel 2 --out /tmp/sa-metrics
+   ```
+   Writes `metrics.json` and `metrics.md`.
+
+7. **Spend cap.** Gateway and invite daily/monthly limits stay in force.
    P0 should use a cheap model (`claude-haiku-5-5` or the built-in quick mode).
 
 ## Still stubbed / out of this repo

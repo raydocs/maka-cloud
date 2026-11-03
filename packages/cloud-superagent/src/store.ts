@@ -67,6 +67,26 @@ export function cloneWorker(worker: WorkerRecord): WorkerRecord {
     usage: { ...worker.usage },
     evidence: (worker.evidence ?? []).map((block) => ({ ...block })),
     spills: (worker.spills ?? []).map((row) => ({ ...row })),
+    reviewReceipts: (worker.reviewReceipts ?? []).map((row) => ({ ...row })),
+    doneClaim: worker.doneClaim
+      ? { ...worker.doneClaim, signals: worker.doneClaim.signals.map((row) => ({ ...row })) }
+      : undefined,
+    lastLive: worker.lastLive ? { ...worker.lastLive } : undefined,
+    progress: worker.progress
+      ? {
+          ...worker.progress,
+          phases: [...worker.progress.phases],
+          waiting: worker.progress.waiting ? { ...worker.progress.waiting } : undefined,
+          samples: worker.progress.samples
+            ? Object.fromEntries(
+                Object.entries(worker.progress.samples).map(([phase, rows]) => [
+                  phase,
+                  [...(rows ?? [])],
+                ]),
+              )
+            : undefined,
+        }
+      : undefined,
   };
 }
 

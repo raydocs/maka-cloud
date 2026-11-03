@@ -82,6 +82,30 @@ size: 2 vCPU / 4096 MiB
 This repository's agents and CI do **not** run the live smoke against Instabox.
 Tests mock HTTP only.
 
+## 3. Real loop (fake by default)
+
+A worker clones a scratch repo, applies `FakeCoder`, runs `node add.test.js`,
+pushes `maka/sa-<workerId>`, opens a fake PR, resumes on CI/review, and holds
+merge for approval.
+
+```bash
+npm run build -w @maka-cloud/superagent
+npm run real-loop -w @maka-cloud/superagent
+```
+
+Live (owner only): `MAKA_CLOUD_LOOP_LIVE=1` plus `INSTABOX_API_KEY`. Clone,
+edits and tests run **inside** the box. Public probe:
+`MAKA_CLOUD_LOOP_CLONE_URL=https://github.com/owner/scratch.git` (no GitHub
+token). Optional `ANTHROPIC_API_KEY` (host-side coder; files applied in the
+box) and `MAKA_GITHUB_TOKEN=github_pat_…` with `MAKA_CLOUD_LOOP_REPO`. See
+[real-loop.md](real-loop.md). Never put keys on argv.
+
+## 4. Metrics harness (fakes)
+
+```bash
+npm run metrics -w @maka-cloud/superagent -- --n 3 --parallel 2 --out /tmp/sa-metrics
+```
+
 See [p0-checklist.md](p0-checklist.md) for the rest of the first real run.
 
 ## Receive a live GitHub webhook (optional)
@@ -123,14 +147,19 @@ when you want a throwaway box.
 
 ## Optional ModelJudge
 
-HeuristicJudge stays the default. To send unowned events through the same
-Anthropic Messages API the host already uses:
+HeuristicJudge stays the Superagent constructor default (no keys in CI).
+When a judge key is present, `createJudgeFromEnv` uses `ModelJudge` with the
+heuristic as a **prefilter** (ignore/empty skips the model). Force one path
+with `MAKA_CLOUD_SUPERAGENT_JUDGE=heuristic` or `=model`. Decisions log
+`confidence` and source. Optional read-only `RouterInspect` (`git log`, CI
+URL) is a cheap check so the Router can verify instead of guessing.
 
 ```bash
-export MAKA_CLOUD_SUPERAGENT_JUDGE=model
+# default when a key is set: ModelJudge + heuristic prefilter
 export ANTHROPIC_API_KEY='…'          # or MAKA_CLOUD_JUDGE_API_KEY
 # optional: ANTHROPIC_BASE_URL or MAKA_CLOUD_JUDGE_BASE_URL
 # optional: MAKA_CLOUD_JUDGE_MODEL (default claude-haiku-5-5)
+# optional force: MAKA_CLOUD_SUPERAGENT_JUDGE=model|heuristic|prefilter
 ```
 
 Point `MAKA_CLOUD_JUDGE_BASE_URL` at the gateway's `/anthropic` prefix if you

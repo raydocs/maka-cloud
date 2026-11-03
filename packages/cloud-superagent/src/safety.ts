@@ -1,4 +1,6 @@
 import type { SuperagentStore } from './store.js';
+import { parseMergeBound } from './loop.js';
+import { hasClearReceipt, prRef } from './review.js';
 import type {
   ApprovalKind,
   ApprovalRecord,
@@ -19,6 +21,7 @@ export const RISKY_ACTIONS: readonly ApprovalKind[] = [
 export type GateResult =
   | { allowed: true }
   | { allowed: false; reason: 'intensity_observe' }
+  | { allowed: false; reason: 'review_required' }
   | { allowed: false; reason: 'held'; approvalId: string };
 
 export function isRisky(kind: ApprovalKind): boolean {
@@ -46,6 +49,9 @@ export class Safety {
     if (!isRisky(action.kind)) return { allowed: true };
     if (worker.mandate.intensity === 'observe') {
       return { allowed: false, reason: 'intensity_observe' };
+    }
+    if (action.kind === 'merge' && !mergeReceiptOk(worker, action)) {
+      return { allowed: false, reason: 'review_required' };
     }
     if (this.approvedFor(worker, action)) return { allowed: true };
     const existing = this.store
@@ -97,4 +103,10 @@ export class Safety {
     this.store.putApproval(next);
     return { ok: true, approval: next };
   }
+}
+
+function mergeReceiptOk(worker: WorkerRecord, action: ProposedAction): boolean {
+  const parsed = parseMergeBound(action.boundText);
+  if (!parsed) return false;
+  return hasClearReceipt(worker.reviewReceipts, prRef(parsed.repo, parsed.number), parsed.sha);
 }

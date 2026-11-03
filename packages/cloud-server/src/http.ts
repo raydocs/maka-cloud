@@ -200,6 +200,8 @@ export interface PublicApiDeps {
   auth?: AuthRoutes;
   /** Absent when no duties engine runs; `/github/webhook` and `/v1/projects` then answer like any unknown path. */
   duties?: DutyRoutes;
+  /** Super-agent worker progress for this invite. Absent → `/v1/superagent/progress` is 404. */
+  progress?: { snapshot(owner: string): unknown };
 }
 
 const createConversation = z
@@ -520,6 +522,30 @@ export class PublicApi {
     if (path === '/v1/usage' && method === 'GET') {
       if (!this.deps.quota) throw new HttpError(404, 'not_found');
       return respond(res, 200, this.deps.quota.usage(invite.inviteId));
+    }
+    if (path === '/v1/superagent/progress') {
+      if (!this.deps.progress) throw new HttpError(404, 'not_found');
+      if (method !== 'GET' && method !== 'HEAD') {
+        throw new HttpError(405, 'method_not_allowed', { allow: 'GET, HEAD' });
+      }
+      const snapshot = this.deps.progress.snapshot(invite.inviteId);
+      const accept = req.headers.accept;
+      const sse =
+        (typeof accept === 'string' && accept.includes('text/event-stream')) ||
+        url.searchParams.has('sse') ||
+        url.searchParams.get('stream') === '1';
+      if (sse) {
+        const body =
+          method === 'HEAD' ? '' : `id: 1\nevent: progress\ndata: ${JSON.stringify(snapshot)}\n\n`;
+        res
+          .writeHead(200, {
+            'content-type': 'text/event-stream',
+            'cache-control': 'private, no-store',
+          })
+          .end(body);
+        return;
+      }
+      return respond(res, 200, snapshot);
     }
     if (path === '/v1/settings') {
       // The person's own settings. Today that is the language the server speaks to them in.

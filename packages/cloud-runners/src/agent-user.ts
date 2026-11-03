@@ -429,13 +429,39 @@ const POWERFUL_GROUPS = new Set([
   'podman',
 ]);
 
-/** What the probe found, and what is wrong with it; empty when the box keeps the channel private. */
-export function agentIsolationProblems(output: string): string[] {
+const FILECAPS_PROBLEM =
+  'a program carries a capability the agent could use (or file capabilities could not be listed)';
+const SETID_PROBLEM =
+  'a program is setuid or setgid to another account and the agent could run it (or they could not be listed)';
+const ISOLATION_LISTING_ATTEMPTS = 3;
+
+function isolationFacts(output: string): Map<string, string> {
   const facts = new Map<string, string>();
   for (const line of output.split('\n')) {
     const match = /^FACT ([a-z0-9_]+)=(.*)$/u.exec(line.trim());
     if (match) facts.set(match[1] as string, match[2] as string);
   }
+  return facts;
+}
+
+/**
+ * True when the only problems are filecap or setid listings that did not finish (`unchecked`), not
+ * a finding (`found`) and not a missing answer. A walk of `/` can fail once under parallel load
+ * (`find` / `getcap` race); that is retried. A real privileged program is not.
+ */
+export function isolationListingUnfinished(output: string): boolean {
+  const problems = agentIsolationProblems(output);
+  if (problems.length === 0) return false;
+  const facts = isolationFacts(output);
+  const retryable = new Set<string>();
+  if (facts.get('agent_filecaps') === 'unchecked') retryable.add(FILECAPS_PROBLEM);
+  if (facts.get('agent_setid') === 'unchecked') retryable.add(SETID_PROBLEM);
+  return retryable.size > 0 && problems.every((problem) => retryable.has(problem));
+}
+
+/** What the probe found, and what is wrong with it; empty when the box keeps the channel private. */
+export function agentIsolationProblems(output: string): string[] {
+  const facts = isolationFacts(output);
   const problems: string[] = [];
   const devUid = facts.get('dev_uid');
   const agentUid = facts.get('agent_uid');
@@ -461,21 +487,13 @@ export function agentIsolationProblems(output: string): string[] {
     'none',
     'the agent account holds Linux capabilities (or they could not be read)',
   );
-  mustBe(
-    'agent_filecaps',
-    'none',
-    'a program carries a capability the agent could use (or file capabilities could not be listed)',
-  );
+  mustBe('agent_filecaps', 'none', FILECAPS_PROBLEM);
   mustBe(
     'agent_login_files',
     'none',
     'the agent account can change a file or directory that the login shell of the control user reads (or one of them is a link to nowhere, or could not be checked)',
   );
-  mustBe(
-    'agent_setid',
-    'none',
-    'a program is setuid or setgid to another account and the agent could run it (or they could not be listed)',
-  );
+  mustBe('agent_setid', 'none', SETID_PROBLEM);
   mustBe('agent_sockets', 'none', 'the agent account can reach a container or VM socket');
   mustBe(
     'agent_control_write',
@@ -509,23 +527,36 @@ export function agentIsolationProblems(output: string): string[] {
   return problems;
 }
 
-/** Runs the probe once on a machine. Throws with every finding when the box does not keep the channel private. */
+/**
+ * Runs the probe on a machine. Throws with every finding when the box does not keep the channel
+ * private. An unfinished filecap or setid listing is tried again; a finding is not.
+ */
 export async function checkAgentIsolation(
   machine: RemoteMachine,
   channel: AgentChannel,
   signal?: AbortSignal,
 ): Promise<void> {
   assertAgentChannel(channel);
-  const out = await machine.execOk(AGENT_PROBE_SCRIPT, {
-    envs: {
-      MAKA_ROOT: machine.root,
-      MAKA_AGENT_USER: channel.user,
-      MAKA_AGENT_GROUP: assertSafeId('group', channel.group),
-    },
-    timeoutSeconds: 60,
-    ...(signal ? { signal } : {}),
-  });
-  const problems = agentIsolationProblems(out);
+  const run = () =>
+    machine.execOk(AGENT_PROBE_SCRIPT, {
+      envs: {
+        MAKA_ROOT: machine.root,
+        MAKA_AGENT_USER: channel.user,
+        MAKA_AGENT_GROUP: assertSafeId('group', channel.group),
+      },
+      timeoutSeconds: 60,
+      ...(signal ? { signal } : {}),
+    });
+  let out = await run();
+  let problems = agentIsolationProblems(out);
+  for (
+    let attempt = 1;
+    attempt < ISOLATION_LISTING_ATTEMPTS && isolationListingUnfinished(out);
+    attempt++
+  ) {
+    out = await run();
+    problems = agentIsolationProblems(out);
+  }
   if (problems.length > 0) {
     throw new Error(`the sandbox does not keep the agent channel private: ${problems.join('; ')}`);
   }

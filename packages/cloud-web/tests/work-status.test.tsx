@@ -7,6 +7,8 @@ import {
   RunningClock,
   SteerComposer,
   WaitingJump,
+  SuperagentProgress,
+  WorkerProgressBar,
 } from '../src/WorkStatus';
 import { Computer } from '../src/Computer';
 afterEach(() => {
@@ -103,6 +105,90 @@ test('multiple tasks require a choice and delivered messages have no withdraw', 
   expect(sendTaskMessage.mock.calls[0]?.[0]).toBe('task-2');
   expect(screen.queryByText('Take back')).toBeNull();
 });
+test('superagent progress list loads GET /v1/superagent/progress and hides a 404', async () => {
+  const request = vi.fn(async (_path: string) => ({
+    workers: [
+      {
+        workerId: 'wrk_1',
+        phase: 'test',
+        k: 4,
+        n: 9,
+        percent: 40,
+        elapsedMs: 10_000,
+        etaMs: 50_000,
+        lastActivity: 'node add.test.js',
+        look: 'running',
+      },
+    ],
+  }));
+  render(<SuperagentProgress client={{ request } as unknown as CloudClient} />);
+  expect(await screen.findByTestId('superagent-progress-list')).toBeTruthy();
+  expect(screen.getByText('test 4/9')).toBeTruthy();
+  expect(request.mock.calls[0]?.[0]).toBe('/v1/superagent/progress');
+  const empty = vi.fn(async (_path: string) => {
+    throw new Error('not_found');
+  });
+  render(<SuperagentProgress client={{ request: empty } as unknown as CloudClient} />);
+  await act(async () => undefined);
+  expect(screen.getAllByTestId('superagent-progress-list')).toHaveLength(1);
+});
+
+test('superagent progress bar distinguishes waiting from stuck', () => {
+  const { rerender } = render(
+    <WorkerProgressBar
+      view={{
+        workerId: 'wrk_1',
+        phase: 'edit',
+        k: 2,
+        n: 9,
+        percent: 22,
+        elapsedMs: 90_000,
+        etaMs: 600_000,
+        lastActivity: 'model step',
+        look: 'running',
+      }}
+    />,
+  );
+  expect(screen.getByTestId('worker-progress').getAttribute('data-look')).toBe('running');
+  expect(screen.getByRole('progressbar').getAttribute('aria-valuenow')).toBe('22');
+  expect(screen.getByText('model step')).toBeTruthy();
+  rerender(
+    <WorkerProgressBar
+      view={{
+        workerId: 'wrk_1',
+        phase: 'ci-wait',
+        k: 7,
+        n: 9,
+        percent: 70,
+        elapsedMs: 120_000,
+        etaMs: 600_000,
+        lastActivity: 'waiting on CI',
+        look: 'waiting',
+        waiting: { kind: 'ci', detail: 'https://ci' },
+      }}
+    />,
+  );
+  expect(screen.getByTestId('worker-progress').getAttribute('data-look')).toBe('waiting');
+  expect(screen.getByText('Waiting on ci: https://ci')).toBeTruthy();
+  expect(screen.queryByRole('progressbar')).toBeNull();
+  rerender(
+    <WorkerProgressBar
+      view={{
+        workerId: 'wrk_1',
+        phase: 'edit',
+        k: 2,
+        n: 9,
+        percent: 22,
+        elapsedMs: 90_000,
+        etaMs: 0,
+        lastActivity: 'node add.test.js',
+        look: 'stuck',
+      }}
+    />,
+  );
+  expect(screen.getByText('Looks stuck · edit 2/9')).toBeTruthy();
+});
+
 test('clock ticks and excludes observed pauses', () => {
   vi.useFakeTimers();
   vi.setSystemTime(1000);

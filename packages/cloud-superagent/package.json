@@ -15,7 +15,10 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test:dist": "node --test --test-concurrency=1 \"dist/**/*.test.js\"",
     "local-loop": "node ./scripts/local-loop.mjs",
-    "live-smoke": "node ./scripts/live-smoke.mjs"
+    "live-smoke": "node ./scripts/live-smoke.mjs",
+    "real-loop": "node ./scripts/real-loop.mjs",
+    "metrics": "node ./scripts/metrics.mjs",
+    "status": "node ./scripts/status.mjs"
   },
   "dependencies": {
     "zod": "^4.6.5"

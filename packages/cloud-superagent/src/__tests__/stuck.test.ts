@@ -26,6 +26,13 @@ test('a spinning handler becomes a T33 stuck card on the watchdog tick', async (
     lastHeartbeatAt: time.now,
   });
   time.advance(2_000);
+  const nudged = await agent.tick();
+  assert.equal(
+    nudged.some((row) => row.rule === 'stuck' && row.action === 'nudge'),
+    true,
+  );
+  assert.equal(cards.length, 0);
+  time.advance(2_000);
   const findings = await agent.tick();
   assert.equal(
     findings.some((row) => row.rule === 'stuck' && row.action === 'escalate'),

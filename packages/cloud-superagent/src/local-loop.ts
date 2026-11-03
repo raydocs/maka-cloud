@@ -7,6 +7,8 @@ import type { IngestInput } from './events.js';
 import { sequentialIds } from './ids.js';
 import { createJudgeFromEnv } from './judge-client.js';
 import { HeuristicJudge } from './router.js';
+import { mergeBoundText } from './loop.js';
+import { FakeReviewer } from './review.js';
 import { Superagent, type IngestResult } from './runtime.js';
 import { actMandate } from './types.js';
 import { createSandboxFromEnv, FakeSandbox, HttpSandbox, type SandboxPort } from './sandbox.js';
@@ -40,7 +42,7 @@ export class LocalLoopJudge implements RouterJudge {
 
 export const LOCAL_LOOP_TENANT = 'inv_local';
 export const LOCAL_LOOP_REPO = 'acme/app';
-export const MERGE_BOUND_TEXT = 'Merge pull request #12';
+export const MERGE_BOUND_TEXT = mergeBoundText(LOCAL_LOOP_REPO, 12, 'abc123def456');
 
 export interface LocalLoopReport {
   sandboxKind: 'fake' | 'instabox';
@@ -149,6 +151,7 @@ export async function runLocalLoop(options: LocalLoopOptions = {}): Promise<Loca
       sandbox,
       sandboxRef: machineId,
       judge: new LocalLoopJudge(),
+      reviewer: new FakeReviewer(),
       orgSecrets: new EnvOrgSecrets({ env }),
       clock,
       ids: sequentialIds(idsFrom),
@@ -295,6 +298,7 @@ export async function listenLoop(
     sandbox,
     sandboxRef: machineId,
     judge: createJudgeFromEnv(env),
+    reviewer: new FakeReviewer(),
     orgSecrets: new EnvOrgSecrets({ env }),
     admission: {
       allowActors: parseList(env.MAKA_CLOUD_SUPERAGENT_ACTORS) ?? ['alice', 'bob'],
