@@ -18,7 +18,8 @@
     "live-smoke": "node ./scripts/live-smoke.mjs",
     "real-loop": "node ./scripts/real-loop.mjs",
     "metrics": "node ./scripts/metrics.mjs",
-    "status": "node ./scripts/status.mjs"
+    "status": "node ./scripts/status.mjs",
+    "executor-bench": "node ./scripts/executor-bench.mjs"
   },
   "dependencies": {
     "@maka-cloud/orchestrator": "0.1.0",

@@ -1,6 +1,4 @@
 import { execFile } from 'node:child_process';
-import { mkdir, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import type { EvidenceBlock } from './types.js';
 import type {
@@ -24,6 +22,7 @@ import {
 } from './loop-box.js';
 import { GitCloneStore, type WorkspaceHandle, type WorkspaceStore } from './workspace.js';
 import { DuplexLoop } from './duplex.js';
+import { ExecutorCoder, FakeExecutor, type ExecutorTerminal } from './executor.js';
 import type { SandboxPort } from './sandbox.js';
 
 const run = promisify(execFile);
@@ -42,9 +41,13 @@ export interface CoderResult {
   files: Record<string, string>;
   summary: string;
   usage?: Partial<Usage>;
+  /** Set when an executor stopped without a ready result. */
+  outcome?: Exclude<ExecutorTerminal, { type: 'ready' }>;
 }
 
 export interface CoderPort {
+  /** Executors work in the host checkout even when tests run in the box. */
+  readonly wantsWorkdir?: boolean;
   apply(input: {
     dir?: string;
     snapshot?: string;
@@ -145,26 +148,15 @@ export interface LoopPorts {
   workerModel?: string;
 }
 
-/** Writes known files. CI uses this instead of a live model. */
-export class FakeCoder implements CoderPort {
-  constructor(private readonly files: Record<string, string> = { 'add.js': ADD_FIXED }) {}
-
-  async apply(input: { dir?: string }): Promise<CoderResult> {
-    const changed: string[] = [];
-    for (const [rel, content] of Object.entries(this.files)) {
-      if (input.dir) {
-        const path = join(input.dir, rel);
-        await mkdir(dirname(path), { recursive: true });
-        await writeFile(path, content);
-      }
-      changed.push(rel);
-    }
-    return {
-      changed,
-      files: { ...this.files },
-      summary: `fake coder wrote ${changed.join(', ')}`,
-      usage: { tokens: 40, usdMicros: 200, wallMs: 12 },
-    };
+/** Writes known files through the fake executor. CI uses this instead of a live model. */
+export class FakeCoder extends ExecutorCoder {
+  constructor(files: Record<string, string> = { 'add.js': ADD_FIXED }) {
+    super(
+      new FakeExecutor({
+        files,
+        usage: { inputTokens: 30, outputTokens: 10, usdMicros: 200, turns: 1, wallMs: 12 },
+      }),
+    );
   }
 }
 
@@ -441,7 +433,7 @@ export class CodingLoopHandler implements WorkerHandler {
     const coded = await this.timed('edit', async () => {
       const snapshot = boxed ? await boxed.snapshot() : undefined;
       const result = await this.ports.coder.apply({
-        dir: boxed ? undefined : (handle.dir ?? undefined),
+        dir: boxed && !this.ports.coder.wantsWorkdir ? undefined : (handle.dir ?? undefined),
         snapshot,
         brief,
         event,
@@ -462,6 +454,9 @@ export class CodingLoopHandler implements WorkerHandler {
         label: 'model-usage',
         body: formatModelUsage(coded.usage),
       });
+    }
+    if (coded.outcome) {
+      return executorStopped(coded, coded.outcome, evidence, handle.id, boxId);
     }
 
     const testCommand = this.ports.testCommand ?? 'node add.test.js';
@@ -746,6 +741,56 @@ export function parseMergeBound(
   const match = /^Merge pull request #(\d+) in (\S+) at ([0-9a-f]{7,40})$/i.exec(boundText.trim());
   if (!match) return undefined;
   return { number: Number(match[1]), repo: match[2] as string, sha: match[3] as string };
+}
+
+/** The executor asked a person, was blocked, or failed: no tests, no push. */
+function executorStopped(
+  coded: CoderResult,
+  outcome: Exclude<ExecutorTerminal, { type: 'ready' }>,
+  evidence: EvidenceBlock[],
+  workspaceRef: string,
+  sandboxRef: string,
+): HandlerResult {
+  if (outcome.type === 'failed') {
+    evidence.push({ kind: 'step', label: 'executor-failed', body: outcome.error });
+    return {
+      progress: false,
+      workspaceRef,
+      sandboxRef,
+      memory: `executor failed: ${outcome.error.slice(0, 200)}`,
+      plan: 'retry the executor',
+      usage: coded.usage,
+      evidence,
+      stepSignature: `executor-failed:${outcome.error.slice(0, 80)}`,
+    };
+  }
+  const detail =
+    outcome.type === 'needs-person'
+      ? [
+          outcome.ask.question,
+          ...(outcome.ask.options ?? []).map((option) => `- ${option}`),
+          outcome.ask.reason ? `reason: ${outcome.ask.reason}` : '',
+        ]
+          .filter(Boolean)
+          .join('\n')
+      : outcome.reason;
+  evidence.push({ kind: 'step', label: outcome.type, body: detail });
+  const question = outcome.type === 'needs-person' ? outcome.ask.question : outcome.reason;
+  return {
+    progress: true,
+    workspaceRef,
+    sandboxRef,
+    memory: `${outcome.type}: ${question.slice(0, 200)}`,
+    plan: `${outcome.type}: waiting on a person`,
+    usage: coded.usage,
+    evidence,
+    stepSignature: `${outcome.type}:${question.slice(0, 80)}`,
+    progressUpdate: {
+      phase: 'review-wait',
+      waiting: { kind: 'human', detail: `${outcome.type}: ${question.slice(0, 200)}` },
+      activity: `${outcome.type}: ${question.slice(0, 80)}`,
+    },
+  };
 }
 
 function briefOf(event: NormalizedEvent): string {

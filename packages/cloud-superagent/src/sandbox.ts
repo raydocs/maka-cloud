@@ -59,6 +59,8 @@ export interface SandboxCreateMachineRequest {
   vcpus?: number;
   memMiB?: number;
   deleteAfterSeconds?: number;
+  /** Instabox Secrets to select (names); the box sees placeholders only. */
+  secrets?: string[];
 }
 
 export interface SandboxPort {
@@ -433,6 +435,8 @@ export class HttpSandbox implements SandboxPort {
     desiredState?: 'running' | 'stopped';
     vcpus?: number;
     memMiB?: number;
+    /** Instabox Secrets to select (names); the box sees placeholders only. */
+    secrets?: string[];
   }): Promise<InstaboxOperation> {
     if ((request.templateId === undefined) === (request.snapshotId === undefined)) {
       throw new Error('createMachine needs exactly one of templateId and snapshotId.');
