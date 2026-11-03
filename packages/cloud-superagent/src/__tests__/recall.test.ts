@@ -11,7 +11,10 @@ test('followRecall walks trigger id → thread id → worker id', async () => {
   if (opened.result !== 'spawned') return;
   const byTrigger = agent.followRecall(TENANT, { triggerId: opened.eventId });
   assert.ok(byTrigger.length >= 1);
-  assert.equal(byTrigger.some((row) => row.workerId === opened.workerId), true);
+  assert.equal(
+    byTrigger.some((row) => row.workerId === opened.workerId),
+    true,
+  );
   const threadId = agent.worker(TENANT, opened.workerId)?.subject.key;
   assert.ok(threadId);
   const byThread = agent.followRecall(TENANT, { threadId });
