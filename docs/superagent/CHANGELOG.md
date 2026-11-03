@@ -8,6 +8,15 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
+## 2026-11-02 18:09 MST — cursor/superagent-byom-spec-51be — d6ada5292
+
+- **PR:** [#475](https://github.com/raydocs/maka-cloud/pull/475)
+- **What:** merge: cursor/superagent-intake-merge-51be format fix into Super-agent byom-spec. Biome format now clean. Keep every CHANGELOG entry, newest first. This branch is now a descendant of the formatted #477.
+- **Why:** Carry the Linux format:check fix through the linearized stack.
+- **Tests:** 223 `@maka-cloud/superagent` tests passed after the merge
+- **Live:** n/a
+- **Migrations / risk:** none
+
 ## 2026-11-02 18:09 MST — cursor/superagent-intake-merge-51be — 5f6a49fae
 
 - **PR:** [#477](https://github.com/raydocs/maka-cloud/pull/477)
