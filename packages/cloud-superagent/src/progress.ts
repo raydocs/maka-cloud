@@ -69,6 +69,8 @@ export interface WorkerProgress {
   lastLeadAt?: number;
   lastLeadKind?: 'phase' | 'still' | 'stuck';
   stuckSpoken?: boolean;
+  /** Bounded-autonomy stop / retry / nudge reason. */
+  lastReason?: string;
   samples?: Partial<Record<ProgressPhase, number[]>>;
 }
 
@@ -78,6 +80,7 @@ export interface ProgressPatch {
   activity?: string;
   waiting?: WaitingOn | null;
   heartbeat?: boolean;
+  reason?: string;
 }
 
 export interface ProgressView {
@@ -94,6 +97,7 @@ export interface ProgressView {
   heartbeatAt: number;
   look: ProgressLook;
   waiting?: WaitingOn;
+  reason?: string;
 }
 
 export interface StatusSnapshot {
@@ -185,6 +189,7 @@ export function applyProgressPatch(
     base.phase = patch.phase;
   }
   if (patch.activity !== undefined) base.lastActivity = clipActivity(patch.activity);
+  if (patch.reason !== undefined) base.lastReason = clipActivity(patch.reason);
   if (patch.waiting === null) delete base.waiting;
   else if (patch.waiting) base.waiting = { ...patch.waiting };
   else if (isWaitingPhase(base.phase) && !base.waiting) {
@@ -346,6 +351,9 @@ export function viewOf(
     heartbeatAt: progress.heartbeatAt,
     look,
     ...(waiting ? { waiting } : {}),
+    ...(progress.lastReason || worker.autonomy?.lastIncident?.detail
+      ? { reason: progress.lastReason ?? worker.autonomy?.lastIncident?.detail }
+      : {}),
   };
 }
 
@@ -418,7 +426,8 @@ export function formatProgressLine(view: ProgressView): string {
     return `${view.workerId}  waiting on ${view.waiting.kind}: ${view.waiting.detail}  last: ${view.lastActivity}`;
   }
   if (view.look === 'stuck') {
-    return `${view.workerId}  looks stuck  ${view.phase} ${view.k}/${view.n}  last: ${view.lastActivity}`;
+    const reason = view.reason ? `  reason: ${view.reason}` : '';
+    return `${view.workerId}  looks stuck  ${view.phase} ${view.k}/${view.n}  last: ${view.lastActivity}${reason}`;
   }
   if (view.look === 'paused') {
     return `${view.workerId}  paused  ${view.phase} ${view.k}/${view.n}`;

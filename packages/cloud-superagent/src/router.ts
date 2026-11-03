@@ -155,6 +155,8 @@ export interface ModelCompletion {
     usdMicros: number;
     wallMs: number;
     model: string;
+    cacheReadTokens?: number;
+    cacheWriteTokens?: number;
   };
 }
 

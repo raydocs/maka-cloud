@@ -60,9 +60,66 @@ export const WATCHDOG_RULES = [
   'over_budget',
   'subject_closed',
   'awaiting_expired',
+  'stream_silence',
+  'time_limit',
+  'empty_turns',
+  'repeat_tools',
   'box_stuck',
 ] as const;
 export type WatchdogRule = (typeof WATCHDOG_RULES)[number];
+
+export const AUTONOMY_RULES = [
+  'stream_silence',
+  'time_limit',
+  'empty_turns',
+  'repeat_tools',
+] as const;
+export type AutonomyRule = (typeof AUTONOMY_RULES)[number];
+
+/** Factory Droid 1.0 bounded-autonomy defaults. */
+export const DEFAULT_AUTONOMY = {
+  streamSilenceMs: 4 * 60_000,
+  timeLimitAttempts: 2,
+  emptyTurnsStop: 3,
+  identicalToolsNudge: 3,
+  identicalToolsStop: 6,
+  compactionSummaryTokens: 16_000,
+} as const;
+
+export type AutonomySettings = {
+  streamSilenceMs: number;
+  timeLimitAttempts: number;
+  emptyTurnsStop: number;
+  identicalToolsNudge: number;
+  identicalToolsStop: number;
+  compactionSummaryTokens: number;
+};
+
+export type AutonomyAction = 'continue' | 'retry' | 'nudge' | 'stop';
+
+export interface AutonomyIncident {
+  action: Exclude<AutonomyAction, 'continue'>;
+  rule: AutonomyRule;
+  detail: string;
+  at: number;
+  applied?: boolean;
+}
+
+/** Per-worker bounded-autonomy + cache counters. JSON only; no schema bump. */
+export interface AutonomyState {
+  emptyTurns: number;
+  lastToolKey: string | null;
+  lastToolResultHash: string | null;
+  identicalToolRuns: number;
+  timeLimitAttempts: number;
+  streamRetries: number;
+  cacheBreaks: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  inputTokens: number;
+  lastIncident?: AutonomyIncident;
+  pending?: AutonomyIncident;
+}
 
 export const TENANT_BOX_STATES = [
   'creating',
@@ -213,6 +270,8 @@ export interface WorkerRecord {
   lastLive?: { sha?: string; ci?: string; prMerged?: boolean; at: number };
   /** Named step plan + heartbeat. JSON only; no schema bump. */
   progress?: import('./progress.js').WorkerProgress;
+  /** Bounded autonomy + prompt-cache counters. JSON only; no schema bump. */
+  autonomy?: AutonomyState;
   /** Copy of the tenant box (JSON). Source of truth is SuperagentStore.tenantBox. */
   box?: TenantBoxRecord;
   usage: Usage;
@@ -267,6 +326,8 @@ export interface UsageEntry {
   usdMicros: number;
   wallMs: number;
   at: number;
+  /** Memory/tests: `autonomy_retry|nudge|stop`. Sqlite stores the numeric columns only. */
+  kind?: string;
 }
 
 export type EvidenceKind = 'patch' | 'log' | 'artifact' | 'step' | 'test';
@@ -324,6 +385,10 @@ export interface HandlerResult {
   action?: ProposedAction;
   /** Mid-run phase / activity. Superagent persists it on the worker JSON. */
   progressUpdate?: import('./progress.js').ProgressPatch;
+  /** Bounded-autonomy counters. Superagent persists them on the worker JSON. */
+  autonomy?: AutonomyState;
+  /** Stop / retry / nudge from the worker loop. Superagent records ledger + watchdog. */
+  incident?: AutonomyIncident;
   /** Claim only. Superagent re-reads signals before retiring. */
   done?: import('./done.js').DoneClaim;
   /**
@@ -392,13 +457,14 @@ export interface WatchdogSettings {
   loopRepeat: number;
   maxRestarts: number;
   approvalTtlMs: number;
+  autonomy: AutonomySettings;
 }
 
 export interface WatchdogFinding {
   rule: WatchdogRule;
   tenantId: string;
   workerId: string;
-  action: 'restart' | 'escalate' | 'retire' | 'stop' | 'nudge';
+  action: 'restart' | 'escalate' | 'retire' | 'stop' | 'nudge' | 'retry';
   generation: number;
   detail: string;
 }
@@ -423,6 +489,7 @@ export const DEFAULT_WATCHDOG: WatchdogSettings = {
   loopRepeat: 3,
   maxRestarts: 3,
   approvalTtlMs: 24 * 60 * 60_000,
+  autonomy: { ...DEFAULT_AUTONOMY },
 };
 
 export const LIVE_STATES: readonly WorkerState[] = [

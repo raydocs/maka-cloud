@@ -80,6 +80,15 @@ export function cloneWorker(worker: WorkerRecord): WorkerRecord {
       ? { ...worker.doneClaim, signals: worker.doneClaim.signals.map((row) => ({ ...row })) }
       : undefined,
     lastLive: worker.lastLive ? { ...worker.lastLive } : undefined,
+    autonomy: worker.autonomy
+      ? {
+          ...worker.autonomy,
+          lastIncident: worker.autonomy.lastIncident
+            ? { ...worker.autonomy.lastIncident }
+            : undefined,
+          pending: worker.autonomy.pending ? { ...worker.autonomy.pending } : undefined,
+        }
+      : undefined,
     progress: worker.progress
       ? {
           ...worker.progress,

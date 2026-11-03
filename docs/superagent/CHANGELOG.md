@@ -8,6 +8,15 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
+## 2026-11-02 17:19 MST — cursor/superagent-bounded-autonomy-51be — db85c62a7
+
+- **PR:** [#473](https://github.com/raydocs/maka-cloud/pull/473)
+- **What:** merge: cursor/superagent-shared-box-51be (#472) into Super-agent bounded-autonomy. Kept BoxPool and bounded autonomy / prompt-cache. Keep every CHANGELOG entry, newest first. This branch is now a descendant of #472, #471, #470, and main.
+- **Why:** Linearize the remaining stack so merging #470 → #471 → #472 → #473 cannot re-dirty the next PR. Linux-only gates.
+- **Tests:** 156 `@maka-cloud/superagent` tests passed after the merge
+- **Live:** n/a
+- **Migrations / risk:** none. JSON fields only.
+
 ## 2026-11-02 17:18 MST — cursor/superagent-shared-box-51be — 4bd2c5157
 
 - **PR:** [#472](https://github.com/raydocs/maka-cloud/pull/472)
@@ -34,6 +43,15 @@ a heading time is more than five minutes off that SHA's committer date.
 Keep every CHANGELOG entry, newest first.
 - **Why:** Linearize the remaining stack so merging #470 → #471 → #472 → #473 cannot re-dirty the next PR. Linux-only gates.
 - **Tests:** conflict resolution only; prior head `e925c75a8`
+- **Live:** n/a
+- **Migrations / risk:** none
+
+## 2026-11-02 16:53 MST — cursor/superagent-bounded-autonomy-51be — 1ab088ce2
+
+- **PR:** [#473](https://github.com/raydocs/maka-cloud/pull/473)
+- **What:** Merge `origin/main` `e83340599` (PR #465 Super-agent workspaces) into Super-agent bounded-autonomy. CHANGELOG conflicted; both sides kept, newest first.
+- **Why:** #465 landed on main; remaining stack PRs needed main forwarded. Linux-only gates.
+- **Tests:** conflict resolution only; prior head `f1b17ed26`
 - **Live:** n/a
 - **Migrations / risk:** none
 
@@ -70,6 +88,15 @@ Keep every CHANGELOG entry, newest first.
 - **What:** Merge `origin/main` `e83340599` (PR #465 Super-agent workspaces) into Super-agent ledger. CHANGELOG conflicted; both sides kept, newest first.
 - **Why:** #465 landed on main; this PR was DIRTY. User asked to merge main forward and report Linux-green SHAs.
 - **Tests:** conflict resolution only; prior head `9a9f8ba87` already had Linux CI green or in progress
+- **Live:** n/a
+- **Migrations / risk:** none
+
+## 2026-11-02 16:02 MST — cursor/superagent-bounded-autonomy-51be — 3f45589ac
+
+- **PR:** [#473](https://github.com/raydocs/maka-cloud/pull/473)
+- **What:** Merge `origin/main` `4f54c25dc` (PR #464 Super-agent host) into Super-agent bounded-autonomy. Kept T34 P3 (`superagent` before `runners`). `AGENTS.md` T34 wording and CHANGELOG conflicted; ours plus incoming entries kept.
+- **Why:** #464 landed on main. User asked to merge main up the remaining stack immediately.
+- **Tests:** conflict resolution only; prior head `6749c204b` already had non-iOS CI green
 - **Live:** n/a
 - **Migrations / risk:** none
 
@@ -127,6 +154,15 @@ Keep every CHANGELOG entry, newest first.
 - **Live:** n/a
 - **Migrations / risk:** none
 
+## 2026-11-02 14:53 MST — cursor/superagent-bounded-autonomy-51be — 2f921ab8d
+
+- **PR:** [#473](https://github.com/raydocs/maka-cloud/pull/473)
+- **What:** `checkAgentIsolation` retries an unfinished filecap or setid listing (`unchecked`) up to three probes. A `found` setuid/capability, a missing fact, or any other isolation problem still fails on the first probe. Same assertions.
+- **Why:** CI `real-accounts` on #473 head `f64164fcd` run 41521670607: `the agent account reads and writes the nested files of a checkout, and of a base check` failed `agent_filecaps` (or they could not be listed). Same test on #471 `e174aff2e` failed `agent_setid` at the same minute. Isolation unit tests in the same job passed. Sibling #472 `real-accounts` succeeded. Walk of `/` under parallel real-account load, not MakaEngine.
+- **Tests:** cloud-runners `agent-user` — unfinished listing recovers on retry; `found` and mixed problems do not retry; file-caps cases unchanged
+- **Live:** n/a
+- **Migrations / risk:** none. Retry only `unchecked` listings. Production boxes with a real privileged program still refuse immediately.
+
 ## 2026-11-02 14:53 MST — cursor/superagent-real-loop-51be — 033d5b5dd
 
 - **PR:** [#471](https://github.com/raydocs/maka-cloud/pull/471)
@@ -135,6 +171,15 @@ Keep every CHANGELOG entry, newest first.
 - **Tests:** cloud-runners `agent-user` — unfinished listing recovers on retry; `found` and mixed problems do not retry; file-caps cases unchanged
 - **Live:** n/a
 - **Migrations / risk:** none. Retry only `unchecked` listings. Production boxes with a real privileged program still refuse immediately.
+
+## 2026-11-02 13:42 MST — cursor/superagent-bounded-autonomy-51be — 20b7ba5cc
+
+- **PR:** [#473](https://github.com/raydocs/maka-cloud/pull/473)
+- **What:** Removed leftover `AGENTS.md` conflict markers on the `asf-license-headers` fork-delta row. Kept both `docs/superagent` and `scripts/cloud-maka-engine-boundary.mjs` exclusions.
+- **Why:** The main-merge commit resolved the T34/MakaEngine table but left a second hunk at line 65.
+- **Tests:** none (docs table only)
+- **Live:** n/a
+- **Migrations / risk:** none
 
 ## 2026-11-02 13:42 MST — cursor/superagent-shared-box-51be — cf89368a5
 
@@ -162,6 +207,15 @@ Keep every CHANGELOG entry, newest first.
 - **Tests:** none (docs table only)
 - **Live:** n/a
 - **Migrations / risk:** none
+
+## 2026-11-02 13:41 MST — cursor/superagent-bounded-autonomy-51be — 7a8ddb0f5
+
+- **PR:** [#473](https://github.com/raydocs/maka-cloud/pull/473)
+- **What:** Merge `origin/main` `6682cdc34` (PR #469 MakaEngine) into Super-agent bounded-autonomy. Kept MakaEngine and T34 P3 (`superagent` before `runners`). `AGENTS.md` and `package.json` conflicted; both sides kept.
+- **Why:** #469 landed on main; this PR was DIRTY. User asked to merge main up the stack and keep MakaEngine. #473 is a sibling of #472, both cut from #471.
+- **Tests:** conflict resolution only; prior head `473ac5ad0` already had `test` green
+- **Live:** n/a
+- **Migrations / risk:** none. Inherits #469 MakaEngine. No sqlite change.
 
 ## 2026-11-02 13:40 MST — cursor/superagent-shared-box-51be — b25a3c7ca
 
@@ -217,6 +271,15 @@ Keep every CHANGELOG entry, newest first.
 - **Live:** n/a
 - **Migrations / risk:** none. Inherits #469 MakaEngine. No sqlite change.
 
+## 2026-11-02 12:15 MST — cursor/superagent-bounded-autonomy-51be — 0b00eb643
+
+- **PR:** [#473](https://github.com/raydocs/maka-cloud/pull/473)
+- **What:** `biome format` on autonomy / prompt-cache / session / runtime / judge-client. Merged #471 W2 two-tick host test and #466 `.setup-*` cleanup.
+- **Why:** CI `test` on #473 run 41505737950 failed `format:check` (`Found 6 errors`) before workspace tests ran. Same assertions. After format, the forwarded host stuck-card test is the next gate.
+- **Tests:** format check of those six files; host stuck-card and cancel-install come from the merge
+- **Live:** n/a
+- **Migrations / risk:** none. Format only.
+
 ## 2026-11-02 12:15 MST — cursor/superagent-shared-box-51be — 285bcb971
 
 - **PR:** [#472](https://github.com/raydocs/maka-cloud/pull/472)
@@ -243,6 +306,15 @@ Keep every CHANGELOG entry, newest first.
 - **Tests:** 143 passed in `@maka-cloud/superagent` (`test:dist`). FakeSandbox — two sessions, isolated cwd/env, cancel one leaves the other; per-session RSS is far below a per-process baseline.
 - **Live:** n/a
 - **Migrations / risk:** none
+
+## 2026-11-02 11:58 MST — cursor/superagent-bounded-autonomy-51be — 85ef3d4f0
+
+- **PR:** [#473](https://github.com/raydocs/maka-cloud/pull/473)
+- **What:** Bounded autonomy in the worker loop (Factory Droid 1.0 harness): 4 min stream silence → retry; hard time limit at most 2 attempts; partial responses discarded before retry. 3 empty turns → stop; 3 identical tool calls → nudge, 6 → stop; polls that return new results continue. Every stop/retry/nudge is a ledger event, a watchdog incident (`stream_silence` / `time_limit` / `empty_turns` / `repeat_tools`), and a progress `reason` the lead speaks. Compaction summary budget is 16k tokens (Super-agent had none). Prompt-cache hygiene: worker requests are append-only (new tools appended at the end; git status and other volatile facts stay in the tail). A cache-break monitor names the first changed segment and counts breaks; cache-hit share uses Anthropic `cache_read_input_tokens` / `cache_creation_input_tokens`. Failed requests retry on the same provider endpoint.
+- **Why:** User request (2026-11-02) after the Factory Droid 1.0 writeup: when the agent gets stuck, always have a next step (nudge, retry, summarize, or stop); grow the request by keeping the prompt cache.
+- **Tests:** 146 passed in `@maka-cloud/superagent` (`test:dist`). FakeProvider / FakeSandbox — silence retry, time-limit cap, empty-turn stop, identical-tool nudge/stop, CI-poll new results, ledger+watchdog+progress+lead, 16k compaction, append-only tool load, git-status tail, same-endpoint retry, cache-hit share.
+- **Live:** n/a
+- **Migrations / risk:** none. JSON fields only (`worker.autonomy`). No sqlite `user_version` bump.
 
 ## 2026-11-02 11:35 MST — cursor/superagent-shared-box-51be — 59924d4af
 
