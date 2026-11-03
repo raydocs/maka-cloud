@@ -8,7 +8,54 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
-## 2026-11-03 04:48 MST — superagent/codex-executor
+## 2026-11-03 05:03 MST — superagent/codex-executor
+
+- **What:** morning report for the owner's /goal of 2026-11-03: carry out `executor-decision.md` and `efficiency.md`. Super-agent schedules, authorizes and keeps work reliable; Claude Code and Codex are the executors, and our own harness stops growing. The run went from 02:50 to about 05:03 MST. Every PR is a draft, targets `main`, and is not merged. Every new path is off by default behind an env switch. Nothing auto-merges.
+- **PRs and green SHAs (Linux CI: `test`, `cloud-web`, `real-accounts`, `rehearsal`):**
+
+  | Phase | PR | Green SHA | What |
+  |---|---|---|---|
+  | 0 | [#482](https://github.com/raydocs/maka-cloud/pull/482) | `747470a90` | old branch: on-demand tool loading and a shared-daemon bench (frozen, off) |
+  | 0 | [#483](https://github.com/raydocs/maka-cloud/pull/483) | `1de7b4081` | old branch: multi-turn coder loop behind `MAKA_CLOUD_CODER_LOOP` (frozen, off) |
+  | 0 | [#484](https://github.com/raydocs/maka-cloud/pull/484) | `90c989fbb` | `executor-decision.md`, `efficiency.md` (docs) |
+  | 1 | [#485](https://github.com/raydocs/maka-cloud/pull/485) | `4f9f76001` | `Executor` interface, `FakeExecutor`, `ExecutorCoder` behind `CoderPort` |
+  | 2 | [#486](https://github.com/raydocs/maka-cloud/pull/486) | `06f9a50f4` | `ClaudeCodeExecutor`, per-Assignment budgets, box Secret login |
+  | 3a | [#487](https://github.com/raydocs/maka-cloud/pull/487) | `78a5d4e8b` | persisted outbox with backoff and per-session order (not wired yet) |
+  | 4 | [#488](https://github.com/raydocs/maka-cloud/pull/488) | `3e13d9ddd` | layered workspaces behind `MAKA_CLOUD_WORKSPACE` |
+  | 6 | [#489](https://github.com/raydocs/maka-cloud/pull/489) | `5ac5bd249` | live executor benchmark in Instabox, held at merge |
+  | 3b | [#490](https://github.com/raydocs/maka-cloud/pull/490) | `3f9c2cc71` | executor sessions survive a restart (`RECOVERY_NOTE`); `dsh-gap.md` |
+  | 5 | [#491](https://github.com/raydocs/maka-cloud/pull/491) | `537906f74` | `CodexExecutor`, Magpie fallback after a login check, cross-vendor review; two independent review rounds |
+
+  Stack: #485 → #486 → #489 → #490 → #491. #487 and #488 stand alone.
+- **Measured:**
+  - **Live executor bench, after both review rounds** (Instabox `universal`, 3 tasks each, cross-vendor review on, no publish):
+
+    | executor | model (route) | pass | $/green | tokens/green | to-green p50 | peak RSS | workspace start p50 |
+    |---|---|---|---|---|---|---|---|
+    | claude-code | claude-haiku-5-5 (box Secret login) | 3/3 | $0.0577 | 112,853 | 13.6 s | 240 MiB | 404 ms |
+    | codex | codex/gpt-6-luna (Magpie; the box is not signed in) | 3/3 | unpriced | 67,924 | 26.2 s | 190 MiB | 373 ms |
+    | maka | skipped: not behind the Executor interface | | | | | | |
+
+    - **Cross-vendor reviews:** Codex passed all three of Claude Code's changes. Claude Code passed two of Codex's changes and blocked `fix-slug`.
+    - **Secrets:** no value from `.env.local` (Magpie key, Instabox key, GitHub token) appears in the bench log.
+    - **Earlier runs today, on older code:** Claude Code 3/3 at $0.0531–$0.0585 per green task. Codex 3/3 at 67,769–77,595 tokens per green task.
+
+  - **Layered workspace** (#488, Linux, Docker privileged, N=8): kernel overlay start p50 16 ms and 0.1 MB more disk per assignment. A full clone is 84 ms and 13.1 MB; without overlay (hard-link copy) it is 88 ms and 1.4 MB.
+  - **Independent review of #491** (Codex `gpt-6.1-sol`, xhigh): round 1 `block` (1 P1, 5 P2), round 2 `approve-with-fixes` (5 P2). All were fixed with regression tests that fail on the old code. The last fix commit was not reviewed again; the residual risk is in the PR body.
+- **Not done / waiting on the owner:**
+  - **Publish and the live merge gate:** `MAKA_GITHUB_TOKEN` gets 403 on `POST git/blobs` in raydocs/maka-loop-scratch. It needs Contents and Pull requests read/write there. The bench therefore never opened a real PR. The merge gate was only checked offline, and reviews ran on the box's working tree.
+  - **Auth policy:** `AGENTS.md` says models are reached with API keys only and never through a claude.ai login. The box route runs Claude Code on the org Secret's OAuth token. This needs the owner's call.
+  - **Docs:** the owner's "Magpie gateway, tested 2026-11-03" section is still an uncommitted edit in the main checkout; #484 does not have it.
+  - **maka engine:** not behind the Executor interface, so it is skipped in the bench.
+  - **Pricing:** `codex/gpt-6-luna` and the Gemini models have no list price on record, so the bench shows `unpriced`.
+  - **`dsh-gap.md` next steps, smallest first:**
+    - wire the outbox (#487);
+    - build the host coder with `StoreExecutorSessionStore` and resume at boot;
+    - a `handback` status;
+    - policy-version notices;
+    - a failure hold with retries for `retryable` failures.
+
+## 2026-11-03 04:48 MST — superagent/codex-executor — 537906f74
 
 - **What:** fixes for round 2 of the independent review of #491 (Codex `gpt-6.1-sol`, xhigh: `VERDICT: approve-with-fixes`, five P2 leftovers; it confirmed the round 1 fixes). Default off as before.
   - **Box filter:** the `awk` scrubber moves past each replacement, so a Secret value that appears in its own `[NAME]` tag no longer loops forever. It also replaces the value as JSON escapes it (quotes, backslashes, newlines), and reads stderr as one record so a value spanning lines is found. Checked with macOS `awk` and Debian `mawk`.

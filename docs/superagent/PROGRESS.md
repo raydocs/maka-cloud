@@ -7,7 +7,7 @@ Survives compaction and restarts. Read this first, then continue from **Next ste
   and Codex are the executors; no more growth of our own harness. New features default off
   behind env switches; never weaken tests; no force-push, no merge to main, no branch deletion;
   secrets only from env; Linux CI is the bar; morning report in `docs/superagent/CHANGELOG.md`.
-- **Started:** 2026-11-03 02:50 MST. **Updated:** 2026-11-03 04:20 MST (about 1 h 30 min in).
+- **Started:** 2026-11-03 02:50 MST. **Updated:** 2026-11-03 05:03 MST (about 2 h 20 min in). All phases done; morning report written.
 
 ## Phases
 
@@ -20,8 +20,8 @@ Survives compaction and restarts. Read this first, then continue from **Next ste
 | 3a persisted outbox | `superagent/outbox` #487 (`78a5d4e8b`) | done, not wired (see `dsh-gap.md`); green |
 | 3b restart recovery, follow-ups, `dsh-gap.md` | `superagent/executor-recovery` #490 (`3f9c2cc71`) | done; green |
 | 4 layered workspace | `superagent/layered-workspace` #488 (`3e13d9ddd`) | done; green |
-| 5 CodexExecutor + cross-vendor review | `superagent/codex-executor` #491 (`002a86565`) | done; CI running at 04:20 |
-| 6 benchmark | `superagent/executor-bench` #489 (`5ac5bd249`), extended in #491 | done for claude-code and codex; maka skipped |
+| 5 CodexExecutor + cross-vendor review | `superagent/codex-executor` #491 (`002a86565`, review fixes `317d07325`, `537906f74`) | done; two independent review rounds; Linux green at `537906f74` |
+| 6 benchmark | `superagent/executor-bench` #489 (`5ac5bd249`), extended in #491 | done: claude-code 3/3, codex (Magpie) 3/3 live after the review fixes; maka skipped |
 
 Stack: #485 → #486 → #489 → #490 → #491 (each PR targets `main` and names its own commits).
 Worktrees (scratchpad of this session): `decision`, `exec`, `outbox`, `layered`.
@@ -49,9 +49,11 @@ Worktrees (scratchpad of this session): `decision`, `exec`, `outbox`, `layered`.
 
 ## Next step
 
-1. Read the independent Codex review of `4f9f76001..superagent/codex-executor`
-   (`review-out.md` in the session scratchpad); fix P1/P2 findings on `superagent/codex-executor`.
-2. Once the PAT can write: `MAKA_CLOUD_BENCH_PUBLISH=1 MAKA_CLOUD_BENCH_REVIEW=cross npm run
-   executor-bench` in `packages/cloud-superagent` (stops at the held merge).
+1. Owner: grant the PAT Contents and Pull requests read/write in raydocs/maka-loop-scratch, then
+   run `MAKA_CLOUD_BENCH_PUBLISH=1 MAKA_CLOUD_BENCH_REVIEW=cross npm run executor-bench` in
+   `packages/cloud-superagent` (stops at the held merge).
+2. Owner: decide the box OAuth Secret vs the AGENTS.md API-key-only rule; commit the Magpie
+   section of `executor-decision.md` (#484).
 3. `dsh-gap.md` next steps, smallest first: wire the outbox (#487), host coder with
    `StoreExecutorSessionStore`, `handback` status, policy-version notice, failure hold.
+4. #491 residual risk (in its PR body) has not been reviewed after `537906f74`.
