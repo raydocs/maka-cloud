@@ -8,6 +8,15 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
+## 2026-11-02 17:49 MST — cursor/superagent-byom-spec-51be — 70bbaeba1
+
+- **PR:** [#475](https://github.com/raydocs/maka-cloud/pull/475)
+- **What:** merge: cursor/superagent-intake-merge-51be (#477) into Super-agent byom-spec. Kept BYOM/speculative (default off) and scheduler/graph/escalate/BoxPool/autonomy. Keep every CHANGELOG entry, newest first. This branch is now a descendant of #477, #474, and main.
+- **Why:** One-pass linearization so #474 → #477 → #475 → #476 → #478 → #479 → #480 can merge in order without re-conflicts.
+- **Tests:** 223 `@maka-cloud/superagent` tests passed after the merge
+- **Live:** n/a
+- **Migrations / risk:** none. JSON fields only. BYOM and speculative stay default-off.
+
 ## 2026-11-02 17:46 MST — cursor/superagent-intake-merge-51be — ca10972ec
 
 - **PR:** [#477](https://github.com/raydocs/maka-cloud/pull/477)
