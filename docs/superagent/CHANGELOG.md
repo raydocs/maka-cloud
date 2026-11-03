@@ -8,7 +8,28 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
-## 2026-11-03 03:46 MST — superagent/claude-code-executor
+## 2026-11-03 03:47 MST — superagent/executor-bench
+
+- **What:** `npm run executor-bench` (`executor-bench.ts`) runs the Phase 6 benchmark with the same small task set for each executor: `fix-add`, `new-sub` and `fix-slug`, three Node repos with a failing test.
+  - Each task gets a fresh Instabox and its own Super-agent. The act Mandate has budgets of $1, 2M tokens, 15 min and 60 turns, and the coding loop uploads the repo to the box.
+  - Each row records pass, USD, tokens, time to green, box create time, workspace start (materialize), edit and test time, and peak RSS.
+  - With `MAKA_CLOUD_BENCH_PUBLISH=1` it opens a real PR through `MAKA_GITHUB_TOKEN` / `MAKA_CLOUD_LOOP_REPO`, has the review pass, and reads the merge gate. It records `held` and never approves or merges.
+  - Executors that cannot run are listed with the reason. Codex is listed because CodexExecutor is not built and the Instabox org has no OpenAI Secret; maka is listed because it is not behind the Executor interface.
+  - Keys are read from env and never printed.
+- **Why:** executor-decision.md: the maka engine becomes the default only if it wins on the same benchmark. Measurements come before routing.
+- **Tests:** `executor-bench.test` passes offline. It uses a fake executor, a fake box and a fake git host. It checks that the task goes green in its own box, the PR is opened, the merge stays `held`, usage is counted and the box is destroyed, and that skips are reported and never built. Package suite on macOS: 314 of 315. The only failure is `box-daemon` RSS, which reads `/proc` and runs on Linux only.
+- **Live (2026-11-03, Instabox `universal`, Claude Code 2.1.288 on Haiku 5.5, built-in login through the org Secret, no publish):**
+
+  | executor | tasks | pass | $/green | tokens/green | to-green p50 | peak RSS | workspace start p50 | box create |
+  |---|---|---|---|---|---|---|---|---|
+  | claude-code | 3 | 3/3 | $0.0585 | 113,277 | 15.3 s | 255 MiB | 548 ms | ~7 s |
+  | codex | skipped: no CodexExecutor yet, and no OpenAI Secret in the Instabox org | | | | | | | |
+  | maka | skipped: not behind the Executor interface | | | | | | | |
+
+  An earlier run without RSS was also 3/3: $0.0531 and 92,130 tokens per green task, to-green p50 13.3 s, workspace start p50 441 ms. Publish was not run. `MAKA_GITHUB_TOKEN` gets 403 "Resource not accessible by personal access token" on `POST git/blobs` in raydocs/maka-loop-scratch. It needs Contents and Pull requests read/write there.
+- **Migrations / risk:** none. A script only. Nothing runs it in CI.
+
+## 2026-11-03 03:46 MST — superagent/claude-code-executor — 06f9a50f4
 
 - **What:** Claude Code now runs inside a live Instabox on the box's own sign-in. Box auth comes from an Instabox org Secret. `MAKA_CLOUD_BOX_SECRETS` (comma list) is sent as `secrets` on `POST /v1/machines`. `MAKA_CLOUD_EXECUTOR_CLAUDE_SECRET` names the variable the CLI reads, so the box runs `CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_TOKEN_1" claude ...`. The box holds only a placeholder that its outbound proxy swaps, and the host never sends a value. Instabox `exec` caps `timeoutSeconds` at 600, so `BoxProcessRunner` changes how it runs the CLI:
   - It writes stdin and a `run.sh` under `.maka-exec/<run>` and starts the CLI detached with `nohup`.

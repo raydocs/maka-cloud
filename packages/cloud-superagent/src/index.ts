@@ -556,6 +556,20 @@ export {
   type ProcessRunner,
 } from './executor-process.js';
 export {
+  BENCH_TASKS,
+  claudeCodeBenchExecutor,
+  formatBenchTable,
+  runExecutorBench,
+  runExecutorBenchCli,
+  summarize as summarizeExecutorBench,
+  type BenchBox,
+  type BenchExecutor,
+  type BenchOptions,
+  type BenchReport,
+  type BenchRow,
+  type BenchTask,
+} from './executor-bench.js';
+export {
   EXECUTOR_KINDS,
   STATUS_MARKER,
   ExecutorCoder,
