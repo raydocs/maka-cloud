@@ -9,6 +9,7 @@ import {
   DEFAULT_AUTONOMY,
   emptyUsage,
   isLiveState,
+  tenantBoxAsWorker,
   type AutonomyIncident,
   type AutonomySettings,
   type NormalizedEvent,
@@ -58,6 +59,7 @@ import {
   type ReviewReceipt,
   type ReviewerPort,
 } from './review.js';
+import { BoxPool } from './box-pool.js';
 import { FakeSandbox, type SandboxPort } from './sandbox.js';
 import { UnconfiguredOrgSecrets } from './secrets.js';
 import { recallMemory, spillMemory } from './spill.js';
@@ -142,6 +144,12 @@ export interface SuperagentOptions {
   progress?: Partial<ProgressSettings>;
   /** Stream silence / repeat / compaction thresholds. */
   autonomy?: Partial<AutonomySettings>;
+  /**
+   * One long-lived box per tenant, many workers via git worktrees.
+   * Off by default so existing one-ref tests stay on the old suspend path.
+   */
+  sharedBox?: boolean;
+  boxPool?: BoxPool;
 }
 
 export class Superagent {
@@ -155,6 +163,7 @@ export class Superagent {
   readonly safety: Safety;
   readonly orgSecrets: OrgSecretPort;
   readonly sandbox: SandboxPort;
+  readonly boxPool: BoxPool | undefined;
   readonly lead: LeadPort;
   readonly reviewer: ReviewerPort | undefined;
   readonly doneWorld: DoneWorld;
@@ -188,6 +197,21 @@ export class Superagent {
     this.orgSecrets = options.orgSecrets ?? new UnconfiguredOrgSecrets();
     this.sandbox = options.sandbox ?? new FakeSandbox();
     this.defaultSandboxRef = options.sandboxRef ?? null;
+    this.boxPool =
+      options.boxPool ??
+      (options.sharedBox
+        ? new BoxPool({
+            sandbox: this.sandbox,
+            store: this.store,
+            now: this.now,
+            maxWorkers: this.admission.maxWorkersPerBox,
+            recordUsage: (entry) => this.metering.record(entry),
+          })
+        : undefined);
+    this.boxPool?.setProgressReporter(async (tenantId, workerId, patch) => {
+      const worker = this.store.worker(tenantId, workerId);
+      if (worker) await this.recordProgress(worker, patch, this.now());
+    });
     this.lead = options.lead ?? new SilentLead();
     this.reviewer = options.reviewer;
     this.doneWorld = defaultDoneWorld(options.doneWorld ?? {});
@@ -285,14 +309,19 @@ export class Superagent {
       };
     }
 
-    const boxedLive = this.store
-      .allWorkers()
-      .filter((row) => isLiveState(row.state) && row.sandboxRef).length;
+    const boxedLive = this.boxPool
+      ? this.store.allTenantBoxes().length
+      : this.store.allWorkers().filter((row) => isLiveState(row.state) && row.sandboxRef).length;
     const spawnGate = admitSpawn({
       boxedLive,
-      wouldBox: Boolean(this.defaultSandboxRef),
+      wouldBox: Boolean(this.boxPool || this.defaultSandboxRef),
       tenantUsdMicros: this.store.tenantUsage(event.tenantId).usdMicros,
       policy: this.admission,
+      sharedBox: Boolean(this.boxPool),
+      tenantBoxWorkers: this.store
+        .workers(event.tenantId)
+        .filter((row) => isLiveState(row.state) && row.sandboxRef).length,
+      wouldCreateTenantBox: this.store.tenantBox(event.tenantId) === undefined,
     });
     if (!spawnGate.ok) {
       this.audit(event.tenantId, null, 'filtered', at, { reason: spawnGate.reason });
@@ -359,6 +388,7 @@ export class Superagent {
       },
       at,
     );
+    if (this.boxPool) await this.boxPool.tick(at);
     for (const found of findings) {
       if (
         found.rule === 'stream_silence' ||
@@ -388,6 +418,14 @@ export class Superagent {
         if (worker) await this.speakProgress(worker, 'stuck', at);
       }
       if (found.action !== 'escalate' && found.action !== 'stop') continue;
+      if (found.rule === 'box_stuck') {
+        const box = this.store.tenantBox(found.tenantId);
+        if (!box) continue;
+        const card = stuckCardOf(tenantBoxAsWorker(box), found, at);
+        this.escalations.push(card);
+        this.onEscalate?.(card);
+        continue;
+      }
       const worker = this.store.worker(found.tenantId, found.workerId);
       if (!worker) continue;
       const card = stuckCardOf(worker, found, at);
@@ -1085,6 +1123,23 @@ export class Superagent {
   }
 
   private async wakeBox(worker: WorkerRecord): Promise<void> {
+    if (this.boxPool) {
+      try {
+        setState(worker, 'waking');
+        this.store.putWorker(worker);
+        const slot = await this.boxPool.wake(worker.tenantId, worker.workerId, worker.mandate);
+        const live = this.store.worker(worker.tenantId, worker.workerId);
+        worker.sandboxRef = slot.boxId;
+        worker.workspaceRef = slot.workDir;
+        if (live?.progress) worker.progress = live.progress;
+        this.store.putWorker(worker);
+      } catch (error) {
+        this.audit(worker.tenantId, worker.workerId, 'sandbox_wake_failed', this.now(), {
+          message: error instanceof Error ? error.message : 'shared box wake',
+        });
+      }
+      return;
+    }
     if (!worker.sandboxRef) return;
     try {
       await this.sandbox.ensureRunning(worker.sandboxRef);
@@ -1096,6 +1151,10 @@ export class Superagent {
   }
 
   private async suspendBox(worker: WorkerRecord): Promise<void> {
+    if (this.boxPool) {
+      await this.boxPool.release(worker.tenantId, worker.workerId);
+      return;
+    }
     if (!worker.sandboxRef || this.sandbox.suspend === undefined) return;
     try {
       await this.sandbox.suspend(worker.sandboxRef);

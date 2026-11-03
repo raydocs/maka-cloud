@@ -2,6 +2,7 @@ import type { SuperagentStore } from './store.js';
 import type { UsageEntry, WorkerRecord, WorkerState } from './types.js';
 
 export const PROGRESS_PHASES = [
+  'waking',
   'materialize',
   'edit',
   'install',
@@ -25,6 +26,7 @@ export const PROGRESS_LOOKS = ['running', 'waiting', 'stuck', 'paused', 'done'] 
 export type ProgressLook = (typeof PROGRESS_LOOKS)[number];
 
 export const DEFAULT_PHASE_MS: Record<ProgressPhase, number> = {
+  waking: 30_000,
   materialize: 60_000,
   edit: 15 * 60_000,
   install: 5 * 60_000,
