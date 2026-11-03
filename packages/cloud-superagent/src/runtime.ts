@@ -111,7 +111,7 @@ import {
   type WorkerHandler,
 } from './types.js';
 import { mergeEvidence } from './evidence.js';
-import { defaultDoneWorld, verifyDone, type DoneWorld } from './done.js';
+import { defaultDoneWorld, verifyDone, type DoneClaim, type DoneWorld } from './done.js';
 import { formatLeadReport, freshnessOf, type LiveFacts } from './freshness.js';
 import {
   applyProgressPatch,
@@ -188,12 +188,28 @@ import {
 } from './lessons.js';
 import {
   DEFAULT_PEER_REVIEW,
+  mergePeerReviewStats,
   peerReviewSettingsFrom,
   runPeerReview,
   type PeerReviewInput,
   type PeerReviewOutcome,
   type PeerReviewSettings,
 } from './peer-review.js';
+import {
+  DEFAULT_RELEASE_VERIFY,
+  looksLikeRelease,
+  mergeShaFromClaim,
+  releaseVerifySettingsFrom,
+  verifyRelease,
+  type ReleaseVerifySettings,
+} from './release-verify.js';
+import {
+  DEFAULT_SWEEP,
+  runSweep,
+  sweepSettingsFrom,
+  type SweepResult,
+  type SweepSettings,
+} from './sweep.js';
 
 export type IngestResult =
   | { result: 'rejected'; reason: string; judgeCalls: 0 }
@@ -352,6 +368,16 @@ export interface SuperagentOptions {
    * this; the constructor never reads environment variables.
    */
   peerReview?: Partial<PeerReviewSettings> | PeerReviewSettings;
+  /**
+   * After merge+publish, probe a live /version endpoint for the merge
+   * SHA. Default off. Host passes this; the constructor never reads env.
+   */
+  releaseVerify?: Partial<ReleaseVerifySettings> | ReleaseVerifySettings;
+  /**
+   * Weekly sweep of merged work. Default off. Host calls `runSweep`.
+   * The constructor never reads environment variables.
+   */
+  sweep?: Partial<SweepSettings> | SweepSettings;
 }
 
 export class Superagent {
@@ -382,6 +408,8 @@ export class Superagent {
   private readonly speculativeCleanup?: SpeculativeCleanup;
   readonly learning: LearningSettings;
   readonly peerReview: PeerReviewSettings;
+  readonly releaseVerify: ReleaseVerifySettings;
+  readonly sweep: SweepSettings;
   readonly lessonsBook: LessonBook;
   private readonly liveFacts?: (worker: WorkerRecord) => Promise<Partial<LiveFacts>>;
   readonly escalations: StuckCard[] = [];
@@ -453,6 +481,10 @@ export class Superagent {
     this.peerReview = options.peerReview
       ? peerReviewSettingsFrom(options.peerReview)
       : DEFAULT_PEER_REVIEW;
+    this.releaseVerify = options.releaseVerify
+      ? releaseVerifySettingsFrom(options.releaseVerify)
+      : DEFAULT_RELEASE_VERIFY;
+    this.sweep = options.sweep ? sweepSettingsFrom(options.sweep) : DEFAULT_SWEEP;
     this.lessonsBook = new LessonBook();
   }
 
@@ -2392,6 +2424,13 @@ export class Superagent {
         },
       );
       if (verified.ok) {
+        if (this.releaseVerify.enabled) {
+          const release = await this.confirmRelease(worker, result.done, at);
+          if (!release.complete) {
+            this.escalateRelease(worker, at, release.record.reason);
+            return true;
+          }
+        }
         await this.retire(worker, at, 'done_verified');
         return true;
       }
@@ -2962,7 +3001,11 @@ export class Superagent {
       this.chargeUsage(live, outcome.usage, at);
       worker.usage = live.usage;
     }
+    const stats = mergePeerReviewStats(live.peerReviewStats, outcome, live.usage.tokens);
+    live.peerReviewStats = stats;
+    worker.peerReviewStats = stats;
     if (outcome.skipped) {
+      this.store.putWorker(live);
       this.audit(live.tenantId, live.workerId, 'peer_review_skipped', at, {
         reason: outcome.skipped,
       });
@@ -2977,6 +3020,14 @@ export class Superagent {
       rounds: outcome.rounds,
       tokens: outcome.usage?.tokens ?? 0,
       usdMicros: outcome.usage?.usdMicros ?? 0,
+      wallMs: stats.wallMs,
+      tokenShare: stats.tokenShare,
+      issuesReported: stats.issuesReported,
+      issuesFixed: stats.issuesFixed,
+      discardedStyle: outcome.discardedStyle.length,
+      write: false,
+      network: false,
+      secrets: false,
     });
     if (outcome.severity === 'block' && this.learning.enabled) {
       this.recordLesson({
@@ -2994,6 +3045,108 @@ export class Superagent {
       });
     }
     return outcome;
+  }
+
+  async runSweep(tenantId: string, repo?: string): Promise<SweepResult> {
+    const at = this.now();
+    const since = at - this.sweep.windowMs;
+    const result = await runSweep({
+      settings: this.sweep,
+      tenantId,
+      repo,
+      since,
+      at,
+    });
+    this.audit(tenantId, null, result.pr ? 'sweep_opened' : 'sweep_skipped', at, {
+      skipped: result.skipped ?? '',
+      findings: result.findings.length,
+      pr: result.pr?.number ?? 0,
+      branch: result.pr?.branch ?? '',
+    });
+    return result;
+  }
+
+  private async confirmRelease(
+    worker: WorkerRecord,
+    claim: DoneClaim,
+    at: number,
+  ): Promise<import('./release-verify.js').ReleaseVerifyResult> {
+    const mergeSha = await this.mergeShaOf(worker, claim);
+    if (mergeSha) worker.mergeSha = mergeSha;
+    const result =
+      !mergeSha && !looksLikeRelease(claim)
+        ? {
+            complete: true,
+            escalate: false,
+            record: {
+              status: 'skipped' as const,
+              reason: 'no release to verify',
+              wallMs: 0,
+              at,
+              url: this.releaseVerify.versionUrl,
+            },
+          }
+        : await verifyRelease({
+            settings: this.releaseVerify,
+            mergeSha,
+            now: this.now,
+          });
+    worker.releaseVerify = result.record;
+    this.store.putWorker(worker);
+    this.audit(worker.tenantId, worker.workerId, 'release_verify', at, {
+      status: result.record.status,
+      reason: result.record.reason,
+      wallMs: result.record.wallMs,
+      sha: result.record.sha ?? '',
+      seen: result.record.seen ?? '',
+    });
+    if (result.record.wallMs > 0) {
+      this.chargeUsage(worker, { wallMs: result.record.wallMs }, at);
+    }
+    await this.recordProgress(
+      worker,
+      {
+        activity: `release-verify ${result.record.status}: ${result.record.reason}`,
+      },
+      at,
+    );
+    return result;
+  }
+
+  private async mergeShaOf(worker: WorkerRecord, claim: DoneClaim): Promise<string | undefined> {
+    if (worker.mergeSha) return worker.mergeSha;
+    for (const signal of claim.signals) {
+      if (signal.kind === 'merged' && this.doneWorld.pull) {
+        const pull = await this.doneWorld.pull(signal.repo, signal.number);
+        if (pull.mergeSha) return pull.mergeSha;
+      }
+    }
+    return mergeShaFromClaim(claim, {
+      lastPushSha: worker.lastPushSha,
+      lastLiveSha: worker.lastLive?.sha,
+    });
+  }
+
+  private escalateRelease(worker: WorkerRecord, at: number, detail: string): void {
+    worker.state = 'stuck';
+    worker.updatedAt = at;
+    this.store.putWorker(worker);
+    this.audit(worker.tenantId, worker.workerId, 'stuck', at, { reason: 'release_verify' });
+    this.recordWatchdogLesson(worker, 'escalate', detail, at);
+    const card = stuckCardOf(
+      worker,
+      {
+        rule: 'stuck',
+        tenantId: worker.tenantId,
+        workerId: worker.workerId,
+        action: 'escalate',
+        generation: worker.generation,
+        detail,
+      },
+      at,
+    );
+    this.escalations.push(card);
+    this.onEscalate?.(card);
   }
 
   private chargeUsage(

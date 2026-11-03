@@ -89,6 +89,13 @@ export function cloneWorker(worker: WorkerRecord): WorkerRecord {
         }
       : undefined,
     seenEventIds: worker.seenEventIds ? [...worker.seenEventIds] : undefined,
+    peerReviewStats: worker.peerReviewStats
+      ? {
+          ...worker.peerReviewStats,
+          openFindings: [...worker.peerReviewStats.openFindings],
+        }
+      : undefined,
+    releaseVerify: worker.releaseVerify ? { ...worker.releaseVerify } : undefined,
     progress: worker.progress
       ? {
           ...worker.progress,

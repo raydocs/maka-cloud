@@ -8,7 +8,15 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
-## 2026-11-02 17:59 MST — cursor/superagent-wiring-51be
+## 2026-11-02 18:00 MST — cursor/superagent-wiring-51be
+
+- **What:** merge `cursor/superagent-review-verify-51be` (#479) into the wiring branch. Release verify and the weekly sweep stay off unless the host passes them. Peer-review stats and release-verify records clone with the worker. sqlite `user_version` stays 2.
+- **Why:** Linearize batch 2 in order (#478 then #479).
+- **Tests:** conflict resolution only; suites run after the decisions tip merges.
+- **Live:** n/a
+- **Migrations / risk:** none. No `user_version` bump.
+
+## 2026-11-02 17:59 MST — cursor/superagent-wiring-51be — e3c3de629
 
 - **What:** merge `cursor/superagent-learning-review-51be` (#478) into the wiring branch. Mistake book and cross-model review stay off unless the host passes `learning` / `peerReview`. Scheduler, BYOM, duplex, and pause verification stay.
 - **Why:** Linearize batch 2 in order. sqlite `user_version` stays 2.
@@ -31,6 +39,15 @@ a heading time is more than five minutes off that SHA's committer date.
 - **Tests:** conflict resolution only; suites run after the remaining tips merge.
 - **Live:** n/a
 - **Migrations / risk:** none. No `user_version` bump.
+
+## 2026-11-02 14:10 MST — cursor/superagent-review-verify-51be — 9f917ea19
+
+- **PR:** [#479](https://github.com/raydocs/maka-cloud/pull/479)
+- **What:** Harden cross-model review: isolated read-only contract (diff+repo only; write/network/secrets forced false; secret-shaped env stripped and proven not to reach the reviewer), prompt and parse drop style-only findings, default max rounds 3, ledger records review duration / token share / issues reported / issues fixed. After merge+publish, optional `/version` probe confirms the live SHA contains the merge commit before Done; timeout or mismatch marks the worker stuck and raises a watchdog card. Optional weekly sweep (default off) opens a cleanup PR for duplicates / temp patches / leftover code / diary docs and never pushes trunk. Tests use fakes only.
+- **Why:** Follow-up to the learning/review hook: isolate the reviewer, verify the live deploy, and keep a weekly cleanup lane without touching parallel branches.
+- **Tests:** `@maka-cloud/superagent` typecheck + `node --test` + biome format
+- **Live:** n/a
+- **Migrations / risk:** none. Defaults false. No server/deploy/billing change. No sqlite `user_version` bump.
 
 ## 2026-11-02 13:29 MST — cursor/superagent-learning-review-51be — 66178a088
 

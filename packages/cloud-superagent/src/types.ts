@@ -178,6 +178,12 @@ export interface WorkerRecord {
   lastPushSha?: string;
   /** Completed blocking peer-review rounds. JSON only. */
   peerReviewRounds?: number;
+  /** Cross-model review ledger rollup. JSON only; no schema bump. */
+  peerReviewStats?: import('./peer-review.js').PeerReviewStats;
+  /** Post-deploy version probe. JSON only; no schema bump. */
+  releaseVerify?: import('./release-verify.js').ReleaseVerifyRecord;
+  /** Merge commit SHA after Done / live read. JSON only. */
+  mergeSha?: string;
   usage: Usage;
   evidence: EvidenceBlock[];
   createdAt: number;
