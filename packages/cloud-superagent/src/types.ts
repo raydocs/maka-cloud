@@ -210,7 +210,8 @@ export interface Mandate {
   scope: { repos: string[]; paths?: string[] };
   intensity: Intensity;
   authority: Authority;
-  budgets: { tokens?: number; usd?: number; wallMs?: number };
+  /** `turns`: model turns per Assignment, counted by the executor session. */
+  budgets: { tokens?: number; usd?: number; wallMs?: number; turns?: number };
   strength: Strength;
   /**
    * When true, mergeGate treats an empty Checks/Statuses list as green.

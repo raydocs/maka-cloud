@@ -512,7 +512,49 @@ export {
   packTar,
   type BoxExecLog,
 } from './loop-box.js';
-export { HttpCoder, createCoderFromEnv, parseCoderJson } from './loop-coder.js';
+export {
+  EXECUTOR_ENV,
+  EXECUTOR_GATEWAY_ENV,
+  EXECUTOR_MODEL_ENV,
+  HttpCoder,
+  MAGPIE_TOKEN_ENV,
+  MAGPIE_URL_ENV,
+  createCoderFromEnv,
+  gatewayFromEnv,
+  parseCoderJson,
+} from './loop-coder.js';
+export {
+  DEFAULT_CLAUDE_CODE_MODEL,
+  ClaudeCodeExecutor,
+  claudeStreamEvents,
+  claudeStreamState,
+  type ClaudeCodeExecutorOptions,
+  type ClaudeStreamState,
+  type GatewayRoute,
+} from './claude-code-executor.js';
+export {
+  WRAP_UP_AT,
+  WRAP_UP_TEXT,
+  assignmentBudget,
+  budgetReport,
+  checkBudget,
+  estimateUsdMicros as estimateExecutorUsdMicros,
+  executorTokens,
+  type AssignmentBudget,
+  type BudgetCheck,
+  type BudgetLevel,
+} from './executor-budget.js';
+export {
+  BoxProcessRunner,
+  NodeProcessRunner,
+  ScriptedProcessRunner,
+  executorEnv,
+  redactSecrets,
+  type ExecutorProcess,
+  type ExecutorProcessExit,
+  type ExecutorProcessSpec,
+  type ProcessRunner,
+} from './executor-process.js';
 export {
   EXECUTOR_KINDS,
   STATUS_MARKER,
@@ -536,6 +578,7 @@ export {
   type ExecutorInput,
   type ExecutorInputKind,
   type ExecutorKind,
+  type ExecutorRoute,
   type ExecutorRun,
   type ExecutorSession,
   type ExecutorSessionStore,

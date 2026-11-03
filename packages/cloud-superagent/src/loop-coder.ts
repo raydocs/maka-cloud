@@ -1,6 +1,11 @@
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { z } from 'zod';
+import { ClaudeCodeExecutor, type GatewayRoute } from './claude-code-executor.js';
+import { ExecutorCoder } from './executor.js';
+import { BoxProcessRunner } from './executor-process.js';
+import { BOX_REPO } from './loop-box.js';
+import type { SandboxPort } from './sandbox.js';
 import { CODER_MAX_TOKENS, createJudgeClientFromEnv } from './judge-client.js';
 import { FakeCoder, type CoderPort, type CoderResult } from './loop.js';
 import type { ModelCompletion } from './router.js';
@@ -89,10 +94,44 @@ export function parseCoderJson(
   return data.data;
 }
 
+export const EXECUTOR_ENV = 'MAKA_CLOUD_EXECUTOR';
+export const EXECUTOR_MODEL_ENV = 'MAKA_CLOUD_EXECUTOR_MODEL';
+export const EXECUTOR_GATEWAY_ENV = 'MAKA_CLOUD_EXECUTOR_GATEWAY';
+export const MAGPIE_URL_ENV = 'MAKA_CLOUD_MAGPIE_URL';
+export const MAGPIE_TOKEN_ENV = 'MAKA_CLOUD_MAGPIE_TOKEN';
+
+/**
+ * `MAKA_CLOUD_EXECUTOR=claude-code` runs Claude Code headless as the coder
+ * (off by default). With a sandbox it runs inside the worker's box on the
+ * box's own signed-in CLI; `MAKA_CLOUD_EXECUTOR_GATEWAY=magpie` routes it
+ * through the Magpie gateway instead. Unset or `fake` keeps the coder below.
+ */
 export function createCoderFromEnv(
   env: NodeJS.ProcessEnv = process.env,
   fetchImpl: typeof fetch = fetch,
-): { coder: CoderPort; kind: 'fake' | 'model' } {
+  options: { sandbox?: SandboxPort } = {},
+): { coder: CoderPort; kind: 'fake' | 'model' | 'claude-code' } {
+  const executor = env[EXECUTOR_ENV]?.trim();
+  if (executor === 'claude-code') {
+    const model = env[EXECUTOR_MODEL_ENV]?.trim();
+    const gateway = gatewayFromEnv(env);
+    const sandbox = options.sandbox;
+    return {
+      coder: new ExecutorCoder(
+        new ClaudeCodeExecutor({
+          env,
+          ...(model ? { model } : {}),
+          ...(gateway ? { gateway } : {}),
+          ...(sandbox ? { runner: new BoxProcessRunner(sandbox) } : {}),
+        }),
+        sandbox ? { box: { sandbox, workdir: BOX_REPO } } : {},
+      ),
+      kind: 'claude-code',
+    };
+  }
+  if (executor && executor !== 'fake') {
+    throw new Error(`${EXECUTOR_ENV}=${executor} is not a known executor (claude-code, fake).`);
+  }
   const live = env.MAKA_CLOUD_LOOP_LIVE === '1';
   const hasKey = Boolean(env.ANTHROPIC_API_KEY?.trim() || env.MAKA_CLOUD_JUDGE_API_KEY?.trim());
   if (!live || !hasKey) return { coder: new FakeCoder(), kind: 'fake' };
@@ -100,6 +139,23 @@ export function createCoderFromEnv(
   const detailed = client.completeDetailed?.bind(client);
   if (!detailed) throw new Error('Coder needs a judge client that implements completeDetailed.');
   return { coder: new HttpCoder((prompt) => detailed(prompt)), kind: 'model' };
+}
+
+/** Magpie fallback route; off unless `MAKA_CLOUD_EXECUTOR_GATEWAY=magpie`. */
+export function gatewayFromEnv(env: NodeJS.ProcessEnv): GatewayRoute | undefined {
+  const picked = env[EXECUTOR_GATEWAY_ENV]?.trim();
+  if (!picked) return undefined;
+  if (picked !== 'magpie') {
+    throw new Error(`${EXECUTOR_GATEWAY_ENV}=${picked} is not a known gateway (magpie).`);
+  }
+  const baseUrl = env[MAGPIE_URL_ENV]?.trim();
+  const token = env[MAGPIE_TOKEN_ENV]?.trim();
+  if (!baseUrl || !token) {
+    throw new Error(
+      `${EXECUTOR_GATEWAY_ENV}=magpie needs ${MAGPIE_URL_ENV} and ${MAGPIE_TOKEN_ENV}.`,
+    );
+  }
+  return { baseUrl, token };
 }
 
 async function snapshotFiles(dir: string): Promise<string> {

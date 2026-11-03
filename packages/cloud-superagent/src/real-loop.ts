@@ -44,7 +44,7 @@ export interface RealLoopReport {
   prUrl: string | null;
   destroyed: boolean;
   machineId: string | null;
-  coder: 'fake' | 'model';
+  coder: 'fake' | 'model' | 'claude-code';
   git: 'fake' | 'github';
   boxed: boolean;
   seeded: boolean;
@@ -138,11 +138,15 @@ export async function runRealLoop(options: RealLoopOptions = {}): Promise<RealLo
       report.steps.push('sandbox-create');
     }
     const fetchImpl = options.fetch ?? fetch;
-    const hasModel = Boolean(env.ANTHROPIC_API_KEY?.trim() || env.MAKA_CLOUD_JUDGE_API_KEY?.trim());
+    const hasModel = Boolean(
+      env.ANTHROPIC_API_KEY?.trim() ||
+        env.MAKA_CLOUD_JUDGE_API_KEY?.trim() ||
+        (env.MAKA_CLOUD_EXECUTOR?.trim() && env.MAKA_CLOUD_EXECUTOR.trim() !== 'fake'),
+    );
     const coded =
       publicClone && !hasModel
         ? { coder: new NoopCoder(), kind: 'fake' as const }
-        : createCoderFromEnv(env, fetchImpl);
+        : createCoderFromEnv(env, fetchImpl, box ? { sandbox: box } : {});
     const hosted = createGitHostFromEnv(env, fetchImpl);
     report.coder = coded.kind;
     report.git = hosted.kind;
