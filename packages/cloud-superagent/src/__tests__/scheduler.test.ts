@@ -32,7 +32,14 @@ test('fair order is reserved, then effective priority, then age', () => {
     priority: 'low' as const,
     queuedAt: 0,
   };
-  assert.ok(compareTasks({ ...high, taskId: 'h' } as never, { ...low, taskId: 'l' } as never, now, DEFAULT_AGE_EVERY_MS) < 0);
+  assert.ok(
+    compareTasks(
+      { ...high, taskId: 'h' } as never,
+      { ...low, taskId: 'l' } as never,
+      now,
+      DEFAULT_AGE_EVERY_MS,
+    ) < 0,
+  );
   assert.equal(effectiveRank(aged, now, 10_000), 3);
   assert.equal(effectiveRank(high, now, 10_000), 3);
 });
@@ -52,7 +59,13 @@ test('file-footprint conflict serializes; the waiter starts after the first task
   });
   const first = await agent.enqueueTask({
     tenantId: TENANT,
-    subject: { kind: 'issue', tenantId: TENANT, key: 'issue:inv_test:acme/app#1', repo: REPO, number: 1 },
+    subject: {
+      kind: 'issue',
+      tenantId: TENANT,
+      key: 'issue:inv_test:acme/app#1',
+      repo: REPO,
+      number: 1,
+    },
     title: 'edit auth',
     mandate: actMandate([REPO]),
     footprint: ['src/auth.ts'],
@@ -61,7 +74,13 @@ test('file-footprint conflict serializes; the waiter starts after the first task
   assert.equal(first.state, 'running');
   const second = await agent.enqueueTask({
     tenantId: TENANT,
-    subject: { kind: 'issue', tenantId: TENANT, key: 'issue:inv_test:acme/app#2', repo: REPO, number: 2 },
+    subject: {
+      kind: 'issue',
+      tenantId: TENANT,
+      key: 'issue:inv_test:acme/app#2',
+      repo: REPO,
+      number: 2,
+    },
     title: 'also auth',
     mandate: actMandate([REPO]),
     footprint: ['src/auth.ts'],
@@ -82,7 +101,13 @@ test('dependencies and start conditions wait until the world is true', async () 
   const { agent, time } = rig({ sandbox: new FakeSandbox(), scheduler: { maxWorkers: 4 } });
   const blocked = await agent.enqueueTask({
     tenantId: TENANT,
-    subject: { kind: 'issue', tenantId: TENANT, key: 'issue:inv_test:acme/app#9', repo: REPO, number: 9 },
+    subject: {
+      kind: 'issue',
+      tenantId: TENANT,
+      key: 'issue:inv_test:acme/app#9',
+      repo: REPO,
+      number: 9,
+    },
     title: 'after merge',
     mandate: actMandate([REPO]),
     start: { kind: 'pr_merged', repo: REPO, number: 12 },
@@ -90,14 +115,22 @@ test('dependencies and start conditions wait until the world is true', async () 
   });
   assert.equal(blocked.state, 'waiting');
   assert.match(blocked.reason ?? '', /start_pr_merged|dep_ci_green/);
-  assert.ok((agent.statusSnapshot(TENANT).queue ?? []).some((row) => row.taskId === blocked.taskId));
+  assert.ok(
+    (agent.statusSnapshot(TENANT).queue ?? []).some((row) => row.taskId === blocked.taskId),
+  );
 
   agent.scheduler.noteEvent({
     eventId: 'e-merge',
     tenantId: TENANT,
     source: 'github',
     type: 'pr_closed',
-    subject: { kind: 'pull_request', tenantId: TENANT, key: 'pr:inv_test:acme/app#12', repo: REPO, number: 12 },
+    subject: {
+      kind: 'pull_request',
+      tenantId: TENANT,
+      key: 'pr:inv_test:acme/app#12',
+      repo: REPO,
+      number: 12,
+    },
     idempotencyKey: 'm',
     actor: { login: 'alice', kind: 'user' },
     occurredAt: time.now,
@@ -111,7 +144,13 @@ test('dependencies and start conditions wait until the world is true', async () 
     tenantId: TENANT,
     source: 'github',
     type: 'ci_passed',
-    subject: { kind: 'pull_request', tenantId: TENANT, key: 'pr:inv_test:acme/app#12', repo: REPO, number: 12 },
+    subject: {
+      kind: 'pull_request',
+      tenantId: TENANT,
+      key: 'pr:inv_test:acme/app#12',
+      repo: REPO,
+      number: 12,
+    },
     idempotencyKey: 'c',
     actor: { login: 'bot', kind: 'bot' },
     occurredAt: time.now,
@@ -129,7 +168,13 @@ test('a time start condition waits, then admits on tick', async () => {
   const later = time.now + 60_000;
   const task = await agent.enqueueTask({
     tenantId: TENANT,
-    subject: { kind: 'issue', tenantId: TENANT, key: 'issue:inv_test:acme/app#3', repo: REPO, number: 3 },
+    subject: {
+      kind: 'issue',
+      tenantId: TENANT,
+      key: 'issue:inv_test:acme/app#3',
+      repo: REPO,
+      number: 3,
+    },
     title: 'cron',
     mandate: actMandate([REPO]),
     start: { kind: 'time', at: later },
@@ -143,10 +188,19 @@ test('a time start condition waits, then admits on tick', async () => {
 });
 
 test('human reserved slot is not taken by background work', async () => {
-  const { agent } = rig({ sandbox: new FakeSandbox(), scheduler: { maxWorkers: 2, reservedHumanSlots: 1 } });
+  const { agent } = rig({
+    sandbox: new FakeSandbox(),
+    scheduler: { maxWorkers: 2, reservedHumanSlots: 1 },
+  });
   const a = await agent.enqueueTask({
     tenantId: TENANT,
-    subject: { kind: 'issue', tenantId: TENANT, key: 'issue:inv_test:acme/app#10', repo: REPO, number: 10 },
+    subject: {
+      kind: 'issue',
+      tenantId: TENANT,
+      key: 'issue:inv_test:acme/app#10',
+      repo: REPO,
+      number: 10,
+    },
     title: 'bg-1',
     mandate: actMandate([REPO]),
     reserved: false,
@@ -154,7 +208,13 @@ test('human reserved slot is not taken by background work', async () => {
   });
   const b = await agent.enqueueTask({
     tenantId: TENANT,
-    subject: { kind: 'issue', tenantId: TENANT, key: 'issue:inv_test:acme/app#11', repo: REPO, number: 11 },
+    subject: {
+      kind: 'issue',
+      tenantId: TENANT,
+      key: 'issue:inv_test:acme/app#11',
+      repo: REPO,
+      number: 11,
+    },
     title: 'bg-2',
     mandate: actMandate([REPO]),
     reserved: false,
@@ -164,7 +224,12 @@ test('human reserved slot is not taken by background work', async () => {
   assert.equal(b.state, 'running');
   const human = await agent.enqueueTask({
     tenantId: TENANT,
-    subject: { kind: 'conversation', tenantId: TENANT, key: 'chat:inv_test:c1', conversationId: 'c1' },
+    subject: {
+      kind: 'conversation',
+      tenantId: TENANT,
+      key: 'chat:inv_test:c1',
+      conversationId: 'c1',
+    },
     title: 'user reply',
     mandate: actMandate([REPO]),
     reserved: true,
@@ -187,7 +252,13 @@ test('daily budget exhaustion blocks a larger task', async () => {
   });
   const first = await agent.enqueueTask({
     tenantId: TENANT,
-    subject: { kind: 'issue', tenantId: TENANT, key: 'issue:inv_test:acme/app#20', repo: REPO, number: 20 },
+    subject: {
+      kind: 'issue',
+      tenantId: TENANT,
+      key: 'issue:inv_test:acme/app#20',
+      repo: REPO,
+      number: 20,
+    },
     title: 'small',
     mandate: actMandate([REPO]),
     size: 'S',
@@ -196,7 +267,13 @@ test('daily budget exhaustion blocks a larger task', async () => {
   assert.equal(first.state, 'running');
   const hungry = await agent.enqueueTask({
     tenantId: TENANT,
-    subject: { kind: 'issue', tenantId: TENANT, key: 'issue:inv_test:acme/app#21', repo: REPO, number: 21 },
+    subject: {
+      kind: 'issue',
+      tenantId: TENANT,
+      key: 'issue:inv_test:acme/app#21',
+      repo: REPO,
+      number: 21,
+    },
     title: 'large',
     mandate: actMandate([REPO]),
     size: 'L',
@@ -213,7 +290,13 @@ test('aging promotes a low task ahead of a later high task', async () => {
   });
   const first = await agent.enqueueTask({
     tenantId: TENANT,
-    subject: { kind: 'issue', tenantId: TENANT, key: 'issue:inv_test:acme/app#22', repo: REPO, number: 22 },
+    subject: {
+      kind: 'issue',
+      tenantId: TENANT,
+      key: 'issue:inv_test:acme/app#22',
+      repo: REPO,
+      number: 22,
+    },
     title: 'holder',
     mandate: actMandate([REPO]),
     size: 'S',
@@ -221,7 +304,13 @@ test('aging promotes a low task ahead of a later high task', async () => {
   });
   const low = await agent.enqueueTask({
     tenantId: TENANT,
-    subject: { kind: 'issue', tenantId: TENANT, key: 'issue:inv_test:acme/app#23', repo: REPO, number: 23 },
+    subject: {
+      kind: 'issue',
+      tenantId: TENANT,
+      key: 'issue:inv_test:acme/app#23',
+      repo: REPO,
+      number: 23,
+    },
     title: 'low',
     mandate: actMandate([REPO]),
     size: 'S',
@@ -230,7 +319,13 @@ test('aging promotes a low task ahead of a later high task', async () => {
   time.advance(1);
   const high = await agent.enqueueTask({
     tenantId: TENANT,
-    subject: { kind: 'issue', tenantId: TENANT, key: 'issue:inv_test:acme/app#24', repo: REPO, number: 24 },
+    subject: {
+      kind: 'issue',
+      tenantId: TENANT,
+      key: 'issue:inv_test:acme/app#24',
+      repo: REPO,
+      number: 24,
+    },
     title: 'high waiter',
     mandate: actMandate([REPO]),
     size: 'S',
@@ -255,17 +350,16 @@ test('scheduler JSON survives a sqlite reopen with no user_version bump', async 
   const first = rig({ store: store1, sandbox: new FakeSandbox(), scheduler: { maxWorkers: 1 } });
   await first.agent.ingest(github(TENANT, 'one', 'issues', issuePayload('opened', 1)));
   await first.agent.ingest(github(TENANT, 'two', 'issues', issuePayload('opened', 2)));
-  const queued = first.agent.queueOf(TENANT).filter((row) => row.state !== 'running' && row.state !== 'done');
+  const queued = first.agent
+    .queueOf(TENANT)
+    .filter((row) => row.state !== 'running' && row.state !== 'done');
   assert.ok(queued.length >= 1);
   store1.close();
 
   const store2 = SqliteSuperagentStore.open(path);
   const second = rig({ store: store2, sandbox: new FakeSandbox(), scheduler: { maxWorkers: 1 } });
   assert.ok(second.agent.queueOf(TENANT).length >= 1);
-  assert.equal(
-    second.store.getDocument(TENANT, 'scheduler') === undefined,
-    false,
-  );
+  assert.equal(second.store.getDocument(TENANT, 'scheduler') === undefined, false);
   store2.close();
   await rm(dir, { recursive: true, force: true });
 });

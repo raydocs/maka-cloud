@@ -254,7 +254,6 @@ export type IngestResult =
       judgeCalls: number;
     };
 
-
 /** Collapse a worker inbox into one event. Preempt, then approval, then latest. */
 function handledIdsOf(event: NormalizedEvent): string[] {
   return [event.eventId, event.idempotencyKey];
@@ -2295,7 +2294,6 @@ export class Superagent {
     };
   }
 
-
   private async drain(tenantId: string, workerId: string): Promise<void> {
     if (this.draining.has(workerId)) {
       const worker = this.store.worker(tenantId, workerId);
@@ -2976,7 +2974,6 @@ export class Superagent {
     }
     return 'ready';
   }
-
 
   private async suspendBox(worker: WorkerRecord): Promise<void> {
     if (this.boxPool) {

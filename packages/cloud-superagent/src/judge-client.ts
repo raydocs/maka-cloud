@@ -205,7 +205,9 @@ export function routerModelRefFromEnv(env: NodeJS.ProcessEnv = process.env): Mod
   const provider = (env.MAKA_CLOUD_ROUTER_PROVIDER ?? 'anthropic').trim().toLowerCase();
   return {
     provider:
-      provider === 'openai' || provider === 'gateway' || provider === 'fake' ? provider : 'anthropic',
+      provider === 'openai' || provider === 'gateway' || provider === 'fake'
+        ? provider
+        : 'anthropic',
     model:
       env.MAKA_CLOUD_ROUTER_MODEL?.trim() ||
       env.MAKA_CLOUD_JUDGE_MODEL?.trim() ||
@@ -233,10 +235,12 @@ export function routerModelRefFromEnv(env: NodeJS.ProcessEnv = process.env): Mod
 
 export function workerModelRefFromEnv(env: NodeJS.ProcessEnv = process.env): ModelRef {
   return {
-    provider: (env.MAKA_CLOUD_WORKER_PROVIDER ?? 'anthropic').trim().toLowerCase() === 'openai'
-      ? 'openai'
-      : 'anthropic',
-    model: env.MAKA_CLOUD_WORKER_MODEL?.trim() || env.MAKA_CLOUD_LOOP_MODEL?.trim() || 'claude-opus-4-6',
+    provider:
+      (env.MAKA_CLOUD_WORKER_PROVIDER ?? 'anthropic').trim().toLowerCase() === 'openai'
+        ? 'openai'
+        : 'anthropic',
+    model:
+      env.MAKA_CLOUD_WORKER_MODEL?.trim() || env.MAKA_CLOUD_LOOP_MODEL?.trim() || 'claude-opus-4-6',
     ...(env.MAKA_CLOUD_WORKER_BASE_URL?.trim()
       ? { baseUrl: env.MAKA_CLOUD_WORKER_BASE_URL.trim().replace(/\/+$/, '') }
       : {}),
@@ -251,10 +255,13 @@ export function createJudgeClientFromRef(
   extras: { maxTokens?: number } = {},
 ): JudgeClient {
   if (ref.provider === 'fake') return new FakeJudgeClient();
-  const keyName = ref.apiKeyEnv ?? (ref.provider === 'openai' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY');
+  const keyName =
+    ref.apiKeyEnv ?? (ref.provider === 'openai' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY');
   const apiKey = env[keyName]?.trim() || '';
   if (!apiKey) {
-    throw new Error(`Router model needs ${keyName}. Put the key in the environment, not in config.`);
+    throw new Error(
+      `Router model needs ${keyName}. Put the key in the environment, not in config.`,
+    );
   }
   if (ref.provider === 'openai') {
     return new FetchOpenAiJudgeClient({
@@ -350,7 +357,8 @@ function openAiText(body: unknown): string {
 
 function toAnthropicUsage(body: unknown): unknown {
   if (typeof body !== 'object' || body === null || !('usage' in body)) return body;
-  const usage = (body as { usage?: { prompt_tokens?: unknown; completion_tokens?: unknown } }).usage;
+  const usage = (body as { usage?: { prompt_tokens?: unknown; completion_tokens?: unknown } })
+    .usage;
   return {
     usage: {
       input_tokens: usage?.prompt_tokens,
