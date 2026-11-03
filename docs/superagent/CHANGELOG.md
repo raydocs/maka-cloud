@@ -8,6 +8,15 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
+## 2026-11-02 18:10 MST — cursor/superagent-learning-review-51be — 25fb6cb27
+
+- **PR:** [#478](https://github.com/raydocs/maka-cloud/pull/478)
+- **What:** merge: cursor/superagent-watchdog-duplex-51be format fix into Super-agent learning-review. Biome format now clean. Keep every CHANGELOG entry, newest first.
+- **Why:** Carry the Linux format:check fix through the linearized stack.
+- **Tests:** 245 `@maka-cloud/superagent` tests passed after the merge
+- **Live:** n/a
+- **Migrations / risk:** none
+
 ## 2026-11-02 18:10 MST — cursor/superagent-watchdog-duplex-51be — 710908087
 
 - **PR:** [#476](https://github.com/raydocs/maka-cloud/pull/476)
