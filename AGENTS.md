@@ -106,3 +106,13 @@ Upstream files this fork changes, so a sync knows what to re-check.
 | `package.json`, `package-lock.json` | `packages/cloud-maka-engine` added to `workspaces` and to the `build` and `build:test` chains after `@maka/eval` (then `build:eval` for the `@maka/eval` re-export), so cloud packages reach Maka through `MakaEngine` (the lockfile change is the new workspace entry and the consumers' dependency on it) | never; on a sync, keep the entry, the order, and the consumer dependencies |
 | `deploy/Dockerfile`, `.github/workflows/fork-cloud-web.yml`, `.github/workflows/fork-cloud-mobile.yml` | those lanes build `@maka-cloud/maka-engine` before instabox/conductor (they do not use the root `build` script) | never; on a sync, keep the step |
 | `scripts/ci-test-plan.test.mjs` | import-boundary test: cloud packages outside `cloud-maka-engine` must not import `@maka/core`, `runtime`, `storage`, `runtime-host` or `eval` | never; on a sync, keep the test |
+
+## Super-agent executors (decided 2026-11-03)
+
+Super-agent schedules and authorizes; it does not write code. Each Assignment
+runs a **Claude Code or Codex** session in the tenant's Instabox behind one
+executor interface. Do not grow our own coding harness in
+`packages/cloud-superagent` (multi-turn `loop-coder`, Script tool, on-demand
+tools stay frozen, default off). The maka engine is an optional third executor
+that must win on the same benchmark before it becomes default. Read
+`docs/superagent/executor-decision.md` before any Super-agent work.
