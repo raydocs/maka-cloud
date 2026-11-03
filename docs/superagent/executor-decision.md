@@ -58,3 +58,12 @@ cross-vendor review).
 See `efficiency.md`: Assignments run in a writable copy-on-write layer over a
 shared read-only base image instead of git worktrees, with per-Assignment
 budgets and difficulty-based model routing.
+
+## Auth and model access (2026-11-03)
+
+Instabox boxes ship with Claude Code and Codex installed and already signed in
+(login is configured in Instabox, not in maka-cloud). Executors use that login
+by default; maka-cloud never handles or stores those credentials. Fallback
+route: the Magpie gateway (`MAKA_CLOUD_EXECUTOR_GATEWAY=magpie`, default off),
+used when the built-in login is unavailable or rate-limited. The executor
+reports which route it used in its `usage` events.
