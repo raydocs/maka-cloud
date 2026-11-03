@@ -157,6 +157,10 @@ export interface WorkerRecord {
   lastLive?: { sha?: string; ci?: string; prMerged?: boolean; at: number };
   /** Named step plan + heartbeat. JSON only; no schema bump. */
   progress?: import('./progress.js').WorkerProgress;
+  /** Instabox (default) or a paired BYOM device. JSON only; no schema bump. */
+  executionTarget?: import('./execution-target.js').ExecutionTargetRef;
+  /** Speculative attempt. JSON only; no schema bump. Default unset (off). */
+  speculative?: import('./speculative.js').SpeculativeMeta;
   usage: Usage;
   evidence: EvidenceBlock[];
   createdAt: number;

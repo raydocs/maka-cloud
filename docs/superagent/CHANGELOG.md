@@ -8,6 +8,14 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
+## 2026-11-02 17:55 MST — cursor/superagent-wiring-51be
+
+- **What:** merge `cursor/superagent-byom-spec-51be` (#475) into the wiring branch (already #477, which contains #474). Kept the scheduler queue and graded escalation, and kept BYOM / speculative spawn. Speculative runs only after a cross-source merge misses. `spawn` is async so a paired device can be chosen at admission. sqlite `user_version` stays 2.
+- **Why:** #480 does not yet contain the other batch-2 branches. The wiring branch merges those tips in order and will merge newer tips later.
+- **Tests:** conflict resolution only; suites run after the remaining tips merge.
+- **Live:** n/a
+- **Migrations / risk:** none. No `user_version` bump.
+
 ## 2026-11-02 13:26 MST — cursor/superagent-intake-merge-51be — e45c5fc4f
 
 - **PR:** [#477](https://github.com/raydocs/maka-cloud/pull/477)
@@ -16,6 +24,24 @@ a heading time is more than five minutes off that SHA's committer date.
 - **Tests:** 171 passed (`test:dist`), including new event-graph / escalate suites. FakeJudgeClient proves programmatic hits do not grow router prompts.
 - **Live:** n/a
 - **Migrations / risk:** none. Documents are `CREATE TABLE IF NOT EXISTS`. Schema version stays 2.
+
+## 2026-11-02 12:42 MST — cursor/superagent-byom-spec-51be — 010c9b925
+
+- **PR:** [#475](https://github.com/raydocs/maka-cloud/pull/475)
+- **What:** BYOM default command allowlist drops shells (`sh`, `bash`, `zsh`, `dash`, …) and wrappers (`env`, `xargs`, …). Devices exec `argv[0]` by exact basename match, no shell parse. `SandboxPort` `cmd` is tokenized and spawned directly; pipes / redirects / `sh -c` are refused with `shell_not_allowed` (never a silent `sh -c` fallback). Per-device `allowShell` (default false) is set at pairing or via `setAllowShell`; enabling writes `byom_allow_shell` to the hub audit and Super-agent ledger and shows `allowShell` on worker progress. A shell job also records `byom_shell_used`.
+- **Why:** Owner agreed to close the residual that an allowlisted shell could run arbitrary scripts on a paired machine.
+- **Tests:** `@maka-cloud/superagent` byom suite: default refuse `sh` / `bash` / `sh -c` / pipes; allow when `allowShell` is on; existing jail / HMAC / offline / pairing tests unchanged.
+- **Live:** n/a
+- **Migrations / risk:** none. Existing paired devices stay `allowShell: false`. Owners who need a shell opt in per device.
+
+## 2026-11-02 12:25 MST — cursor/superagent-byom-spec-51be — ca33ac59d
+
+- **PR:** [#475](https://github.com/raydocs/maka-cloud/pull/475)
+- **What:** BYOM execution target (default off) and speculative runs (default off). New `@maka-cloud/superagent-device` daemon dials out; `ByomHub` pairing / HMAC / jail / allow-deny / kill switch / repo opt-in; `ExecutionTarget` picks Instabox or a capability-matched device and waits with `device_offline` when the box is gone. Speculative workers start on watched CI failures / matching issues before the Router, lowest priority, hard daily + concurrency caps, no push/comment/PR until `acceptSpeculative`; discard cleans worktree/box and the ledger records accepted/discarded cost.
+- **Why:** Owner-approved: run iOS / local trees on a paired machine; measure whether pre-decision attempts are worth the spend. Both stay off so P0 Instabox behavior is unchanged.
+- **Tests:** `@maka-cloud/superagent` byom + speculative suites (in-process daemon / fake daemon). `@maka-cloud/superagent-device` loopback daemon test.
+- **Live:** n/a
+- **Migrations / risk:** none. No sqlite `user_version` bump. New fields are worker JSON (`executionTarget`, `speculative`). Cloud never receives device-local secrets. Threat model: [byom.md](byom.md). Speculative: [speculative.md](speculative.md).
 
 ## 2026-11-02 12:19 MST — cursor/superagent-scheduler-router-51be — 3f12cbe39
 
