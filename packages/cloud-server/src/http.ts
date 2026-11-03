@@ -201,7 +201,11 @@ export interface PublicApiDeps {
   /** Absent when no duties engine runs; `/github/webhook` and `/v1/projects` then answer like any unknown path. */
   duties?: DutyRoutes;
   /** Super-agent worker progress for this invite. Absent → `/v1/superagent/progress` is 404. */
-  progress?: { snapshot(owner: string): unknown };
+  progress?: {
+    snapshot(owner: string): unknown;
+    ask?(owner: string, text: string): Promise<unknown> | unknown;
+    instruct?(owner: string, text: string): Promise<unknown> | unknown;
+  };
 }
 
 const createConversation = z
@@ -525,10 +529,37 @@ export class PublicApi {
     }
     if (path === '/v1/superagent/progress') {
       if (!this.deps.progress) throw new HttpError(404, 'not_found');
+      if (method === 'POST') {
+        take(this.deps.controlLimiter, invite);
+        const body = z
+          .object({
+            ask: z.string().min(1).max(4000).optional(),
+            instruct: z.string().min(1).max(4000).optional(),
+          })
+          .strict()
+          .safeParse(await readJson(req, false));
+        if (!body.success || (!body.data.ask && !body.data.instruct)) {
+          throw new HttpError(400, 'invalid_request');
+        }
+        const snapshot = this.deps.progress.snapshot(invite.inviteId);
+        if (body.data.instruct) {
+          if (!this.deps.progress.instruct) throw new HttpError(404, 'not_found');
+          const watchdog = await this.deps.progress.instruct(invite.inviteId, body.data.instruct);
+          return respond(res, 200, attachWatchdog(snapshot, watchdog));
+        }
+        if (!this.deps.progress.ask) throw new HttpError(404, 'not_found');
+        const watchdog = await this.deps.progress.ask(invite.inviteId, body.data.ask ?? '');
+        return respond(res, 200, attachWatchdog(snapshot, watchdog));
+      }
       if (method !== 'GET' && method !== 'HEAD') {
-        throw new HttpError(405, 'method_not_allowed', { allow: 'GET, HEAD' });
+        throw new HttpError(405, 'method_not_allowed', { allow: 'GET, HEAD, POST' });
       }
       const snapshot = this.deps.progress.snapshot(invite.inviteId);
+      const ask = url.searchParams.get('ask');
+      const withAsk =
+        ask && this.deps.progress.ask
+          ? attachWatchdog(snapshot, await this.deps.progress.ask(invite.inviteId, ask))
+          : snapshot;
       const accept = req.headers.accept;
       const sse =
         (typeof accept === 'string' && accept.includes('text/event-stream')) ||
@@ -536,7 +567,7 @@ export class PublicApi {
         url.searchParams.get('stream') === '1';
       if (sse) {
         const body =
-          method === 'HEAD' ? '' : `id: 1\nevent: progress\ndata: ${JSON.stringify(snapshot)}\n\n`;
+          method === 'HEAD' ? '' : `id: 1\nevent: progress\ndata: ${JSON.stringify(withAsk)}\n\n`;
         res
           .writeHead(200, {
             'content-type': 'text/event-stream',
@@ -545,7 +576,7 @@ export class PublicApi {
           .end(body);
         return;
       }
-      return respond(res, 200, snapshot);
+      return respond(res, 200, withAsk);
     }
     if (path === '/v1/settings') {
       // The person's own settings. Today that is the language the server speaks to them in.
@@ -1603,6 +1634,13 @@ export function parseCount(value: string | null | undefined, fallback: number): 
   if (value === null || value === undefined || value === '') return fallback;
   if (!/^\d{1,15}$/u.test(value)) throw new HttpError(400, 'invalid_request');
   return Number(value);
+}
+
+function attachWatchdog(snapshot: unknown, watchdog: unknown): unknown {
+  if (snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot)) {
+    return { ...(snapshot as Record<string, unknown>), watchdog };
+  }
+  return { snapshot, watchdog };
 }
 
 export function respond(

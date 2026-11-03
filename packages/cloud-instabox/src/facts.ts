@@ -1,4 +1,4 @@
-import type { WorkspaceExecutorFacts } from '@maka/runtime/workspace-executor';
+import type { WorkspaceExecutorFacts } from '@maka-cloud/maka-engine';
 
 /**
  * An instabox sandbox is a separate machine: nothing written there reaches the

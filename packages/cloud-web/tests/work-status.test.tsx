@@ -133,6 +133,25 @@ test('superagent progress list loads GET /v1/superagent/progress and hides a 404
   expect(screen.getAllByTestId('superagent-progress-list')).toHaveLength(1);
 });
 
+test('superagent progress list shows a queued task reason and wait time', async () => {
+  const request = vi.fn(async (_path: string) => ({
+    workers: [],
+    queue: [
+      {
+        taskId: 'tsk_1',
+        title: 'wait for CI',
+        state: 'waiting',
+        reason: 'start_ci_green',
+        waitMs: 90_000,
+      },
+    ],
+  }));
+  render(<SuperagentProgress client={{ request } as unknown as CloudClient} />);
+  expect(await screen.findByTestId('superagent-queue-row')).toBeTruthy();
+  expect(screen.getByText(/waiting: start_ci_green/)).toBeTruthy();
+  expect(screen.getByText(/wait 90s/)).toBeTruthy();
+});
+
 test('superagent progress bar distinguishes waiting from stuck', () => {
   const { rerender } = render(
     <WorkerProgressBar

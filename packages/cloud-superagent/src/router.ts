@@ -70,16 +70,31 @@ export function admit(
   return { ok: true, reason: 'admitted' };
 }
 
-/** Spawn-time cap: concurrent Instabox boxes and tenant spend. */
+/** Spawn-time cap: concurrent Instabox boxes / workers-per-box and tenant spend. */
 export function admitSpawn(input: {
   boxedLive: number;
   wouldBox: boolean;
   tenantUsdMicros: number;
-  policy: Pick<AdmissionPolicy, 'maxBoxes' | 'spendCapUsd'>;
+  policy: Pick<AdmissionPolicy, 'maxBoxes' | 'spendCapUsd' | 'maxWorkersPerBox'>;
+  sharedBox?: boolean;
+  tenantBoxWorkers?: number;
+  wouldCreateTenantBox?: boolean;
 }): AdmissionResult {
   if (input.policy.spendCapUsd !== undefined) {
     const cap = Math.round(input.policy.spendCapUsd * 1_000_000);
     if (input.tenantUsdMicros >= cap) return { ok: false, reason: 'spend_cap' };
+  }
+  if (input.sharedBox) {
+    const workerCap = input.policy.maxWorkersPerBox ?? 4;
+    if ((input.tenantBoxWorkers ?? 0) >= workerCap) return { ok: false, reason: 'worker_cap' };
+    if (
+      input.wouldCreateTenantBox &&
+      input.policy.maxBoxes !== undefined &&
+      input.boxedLive >= input.policy.maxBoxes
+    ) {
+      return { ok: false, reason: 'box_cap' };
+    }
+    return { ok: true, reason: 'admitted' };
   }
   if (
     input.wouldBox &&
@@ -124,9 +139,14 @@ function field(event: NormalizedEvent, label: string): string {
 
 export class RecordingJudge implements RouterJudge {
   readonly calls: NormalizedEvent[] = [];
+  readonly prompts: string[] = [];
   constructor(public inner: RouterJudge = new HeuristicJudge()) {}
-  async decide(event: NormalizedEvent, ctx: { workers: WorkerRecord[] }): Promise<RouterDecision> {
+  async decide(
+    event: NormalizedEvent,
+    ctx: { workers: WorkerRecord[]; fewShot?: string; suggestions?: string },
+  ): Promise<RouterDecision> {
     this.calls.push(event);
+    if (ctx.fewShot) this.prompts.push(ctx.fewShot);
     return this.inner.decide(event, ctx);
   }
 }
@@ -140,6 +160,8 @@ export interface ModelCompletion {
     usdMicros: number;
     wallMs: number;
     model: string;
+    cacheReadTokens?: number;
+    cacheWriteTokens?: number;
   };
 }
 
@@ -179,7 +201,10 @@ export class ModelJudge implements RouterJudge {
     private readonly options: ModelJudgeOptions = {},
   ) {}
 
-  async decide(event: NormalizedEvent, ctx: { workers: WorkerRecord[] }): Promise<RouterDecision> {
+  async decide(
+    event: NormalizedEvent,
+    ctx: { workers: WorkerRecord[]; fewShot?: string; suggestions?: string; queue?: string },
+  ): Promise<RouterDecision> {
     const at = this.options.now?.() ?? Date.now();
     const heuristic = await this.fallback.decide(event, ctx);
     if (this.options.prefilter && heuristic.action === 'ignore') {
@@ -198,7 +223,9 @@ export class ModelJudge implements RouterJudge {
     const notes = await inspectNotes(this.options.inspect, event);
     let raw: string;
     try {
-      raw = await this.client.complete(promptOf(event, notes));
+      raw = await this.client.complete(
+        promptOf(event, notes, ctx.fewShot, ctx.suggestions, ctx.queue),
+      );
     } catch {
       this.log.push({
         at,
@@ -260,13 +287,24 @@ export function parseModelDecision(
   };
 }
 
-function promptOf(event: NormalizedEvent, inspect = ''): string {
+function promptOf(
+  event: NormalizedEvent,
+  inspect = '',
+  fewShot = '',
+  suggestions = '',
+  queue = '',
+): string {
   return [
     'Decide ignore, answer, or spawn for this unowned event.',
+    'This is the Slow Path: a new thread or cross-task coordination. Subscribed follow-ups never reach you.',
+    'Classify the request as explicit, inferred, or not-accepted. Include confidence 0..1.',
     'Reply with JSON only: {"action":"ignore"|"answer"|"spawn","reason":"...","text":"...","title":"...","intensity":"observe"|"act","confidence":0.0}.',
     `type=${event.type} source=${event.source} actor=${event.actor.login} subject=${event.subject?.key ?? ''}`,
     `summary=${event.summary}`,
     inspect,
+    queue && `Open tasks (coordination):\n${queue}`,
+    fewShot && `Prior feedback (few-shot):\n${fewShot}`,
+    suggestions && `Rule suggestions from wrong feedback:\n${suggestions}`,
   ]
     .filter(Boolean)
     .join('\n');

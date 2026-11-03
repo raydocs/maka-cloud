@@ -1,3 +1,5 @@
+import { evaluateAutonomy } from './autonomy.js';
+import { evaluateTenantBox } from './box-pool.js';
 import { overBudget } from './safety.js';
 import type { SuperagentStore } from './store.js';
 import type { WatchdogFinding, WatchdogSettings, WorkerRecord } from './types.js';
@@ -29,6 +31,8 @@ export function evaluateWorker(
     return finding(worker, 'over_budget', 'stop', `Budget ${budget} exhausted.`);
   }
   if (worker.state === 'paused') return undefined;
+  const bounded = evaluateAutonomy(worker, at);
+  if (bounded) return bounded;
   if (isLiveState(worker.state) && worker.stepRepeats >= settings.loopRepeat) {
     return finding(
       worker,
@@ -86,6 +90,10 @@ export async function runWatchdog(
   at: number,
 ): Promise<WatchdogFinding[]> {
   const findings: WatchdogFinding[] = [];
+  for (const box of store.allTenantBoxes()) {
+    const found = evaluateTenantBox(box, at);
+    if (found) findings.push(found);
+  }
   for (const worker of store.allWorkers()) {
     const expired = store
       .pendingApprovals(worker.tenantId, worker.workerId)
@@ -93,7 +101,10 @@ export async function runWatchdog(
     const found = evaluateWorker(worker, settings, at, expired);
     if (!found) continue;
     findings.push(found);
-    if (found.action === 'restart') await actions.restart(worker, at);
+    if (found.rule === 'box_stuck') continue;
+    if (found.action === 'retry') {
+      // The session already retried on the same endpoint.
+    } else if (found.action === 'restart') await actions.restart(worker, at);
     else if (found.action === 'retire') await actions.retire(worker, at, found.detail);
     else if (found.action === 'stop') await actions.stop(worker, at, found.detail);
     else if (found.action === 'nudge') await actions.nudge(worker, at, found.detail);

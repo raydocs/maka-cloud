@@ -60,8 +60,119 @@ export const WATCHDOG_RULES = [
   'over_budget',
   'subject_closed',
   'awaiting_expired',
+  'stream_silence',
+  'time_limit',
+  'empty_turns',
+  'repeat_tools',
+  'box_stuck',
 ] as const;
 export type WatchdogRule = (typeof WATCHDOG_RULES)[number];
+
+export const AUTONOMY_RULES = [
+  'stream_silence',
+  'time_limit',
+  'empty_turns',
+  'repeat_tools',
+] as const;
+export type AutonomyRule = (typeof AUTONOMY_RULES)[number];
+
+/** Factory Droid 1.0 bounded-autonomy defaults. */
+export const DEFAULT_AUTONOMY = {
+  streamSilenceMs: 4 * 60_000,
+  timeLimitAttempts: 2,
+  emptyTurnsStop: 3,
+  identicalToolsNudge: 3,
+  identicalToolsStop: 6,
+  compactionSummaryTokens: 16_000,
+} as const;
+
+export type AutonomySettings = {
+  streamSilenceMs: number;
+  timeLimitAttempts: number;
+  emptyTurnsStop: number;
+  identicalToolsNudge: number;
+  identicalToolsStop: number;
+  compactionSummaryTokens: number;
+};
+
+export type AutonomyAction = 'continue' | 'retry' | 'nudge' | 'stop';
+
+export interface AutonomyIncident {
+  action: Exclude<AutonomyAction, 'continue'>;
+  rule: AutonomyRule;
+  detail: string;
+  at: number;
+  applied?: boolean;
+}
+
+/** Per-worker bounded-autonomy + cache counters. JSON only; no schema bump. */
+export interface AutonomyState {
+  emptyTurns: number;
+  lastToolKey: string | null;
+  lastToolResultHash: string | null;
+  identicalToolRuns: number;
+  timeLimitAttempts: number;
+  streamRetries: number;
+  cacheBreaks: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  inputTokens: number;
+  lastIncident?: AutonomyIncident;
+  pending?: AutonomyIncident;
+}
+
+export const TENANT_BOX_STATES = [
+  'creating',
+  'running',
+  'suspending',
+  'suspended',
+  'resuming',
+  'waking',
+  'rebuilding',
+  'gone',
+] as const;
+export type TenantBoxState = (typeof TENANT_BOX_STATES)[number];
+
+/** One long-lived Instabox box per tenant. JSON on the store; no sqlite bump. */
+export interface TenantBoxRecord {
+  tenantId: string;
+  boxId: string;
+  state: TenantBoxState;
+  snapshotId: string | null;
+  vcpus: number;
+  memMiB: number;
+  activeWorkers: string[];
+  idleSince: number | null;
+  lastWakeAt: number | null;
+  lastSuspendAt: number | null;
+  lastCreateAt: number | null;
+  lastRestoreAt: number | null;
+  leaseHolder: string | null;
+  leaseRenewedAt: number | null;
+  /** Backstop only (default 7 days). Idle suspend is the normal path. */
+  deleteAfterSeconds: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export const TENANT_BOX_PREFIX = '__tenant_box__:';
+
+export function tenantBoxWorkerId(tenantId: string): string {
+  return `${TENANT_BOX_PREFIX}${tenantId}`;
+}
+
+export function isTenantBoxWorkerId(workerId: string): boolean {
+  return workerId.startsWith(TENANT_BOX_PREFIX);
+}
+
+/** Default shared-box size. Mandate may raise it; Instabox Pro allows 4/8192. */
+export const DEFAULT_SHARED_BOX = { vcpus: 4, memMiB: 8192 } as const;
+export const DEFAULT_WORKERS_PER_BOX = 4;
+export const DEFAULT_IDLE_SUSPEND_MS = 5 * 60_000;
+export const DEFAULT_BOX_LEASE_TTL_MS = 60_000;
+export const DEFAULT_BOX_LEASE_RENEW_MS = 30_000;
+export const DEFAULT_BOX_DELETE_AFTER_SECONDS = 7 * 24 * 60 * 60;
+export const DEFAULT_BOX_STUCK_AFTER_MS = 10 * 60_000;
 
 export interface Actor {
   login: string;
@@ -108,6 +219,8 @@ export interface Mandate {
   allowNoCi?: boolean;
   /** Owner may pause this worker. Default true. Set false to refuse pause. */
   ownerPause?: boolean;
+  /** Shared-box size. Default 4 vCPU / 8192 MiB. */
+  box?: { vcpus?: number; memMiB?: number };
 }
 
 export interface Usage {
@@ -170,6 +283,18 @@ export interface WorkerRecord {
   lastPushSha?: string;
   /** Completed blocking peer-review rounds. JSON only. */
   peerReviewRounds?: number;
+  /** Duplex: event ids already applied. JSON only; no schema bump. */
+  seenEventIds?: string[];
+  /** Owner/watchdog cancel; the running loop preempts then retires. */
+  cancelRequested?: boolean;
+  /** Instabox (default) or a paired BYOM device. JSON only; no schema bump. */
+  executionTarget?: import('./execution-target.js').ExecutionTargetRef;
+  /** Speculative attempt. JSON only; no schema bump. Default unset (off). */
+  speculative?: import('./speculative.js').SpeculativeMeta;
+  /** Bounded autonomy + prompt-cache counters. JSON only; no schema bump. */
+  autonomy?: AutonomyState;
+  /** Copy of the tenant box (JSON). Source of truth is SuperagentStore.tenantBox. */
+  box?: TenantBoxRecord;
   usage: Usage;
   evidence: EvidenceBlock[];
   createdAt: number;
@@ -222,6 +347,8 @@ export interface UsageEntry {
   usdMicros: number;
   wallMs: number;
   at: number;
+  /** Memory/tests: `autonomy_retry|nudge|stop`. Sqlite stores the numeric columns only. */
+  kind?: string;
 }
 
 export type EvidenceKind = 'patch' | 'log' | 'artifact' | 'step' | 'test';
@@ -279,6 +406,10 @@ export interface HandlerResult {
   action?: ProposedAction;
   /** Mid-run phase / activity. Superagent persists it on the worker JSON. */
   progressUpdate?: import('./progress.js').ProgressPatch;
+  /** Bounded-autonomy counters. Superagent persists them on the worker JSON. */
+  autonomy?: AutonomyState;
+  /** Stop / retry / nudge from the worker loop. Superagent records ledger + watchdog. */
+  incident?: AutonomyIncident;
   /** Claim only. Superagent re-reads signals before retiring. */
   done?: import('./done.js').DoneClaim;
   /**
@@ -314,6 +445,10 @@ export interface WorkerContext {
    * Intentionally absent: workers have no outbound user channel.
    * `LeadPort.speak` lives on Superagent, never here.
    */
+  /** Unconsumed inbox that arrived after this run started (duplex). */
+  pollInbox?: () => NormalizedEvent[];
+  /** Consume + remember event ids. Idempotent. */
+  ackInbox?: (eventIds: string[]) => void;
 }
 
 export interface WorkerHandler {
@@ -334,8 +469,17 @@ export interface JudgeLogEntry {
   reason?: string;
 }
 
+export interface RouterJudgeContext {
+  workers: WorkerRecord[];
+  /** Feedback few-shots and rule suggestions for a model Router. */
+  fewShot?: string;
+  suggestions?: string;
+  /** Queued / running task titles for cross-task coordination. */
+  queue?: string;
+}
+
 export interface RouterJudge {
-  decide(event: NormalizedEvent, ctx: { workers: WorkerRecord[] }): Promise<RouterDecision>;
+  decide(event: NormalizedEvent, ctx: RouterJudgeContext): Promise<RouterDecision>;
 }
 
 export interface AdmissionPolicy {
@@ -345,6 +489,8 @@ export interface AdmissionPolicy {
   allowSources?: EventSource[];
   /** Live workers with a sandboxRef (or about to get one) allowed at once. */
   maxBoxes?: number;
+  /** Concurrent workers on one tenant box. Default 4 when sharedBox is on. */
+  maxWorkersPerBox?: number;
   /** Tenant ledger cap in USD. Spawn is refused when usage already meets it. */
   spendCapUsd?: number;
 }
@@ -355,13 +501,14 @@ export interface WatchdogSettings {
   loopRepeat: number;
   maxRestarts: number;
   approvalTtlMs: number;
+  autonomy: AutonomySettings;
 }
 
 export interface WatchdogFinding {
   rule: WatchdogRule;
   tenantId: string;
   workerId: string;
-  action: 'restart' | 'escalate' | 'retire' | 'stop' | 'nudge';
+  action: 'restart' | 'escalate' | 'retire' | 'stop' | 'nudge' | 'retry';
   generation: number;
   detail: string;
 }
@@ -378,6 +525,10 @@ export interface IdFactory {
   subscription(): string;
   approval(): string;
   audit(): string;
+  task(): string;
+  decision(): string;
+  merge(): string;
+  card(): string;
 }
 
 export const DEFAULT_WATCHDOG: WatchdogSettings = {
@@ -386,6 +537,7 @@ export const DEFAULT_WATCHDOG: WatchdogSettings = {
   loopRepeat: 3,
   maxRestarts: 3,
   approvalTtlMs: 24 * 60 * 60_000,
+  autonomy: { ...DEFAULT_AUTONOMY },
 };
 
 export const LIVE_STATES: readonly WorkerState[] = [
@@ -405,6 +557,40 @@ export function isLiveState(state: WorkerState): boolean {
 
 export function emptyUsage(): Usage {
   return { tokens: 0, usdMicros: 0, wallMs: 0 };
+}
+
+/** Reserved retired row that carries tenant box JSON through sqlite replay. */
+export function tenantBoxAsWorker(box: TenantBoxRecord): WorkerRecord {
+  const at = box.updatedAt;
+  return {
+    workerId: tenantBoxWorkerId(box.tenantId),
+    tenantId: box.tenantId,
+    subject: {
+      kind: 'conversation',
+      tenantId: box.tenantId,
+      key: tenantBoxWorkerId(box.tenantId),
+    },
+    state: 'retired',
+    generation: 1,
+    mandate: observeMandate([]),
+    memory: '',
+    spills: [],
+    plan: '',
+    transcriptPointer: null,
+    sandboxRef: box.boxId,
+    workspaceRef: null,
+    lastEventId: null,
+    lastProgressAt: at,
+    lastHeartbeatAt: at,
+    lastStepSignature: null,
+    stepRepeats: 0,
+    box,
+    usage: emptyUsage(),
+    evidence: [],
+    createdAt: box.createdAt,
+    updatedAt: at,
+    retiredAt: at,
+  };
 }
 
 export function observeMandate(repos: string[], strength: Strength = 'inferred'): Mandate {
