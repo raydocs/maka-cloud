@@ -719,6 +719,11 @@ export {
 } from './prompt-cache.js';
 export { FakeProvider, runWorkerTurn } from './session.js';
 export {
+  type CommandRunner,
+  LayeredStore,
+  type LayeredStoreOptions,
+} from './layered-workspace.js';
+export {
   createWorkspaceStore,
   GitCloneStore,
   initLocalRepo,
@@ -727,6 +732,9 @@ export {
   LayerFsStore,
   type SnapshotRef,
   type WorkspaceHandle,
+  type WorkspaceKind,
+  type WorkspaceMode,
   type WorkspaceSpec,
   type WorkspaceStore,
+  workspaceModeFromEnv,
 } from './workspace.js';
