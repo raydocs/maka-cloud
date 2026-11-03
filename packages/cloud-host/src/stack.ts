@@ -39,6 +39,7 @@ import {
 } from '@maka-cloud/runners';
 import {
   createJudgeFromEnv,
+  createWatchdogNarratorFromEnv,
   EnvOrgSecrets,
   type SuperagentOptions,
   type SuperagentStore,
@@ -398,11 +399,13 @@ export async function startStack(
     } = superagentOptions;
     const wiredSuperagent = {
       ...agentOpts,
+      sharedBox: agentOpts.sharedBox ?? true,
       sandbox:
         agentOpts.sandbox ??
         (instaboxClient === undefined ? undefined : instaboxSandboxPort(instaboxClient)),
       orgSecrets: agentOpts.orgSecrets ?? new EnvOrgSecrets({ env }),
       judge: agentOpts.judge ?? createJudgeFromEnv(env),
+      watchdogNarrator: agentOpts.watchdogNarrator ?? createWatchdogNarratorFromEnv(env),
       admission: {
         ...agentOpts.admission,
         ...(config.superagentActors.length > 0 && agentOpts.admission?.allowActors === undefined
@@ -470,6 +473,18 @@ export async function startStack(
       quota: quotaSource(journal, invites!, config.spend),
       progress: {
         snapshot: (owner) => superagentRt?.agent.statusSnapshot(owner) ?? { at: 0, workers: [] },
+        ask: (owner, text) =>
+          superagentRt?.agent.askWatchdog(owner, text) ?? {
+            text: 'superagent offline',
+            citations: [],
+            source: 'fallback' as const,
+          },
+        instruct: (owner, text) =>
+          superagentRt?.agent.instructWatchdog(owner, text) ?? {
+            text: 'superagent offline',
+            citations: [],
+            source: 'fallback' as const,
+          },
       },
       ...(push === undefined ? {} : { push }),
       ...(signInOn ? { auth } : {}),

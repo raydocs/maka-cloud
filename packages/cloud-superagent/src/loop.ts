@@ -32,6 +32,7 @@ export function workerBranch(workerId: string): string {
 }
 
 export function mayPush(worker: WorkerRecord): boolean {
+  if (worker.speculative && worker.speculative.status !== 'accepted') return false;
   return worker.mandate.intensity !== 'observe' && worker.mandate.authority !== 'read-only';
 }
 
@@ -139,6 +140,8 @@ export interface LoopPorts {
   testCommand?: string;
   /** When false, box tests are the deliverable (no git push / PR). */
   publish?: boolean;
+  /** Worker model id for peer review. Host passes this; the loop does not read env. */
+  workerModel?: string;
 }
 
 /** Writes known files. CI uses this instead of a live model. */
@@ -532,6 +535,40 @@ export class CodingLoopHandler implements WorkerHandler {
           boundText: `Push ${branch} on ${repo}`,
         },
       };
+    }
+
+    if (ctx.peerReview) {
+      await enter('review-wait', 'peer review of the diff', {
+        kind: 'review',
+        detail: 'peer-review',
+      });
+      const reviewed = await ctx.peerReview({ diff: patch, repo });
+      if (reviewed.feedback) {
+        evidence.push({ kind: 'step', label: 'peer-review', body: reviewed.feedback });
+      }
+      if (!reviewed.allowed) {
+        return {
+          progress: true,
+          workspaceRef: handle.id,
+          sandboxRef: boxId,
+          memory: reviewed.feedback,
+          plan: reviewed.waiting ? 'peer-review waiting on human' : 'fix peer-review findings',
+          usage: coded.usage,
+          evidence,
+          stepSignature: `peer-review:${reviewed.severity}`,
+          progressUpdate: reviewed.waiting
+            ? {
+                phase: 'review-wait',
+                waiting: { kind: 'human', detail: 'peer-review' },
+                activity: 'peer-review exhausted',
+              }
+            : {
+                phase: 'edit',
+                waiting: null,
+                activity: 'fix peer-review findings',
+              },
+        };
+      }
     }
 
     await enter('push', `git push ${branch}`);

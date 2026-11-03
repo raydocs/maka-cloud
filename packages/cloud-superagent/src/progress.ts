@@ -1,7 +1,12 @@
+import type { DecisionCard } from './escalate.js';
+import { formatDecisionLine } from './escalate.js';
+import type { IntakeMetrics } from './intake.js';
+import { formatQueueLine, type QueueView } from './scheduler.js';
 import type { SuperagentStore } from './store.js';
 import type { UsageEntry, WorkerRecord, WorkerState } from './types.js';
 
 export const PROGRESS_PHASES = [
+  'waking',
   'materialize',
   'edit',
   'install',
@@ -25,6 +30,7 @@ export const PROGRESS_LOOKS = ['running', 'waiting', 'stuck', 'paused', 'done'] 
 export type ProgressLook = (typeof PROGRESS_LOOKS)[number];
 
 export const DEFAULT_PHASE_MS: Record<ProgressPhase, number> = {
+  waking: 30_000,
   materialize: 60_000,
   edit: 15 * 60_000,
   install: 5 * 60_000,
@@ -69,6 +75,8 @@ export interface WorkerProgress {
   lastLeadAt?: number;
   lastLeadKind?: 'phase' | 'still' | 'stuck';
   stuckSpoken?: boolean;
+  /** Bounded-autonomy stop / retry / nudge reason. */
+  lastReason?: string;
   samples?: Partial<Record<ProgressPhase, number[]>>;
 }
 
@@ -78,6 +86,7 @@ export interface ProgressPatch {
   activity?: string;
   waiting?: WaitingOn | null;
   heartbeat?: boolean;
+  reason?: string;
 }
 
 export interface ProgressView {
@@ -94,12 +103,23 @@ export interface ProgressView {
   heartbeatAt: number;
   look: ProgressLook;
   waiting?: WaitingOn;
+  reason?: string;
   decisionEntryId?: string;
 }
 
 export interface StatusSnapshot {
   at: number;
   workers: ProgressView[];
+  queue?: QueueView[];
+  intake?: IntakeMetrics;
+  decisions?: DecisionCard[];
+  /** Conversational watchdog answer when the progress API was asked. */
+  watchdog?: {
+    text: string;
+    citations: string[];
+    source: 'model' | 'fallback';
+    action?: { kind: string; ok: boolean; workerId?: string; reason?: string };
+  };
   /**
    * Pending must-ask holds from this package. #477 uses `decisions` for
    * DecisionCard[]; keep the names distinct so the branches can merge.
@@ -192,6 +212,7 @@ export function applyProgressPatch(
     base.phase = patch.phase;
   }
   if (patch.activity !== undefined) base.lastActivity = clipActivity(patch.activity);
+  if (patch.reason !== undefined) base.lastReason = clipActivity(patch.reason);
   if (patch.waiting === null) delete base.waiting;
   else if (patch.waiting) {
     base.waiting = {
@@ -358,6 +379,9 @@ export function viewOf(
     heartbeatAt: progress.heartbeatAt,
     look,
     ...(waiting ? { waiting } : {}),
+    ...(progress.lastReason || worker.autonomy?.lastIncident?.detail
+      ? { reason: progress.lastReason ?? worker.autonomy?.lastIncident?.detail }
+      : {}),
     ...(progress.waiting?.decisionEntryId
       ? { decisionEntryId: progress.waiting.decisionEntryId }
       : {}),
@@ -434,7 +458,8 @@ export function formatProgressLine(view: ProgressView): string {
     return `${view.workerId}  waiting on ${view.waiting.kind}: ${view.waiting.detail}  last: ${view.lastActivity}${cite}`;
   }
   if (view.look === 'stuck') {
-    return `${view.workerId}  looks stuck  ${view.phase} ${view.k}/${view.n}  last: ${view.lastActivity}${cite}`;
+    const reason = view.reason ? `  reason: ${view.reason}` : '';
+    return `${view.workerId}  looks stuck  ${view.phase} ${view.k}/${view.n}  last: ${view.lastActivity}${reason}${cite}`;
   }
   if (view.look === 'paused') {
     return `${view.workerId}  paused  ${view.phase} ${view.k}/${view.n}${cite}`;
@@ -446,7 +471,12 @@ export function formatProgressLine(view: ProgressView): string {
 }
 
 export function formatStatusText(snapshot: StatusSnapshot): string {
-  const lines = snapshot.workers.map(formatProgressLine);
+  const workers = snapshot.workers.map(formatProgressLine);
+  const queue = (snapshot.queue ?? []).map(formatQueueLine);
+  const decisions = (snapshot.decisions ?? [])
+    .filter((row) => row.state === 'pending')
+    .map(formatDecisionLine);
+  const lines = [...workers, ...queue, ...decisions];
   for (const row of snapshot.mustAskPending ?? []) {
     lines.push(`${row.pendingId}  waiting on human: ${row.category}  ${row.boundText}`);
   }

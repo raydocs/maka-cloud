@@ -10,7 +10,10 @@ export function defaultIds(): IdFactory {
     subscription: () => `sub_${compact()}`,
     approval: () => `apr_${compact()}`,
     audit: () => `aud_${compact()}`,
+    task: () => `tsk_${compact()}`,
     decision: () => `dec_${compact()}`,
+    merge: () => `mrg_${compact()}`,
+    card: () => `crd_${compact()}`,
   };
 }
 
@@ -27,6 +30,9 @@ export function sequentialIds(start = 0): IdFactory {
     subscription: () => next('sub'),
     approval: () => next('apr'),
     audit: () => next('aud'),
+    task: () => next('tsk'),
     decision: () => next('dec'),
+    merge: () => next('mrg'),
+    card: () => next('crd'),
   };
 }

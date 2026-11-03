@@ -166,6 +166,8 @@ function base(
   };
 }
 
+const Label = z.object({ name: z.string() });
+
 const PullRequestPayload = z.object({
   action: z.string(),
   pull_request: z.object({
@@ -176,9 +178,11 @@ const PullRequestPayload = z.object({
     state: z.string().optional(),
     user: Account,
     head: z.object({ ref: z.string().optional() }).optional(),
+    labels: z.array(Label).optional(),
   }),
   repository: Repository,
   sender: Account,
+  label: Label.optional(),
 });
 
 function githubPullRequest(
@@ -212,6 +216,9 @@ function githubPullRequest(
       fields: [
         ['title', data.pull_request.title ?? ''],
         ['author', data.pull_request.user.login],
+        ['merged', data.pull_request.merged === true ? 'true' : 'false'],
+        ['labels', (data.pull_request.labels ?? []).map((row) => row.name).join(',')],
+        ['label', data.label?.name ?? ''],
       ],
       closesSubject: closed,
     }),
@@ -227,9 +234,11 @@ const IssuesPayload = z.object({
     html_url: z.string().optional(),
     user: Account,
     pull_request: z.unknown().optional(),
+    labels: z.array(Label).optional(),
   }),
   repository: Repository,
   sender: Account,
+  label: Label.optional(),
 });
 
 function githubIssues(
@@ -271,6 +280,8 @@ function githubIssues(
         ['title', data.issue.title],
         ['body', clip(data.issue.body ?? '')],
         ['author', data.issue.user.login],
+        ['labels', (data.issue.labels ?? []).map((row) => row.name).join(',')],
+        ['label', data.label?.name ?? ''],
       ],
       closesSubject: closed,
     }),
@@ -359,6 +370,8 @@ function githubReview(
         ['reviewer', data.sender.login],
         ['comment', clip(body)],
         ['file', data.comment?.path ?? ''],
+        ['state', (data.review?.state ?? '').toLowerCase()],
+        ['action', data.action],
       ],
       closesSubject: false,
     }),

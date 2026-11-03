@@ -6,7 +6,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { mkdir, mkdtemp } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 
@@ -15,6 +15,8 @@ export const DEFAULT_INSTABOX_BASE_URL = 'https://api.instabox.sh';
 export interface SandboxExecRequest {
   cmd: string;
   cwd?: string;
+  /** Extra env for this exec. Secrets stay host-side; do not put keys here. */
+  env?: Record<string, string>;
   /** Raw bytes for `base64 -d` uploads. Never put secrets here. */
   stdin?: string;
   timeoutSeconds?: number;
@@ -26,10 +28,37 @@ export interface SandboxExecResult {
   exitCode: number;
 }
 
+/** Duplex: a long exec that has been started; the result arrives later. */
+export interface SandboxStartResult {
+  status: 'started';
+  jobId: string;
+}
+
+export interface SandboxJob {
+  jobId: string;
+  machineId: string;
+  request: SandboxExecRequest;
+  startedAt: number;
+  result?: SandboxExecResult;
+  cancelled?: boolean;
+}
+
 export interface SandboxMachine {
   id: string;
   state: string;
   operationId?: string | null;
+  /** Stored when created. Not used as the idle path. */
+  deleteAfterSeconds?: number;
+}
+
+export interface SandboxCreateMachineRequest {
+  name?: string;
+  templateId?: string;
+  snapshotId?: string;
+  metadata?: Record<string, string>;
+  vcpus?: number;
+  memMiB?: number;
+  deleteAfterSeconds?: number;
 }
 
 export interface SandboxPort {
@@ -43,6 +72,8 @@ export interface SandboxPort {
   deleteActivityLease?(machineId: string, holder: string): Promise<void>;
   /** Sleep writes durable state first, then may ask the box to suspend. */
   suspend?(machineId: string): Promise<void>;
+  createMachine?(request: SandboxCreateMachineRequest): Promise<{ id: string }>;
+  deleteMachine?(machineId: string): Promise<unknown>;
 }
 
 export class InstaboxCredentialsError extends Error {
@@ -128,10 +159,16 @@ export class FakeSandbox implements SandboxPort {
   readonly commands: Array<{ machineId: string; cmd: string; cwd?: string }> = [];
   readonly machines = new Map<string, SandboxMachine>();
   readonly snapshots = new Map<string, { id: string; machineId: string; name: string }>();
+  readonly snapshotRoots = new Map<string, string>();
   readonly leases = new Map<string, string>();
   readonly roots = new Map<string, string>();
+  readonly jobs = new Map<string, SandboxJob>();
+  /** When true, `start()` returns `{ status: 'started' }` and waits for `finish()`. */
+  holdStarts = false;
   private readonly rootJobs = new Map<string, Promise<string>>();
   private snapshotSeq = 0;
+  private jobSeq = 0;
+  private createSeq = 0;
 
   async ensureRunning(machineId: string): Promise<void> {
     const current = this.machines.get(machineId) ?? { id: machineId, state: 'stopped' };
@@ -165,7 +202,36 @@ export class FakeSandbox implements SandboxPort {
         : join(root, request.cwd)
       : root;
     await mkdir(cwd, { recursive: true });
-    return await runLocal(request.cmd, cwd, request.stdin, request.timeoutSeconds);
+    return await runLocal(request.cmd, cwd, request.stdin, request.timeoutSeconds, request.env);
+  }
+
+  /**
+   * Duplex hook: return `started` and keep the loop moving. Tests set
+   * `holdStarts` and call `finish(jobId)` so the result is an event, not a
+   * blocking `exec`.
+   */
+  async start(
+    machineId: string,
+    request: SandboxExecRequest,
+  ): Promise<SandboxStartResult | SandboxExecResult> {
+    this.jobSeq += 1;
+    const jobId = `job_${this.jobSeq}`;
+    const job: SandboxJob = { jobId, machineId, request, startedAt: Date.now() };
+    this.jobs.set(jobId, job);
+    if (this.holdStarts) return { status: 'started', jobId };
+    void this.exec(machineId, request).then((result) => {
+      job.result = result;
+    });
+    return { status: 'started', jobId };
+  }
+
+  finish(
+    jobId: string,
+    result: SandboxExecResult = { stdout: 'ok', stderr: '', exitCode: 0 },
+  ): void {
+    const job = this.jobs.get(jobId);
+    if (!job) throw new Error(`unknown job ${jobId}`);
+    job.result = result;
   }
 
   async getMachine(machineId: string): Promise<SandboxMachine> {
@@ -175,7 +241,11 @@ export class FakeSandbox implements SandboxPort {
   async createSnapshot(machineId: string, name: string): Promise<{ id: string }> {
     this.snapshotSeq += 1;
     const id = `snap_${this.snapshotSeq}`;
+    const root = await this.ensureRoot(machineId);
+    const snapDir = await mkdtemp(join(tmpdir(), `maka-snap-${id}-`));
+    await cp(root, snapDir, { recursive: true });
     this.snapshots.set(id, { id, machineId, name });
+    this.snapshotRoots.set(id, snapDir);
     return { id };
   }
 
@@ -199,6 +269,39 @@ export class FakeSandbox implements SandboxPort {
     const current = this.machines.get(machineId) ?? { id: machineId, state: 'running' };
     current.state = 'suspended';
     this.machines.set(machineId, current);
+  }
+
+  async createMachine(request: SandboxCreateMachineRequest): Promise<{ id: string }> {
+    this.createSeq += 1;
+    const id = request.name?.trim() || `box_${this.createSeq}`;
+    const root = await mkdtemp(join(tmpdir(), `maka-box-${id}-`));
+    if (request.snapshotId) {
+      const src = this.snapshotRoots.get(request.snapshotId);
+      if (!src) throw new Error(`unknown snapshot ${request.snapshotId}`);
+      await cp(src, root, { recursive: true });
+    }
+    this.roots.set(id, root);
+    this.rootJobs.set(id, Promise.resolve(root));
+    this.machines.set(id, {
+      id,
+      state: 'running',
+      deleteAfterSeconds: request.deleteAfterSeconds,
+    });
+    return { id };
+  }
+
+  async deleteMachine(machineId: string): Promise<void> {
+    this.gone(machineId);
+  }
+
+  /** Test helper: the box is gone. Next acquire must rebuild. */
+  gone(machineId: string): void {
+    this.machines.delete(machineId);
+    this.roots.delete(machineId);
+    this.rootJobs.delete(machineId);
+    for (const key of [...this.leases.keys()]) {
+      if (key.startsWith(`${machineId}:`)) this.leases.delete(key);
+    }
   }
 }
 
@@ -255,6 +358,7 @@ export class HttpSandbox implements SandboxPort {
       {
         cmd: request.cmd,
         ...(request.cwd ? { cwd: request.cwd } : {}),
+        ...(request.env ? { env: request.env } : {}),
         ...(request.stdin !== undefined ? { stdin: request.stdin } : {}),
         ...(request.timeoutSeconds !== undefined ? { timeoutSeconds: request.timeoutSeconds } : {}),
       },
@@ -558,11 +662,12 @@ function runLocal(
   cwd: string,
   stdin?: string,
   timeoutSeconds?: number,
+  extraEnv?: Record<string, string>,
 ): Promise<SandboxExecResult> {
   return new Promise((resolve) => {
     const child = spawn('/bin/sh', ['-c', cmd], {
       cwd,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0', ...extraEnv },
     });
     let stdout = '';
     let stderr = '';
