@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
+import { LayeredStore } from './layered-workspace.js';
 
 const run = promisify(execFile);
 
@@ -18,10 +19,14 @@ export interface WorkspaceSpec {
   forkOf?: string;
 }
 
+export type WorkspaceKind = 'git-clone' | 'layerfs' | 'layered';
+
 export interface WorkspaceHandle {
   id: string;
-  kind: 'git-clone' | 'layerfs';
+  kind: WorkspaceKind;
   dir: string | null;
+  /** LayeredStore only: how the writable layer is backed. */
+  layer?: 'overlay' | 'clone-shared';
 }
 
 export interface SnapshotRef {
@@ -29,7 +34,7 @@ export interface SnapshotRef {
 }
 
 export interface WorkspaceStore {
-  readonly kind: 'git-clone' | 'layerfs';
+  readonly kind: WorkspaceKind;
   prepare(spec: WorkspaceSpec): Promise<WorkspaceHandle>;
   snapshot(handle: WorkspaceHandle): Promise<SnapshotRef>;
   exportPatch(handle: WorkspaceHandle): Promise<string>;
@@ -170,8 +175,30 @@ export class LayerFsStore implements WorkspaceStore {
   }
 }
 
-export function createWorkspaceStore(options: { layerfs?: boolean } = {}): WorkspaceStore {
+export type WorkspaceMode = 'layered' | 'clone';
+
+/** `MAKA_CLOUD_WORKSPACE=layered` selects LayeredStore. Anything else is `clone`. */
+export function workspaceModeFromEnv(env: NodeJS.ProcessEnv = process.env): WorkspaceMode {
+  return env.MAKA_CLOUD_WORKSPACE?.trim().toLowerCase() === 'layered' ? 'layered' : 'clone';
+}
+
+export function createWorkspaceStore(
+  options: {
+    layerfs?: boolean;
+    mode?: WorkspaceMode;
+    /** Layered mode only: where bases, layers and snapshots live. */
+    root?: string;
+    /** Layered mode only: run once in each new base layer. */
+    installCommand?: string;
+  } = {},
+): WorkspaceStore {
   if (options.layerfs) return new LayerFsStore(true);
+  if (options.mode === 'layered') {
+    return new LayeredStore({
+      root: options.root ?? join(tmpdir(), 'maka-layered'),
+      installCommand: options.installCommand,
+    });
+  }
   return new GitCloneStore();
 }
 
@@ -179,7 +206,7 @@ export function createWorkspaceStore(options: { layerfs?: boolean } = {}): Works
  * Tree of the worktree including untracked files, on a temp index so HEAD
  * and the real index stay put. `rev-parse HEAD` only names the last commit.
  */
-async function writeWorktreeTree(dir: string): Promise<string> {
+export async function writeWorktreeTree(dir: string): Promise<string> {
   const index = join(dir, '.git', `maka-tree-${process.pid}-${Date.now()}`);
   const env = { ...process.env, GIT_INDEX_FILE: index };
   try {
