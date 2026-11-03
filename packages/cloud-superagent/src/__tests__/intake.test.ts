@@ -109,7 +109,9 @@ test('Fast Path drops bots, deny rules, and rate caps without a model call', asy
   // deny path matches the `file` field; put it on a review-like issue via extra field after normalize.
   const first = await agent.ingest(github(TENANT, 'fp-ok', 'issues', issuePayload('opened', 82)));
   assert.equal(first.result, 'spawned');
-  const second = await agent.ingest(github(TENANT, 'fp-rate', 'issues', issuePayload('opened', 83)));
+  const second = await agent.ingest(
+    github(TENANT, 'fp-rate', 'issues', issuePayload('opened', 83)),
+  );
   assert.equal(second.result, 'ignored');
   if (second.result !== 'ignored') return;
   assert.equal(second.reason, 'rate_cap');
@@ -166,7 +168,9 @@ test('subscribed-thread events never call the router model', async () => {
   );
   const judge = new ModelJudge(client);
   const { agent } = rig({ judge, sandbox: new FakeSandbox() });
-  const opened = await agent.ingest(github(TENANT, 'sub-open', 'issues', issuePayload('opened', 90)));
+  const opened = await agent.ingest(
+    github(TENANT, 'sub-open', 'issues', issuePayload('opened', 90)),
+  );
   assert.equal(opened.result, 'spawned');
   const afterOpen = client.prompts.length;
   assert.ok(afterOpen >= 1, 'cold start uses the Slow Path');
@@ -242,5 +246,8 @@ test('parseRouterCommand covers feedback, mode, and sensitivity', () => {
     decisionId: 'dec_1',
   });
   assert.deepEqual(parseRouterCommand('router mode observe'), { kind: 'mode', mode: 'observe' });
-  assert.deepEqual(parseRouterCommand('router sensitivity 0.7'), { kind: 'sensitivity', value: 0.7 });
+  assert.deepEqual(parseRouterCommand('router sensitivity 0.7'), {
+    kind: 'sensitivity',
+    value: 0.7,
+  });
 });

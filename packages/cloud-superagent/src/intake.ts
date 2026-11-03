@@ -246,7 +246,9 @@ export function patchRouterConfig(
   };
 }
 
-export function parseRouterCommand(text: string):
+export function parseRouterCommand(
+  text: string,
+):
   | { kind: 'feedback'; verdict: 'correct' | 'wrong'; decisionId: string; note?: string }
   | { kind: 'mode'; mode: RouterMode }
   | { kind: 'sensitivity'; value: number }
@@ -336,7 +338,11 @@ export function parseIntakeState(raw: string | undefined): IntakeState {
   try {
     const parsed = JSON.parse(raw) as Partial<IntakeState>;
     return {
-      metrics: { ...emptyIntakeMetrics(), ...parsed.metrics, byReason: parsed.metrics?.byReason ?? {} },
+      metrics: {
+        ...emptyIntakeMetrics(),
+        ...parsed.metrics,
+        byReason: parsed.metrics?.byReason ?? {},
+      },
       handledIds: Array.isArray(parsed.handledIds) ? parsed.handledIds : [],
       slowAt: Array.isArray(parsed.slowAt) ? parsed.slowAt : [],
     };

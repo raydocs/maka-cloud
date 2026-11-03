@@ -8,6 +8,15 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
+## 2026-11-02 18:10 MST — cursor/superagent-watchdog-duplex-51be
+
+- **PR:** [#476](https://github.com/raydocs/maka-cloud/pull/476)
+- **What:** biome-format the linearized Super-agent files CI rejected after the #475 merge (intake/scheduler/judge-client/runtime and their tests). No behavior change.
+- **Why:** `npm run format:check` failed on `88ffc5f36`; the merge brought long lines biome wraps.
+- **Tests:** `biome format` on the 9 reported files; `format:check` clean
+- **Live:** n/a
+- **Migrations / risk:** none
+
 ## 2026-11-02 17:51 MST — cursor/superagent-watchdog-duplex-51be — 7f0174146
 
 - **PR:** [#476](https://github.com/raydocs/maka-cloud/pull/476)
