@@ -8,6 +8,69 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
+## 2026-11-02 18:15 MST — cursor/superagent-review-verify-51be — fd8e03e85
+
+- **PR:** [#479](https://github.com/raydocs/maka-cloud/pull/479)
+- **What:** merge: learning-review format-fix into Super-agent review-verify. Biome format now clean. Keep every CHANGELOG entry, newest first.
+- **Why:** Carry the Linux format:check fix through the linearized stack without rebase/force-push.
+- **Tests:** 263 `@maka-cloud/superagent` tests passed after the merge
+- **Live:** n/a
+- **Migrations / risk:** none
+
+## 2026-11-02 18:15 MST — cursor/superagent-learning-review-51be — 352c8dd60
+
+- **PR:** [#478](https://github.com/raydocs/maka-cloud/pull/478)
+- **What:** merge: watchdog-duplex format-fix into Super-agent learning-review. Biome format now clean. Keep every CHANGELOG entry, newest first.
+- **Why:** Carry the Linux format:check fix through the linearized stack without rebase/force-push.
+- **Tests:** 245 `@maka-cloud/superagent` tests passed after the merge
+- **Live:** n/a
+- **Migrations / risk:** none
+
+## 2026-11-02 18:15 MST — cursor/superagent-watchdog-duplex-51be — dc007def4
+
+- **PR:** [#476](https://github.com/raydocs/maka-cloud/pull/476)
+- **What:** merge: origin/cursor/superagent-watchdog-duplex-51be format-fix (`9adc07fd2`) into the linearized watchdog-duplex. Same biome output as the stack format-fix. Keep every CHANGELOG entry, newest first.
+- **Why:** Remote landed a parallel format fix; git merge only, no rebase/force-push.
+- **Tests:** format:check clean; 233 tests already passed on the parent
+- **Live:** n/a
+- **Migrations / risk:** none
+
+## 2026-11-02 18:14 MST — cursor/superagent-watchdog-duplex-51be — 50f17de2c
+
+- **PR:** [#476](https://github.com/raydocs/maka-cloud/pull/476)
+- **What:** merge: byom-spec format-fix (including remote #474) into Super-agent watchdog-duplex. Biome format now clean. Keep every CHANGELOG entry, newest first.
+- **Why:** Carry the Linux format:check fix through the linearized stack without rebase/force-push.
+- **Tests:** 233 `@maka-cloud/superagent` tests passed after the merge
+- **Live:** n/a
+- **Migrations / risk:** none
+
+## 2026-11-02 18:14 MST — cursor/superagent-byom-spec-51be — ff22aa7d3
+
+- **PR:** [#475](https://github.com/raydocs/maka-cloud/pull/475)
+- **What:** merge: intake-merge format-fix (including remote #474) into Super-agent byom-spec. Biome format now clean. Keep every CHANGELOG entry, newest first.
+- **Why:** Carry the Linux format:check fix through the linearized stack without rebase/force-push.
+- **Tests:** 223 `@maka-cloud/superagent` tests passed after the merge
+- **Live:** n/a
+- **Migrations / risk:** none
+
+## 2026-11-02 18:14 MST — cursor/superagent-intake-merge-51be — 841f5bae1
+
+- **PR:** [#477](https://github.com/raydocs/maka-cloud/pull/477)
+- **What:** merge: scheduler-router format-fix (including remote #474) into Super-agent intake-merge. Biome format now clean. Keep every CHANGELOG entry, newest first.
+- **Why:** Carry the Linux format:check fix through the linearized stack without rebase/force-push.
+- **Tests:** 194 `@maka-cloud/superagent` tests passed after the merge
+- **Live:** n/a
+- **Migrations / risk:** none
+
+## 2026-11-02 18:14 MST — cursor/superagent-scheduler-router-51be — 2b177c2d8
+
+- **PR:** [#474](https://github.com/raydocs/maka-cloud/pull/474)
+- **What:** merge: origin/cursor/superagent-scheduler-router-51be format-fix (`5e8282663`) with the local format-fix. Same biome output; both CHANGELOG entries kept.
+- **Why:** Remote landed a parallel format fix; git merge only, no rebase/force-push.
+- **Tests:** format:check clean
+- **Live:** n/a
+- **Migrations / risk:** none
+
 ## 2026-11-02 18:11 MST — cursor/superagent-decisions-policy-51be — e861d144e
 
 - **PR:** [#480](https://github.com/raydocs/maka-cloud/pull/480)
@@ -59,6 +122,24 @@ a heading time is more than five minutes off that SHA's committer date.
 - **What:** merge: cursor/superagent-scheduler-router-51be format fix into Super-agent intake-merge. Biome format now clean. Keep every CHANGELOG entry, newest first. This branch is now a descendant of the formatted #474.
 - **Why:** Carry the Linux format:check fix through the linearized stack.
 - **Tests:** 194 `@maka-cloud/superagent` tests passed after the merge
+- **Live:** n/a
+- **Migrations / risk:** none
+
+## 2026-11-02 18:09 MST — cursor/superagent-scheduler-router-51be — 5e8282663
+
+- **PR:** [#474](https://github.com/raydocs/maka-cloud/pull/474)
+- **What:** Biome format the scheduler / intake / recall / runtime / WorkStatus files so CI `format:check` passes after the main merge.
+- **Why:** CI `test` on `227e6f9c6` failed at Check formatting (10 files).
+- **Tests:** biome check clean on the 10 files
+- **Live:** n/a
+- **Migrations / risk:** none. Format only.
+
+## 2026-11-02 18:09 MST — cursor/superagent-watchdog-duplex-51be — 9adc07fd2
+
+- **PR:** [#476](https://github.com/raydocs/maka-cloud/pull/476)
+- **What:** biome-format the linearized Super-agent files CI rejected after the #475 merge (intake/scheduler/judge-client/runtime and their tests). No behavior change.
+- **Why:** `npm run format:check` failed on `88ffc5f36`; the merge brought long lines biome wraps.
+- **Tests:** `biome format` on the 9 reported files; `format:check` clean
 - **Live:** n/a
 - **Migrations / risk:** none
 
