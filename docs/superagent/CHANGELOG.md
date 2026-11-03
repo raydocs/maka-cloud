@@ -8,6 +8,15 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
+## 2026-11-02 18:15 MST — cursor/superagent-watchdog-duplex-51be — dc007def4
+
+- **PR:** [#476](https://github.com/raydocs/maka-cloud/pull/476)
+- **What:** merge: origin/cursor/superagent-watchdog-duplex-51be format-fix (`9adc07fd2`) into the linearized watchdog-duplex. Same biome output as the stack format-fix. Keep every CHANGELOG entry, newest first.
+- **Why:** Remote landed a parallel format fix; git merge only, no rebase/force-push.
+- **Tests:** format:check clean; 233 tests already passed on the parent
+- **Live:** n/a
+- **Migrations / risk:** none
+
 ## 2026-11-02 18:14 MST — cursor/superagent-watchdog-duplex-51be — 50f17de2c
 
 - **PR:** [#476](https://github.com/raydocs/maka-cloud/pull/476)
