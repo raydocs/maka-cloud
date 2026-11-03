@@ -220,7 +220,6 @@ export type IngestResult =
       judgeCalls: number;
     };
 
-
 /** Collapse a worker inbox into one event. Approval wins over the latest row. */
 function handledIdsOf(event: NormalizedEvent): string[] {
   return [event.eventId, event.idempotencyKey];
@@ -321,7 +320,6 @@ export interface SuperagentOptions {
    */
   sharedBox?: boolean;
   boxPool?: BoxPool;
-
 }
 
 export class Superagent {
@@ -435,7 +433,6 @@ export class Superagent {
         });
       },
     );
-
   }
 
   ledger(tenantId: string) {
@@ -1994,7 +1991,6 @@ export class Superagent {
     return worker;
   }
 
-
   private async drain(tenantId: string, workerId: string): Promise<void> {
     const worker = this.store.worker(tenantId, workerId);
     if (!worker) return;
@@ -2569,7 +2565,6 @@ export class Superagent {
     }
     return 'ready';
   }
-
 
   private async suspendBox(worker: WorkerRecord): Promise<void> {
     if (this.boxPool) {
