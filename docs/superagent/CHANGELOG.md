@@ -8,7 +8,15 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
-## 2026-11-03 02:37 MST — superagent/harness-analysis
+## 2026-11-03 02:47 MST — superagent/harness-analysis
+
+- **What:** `tool-loading.test` reads the `load_tools` wire entry through a checked local instead of `tools[2]?.input_schema` cast to an object (biome `noUnsafeOptionalChaining`, which `npm run lint` in CI rejects). Correction to the entry below: its test split was `tool-loading.test` 14 and `prompt-cache.test` 5 (23 in all).
+- **Why:** keep the Linux `checks` lint step green.
+- **Tests:** `tool-loading.test` 14 passed; `biome lint` and `biome format` clean on `packages/cloud-superagent` and `docs/superagent`.
+- **Live:** n/a
+- **Migrations / risk:** none (test only).
+
+## 2026-11-03 02:37 MST — superagent/harness-analysis — b54de2302
 
 - **What:** on-demand tool loading and a shared-daemon bench. `tool-loading.ts`: a `ToolCatalog` (core tools plus a client-side `load_tools`), `firstTurnRequest` (turn one carries only core tools; the system prompt ends with a stable index of deferred tools), `toAnthropicTools` (every tool declared in `tools[]` from the first request, deferred ones with `defer_loading: true`, never `cache_control` on them), and `handleLoadTools` (exact names or a keyword query, at most 5; loaded tools go onto `appendedTools` through `loadTool`; the `tool_result` carries `tool_reference` blocks that the API expands inline). It throws if a load would break the cache prefix. `daemon-bench.ts` / `scripts/daemon-bench.mjs` (`npm run daemon-bench`): one `BoxDaemon` process hosting N worker sessions against N processes with one session each; RSS from `/proc` (macOS falls back to `ps -o rss`), cold start, attach, wake and wake-after-reap, p50/p95. Nothing calls either module yet; the coder loop wires the catalog in behind its own flag.
 - **Why:** turn one should not pay for every tool schema, and a mid-session load must not rewrite the `tools` bytes (Anthropic renders tools → system → messages, so a changed tools array drops the whole cache). The bench checks the per-session cost the box daemon is built on.

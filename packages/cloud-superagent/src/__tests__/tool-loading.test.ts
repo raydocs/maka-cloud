@@ -180,8 +180,10 @@ test('toAnthropicTools is byte-identical, defers correctly, never caches deferre
     assert.equal('cache_control' in tool, false);
   }
   for (const tool of tools) assert.ok(tool.input_schema);
+  const loadWire = tools[2];
+  assert.ok(loadWire);
   assert.equal(
-    (tools[2]?.input_schema as { additionalProperties: boolean }).additionalProperties,
+    (loadWire.input_schema as { additionalProperties: boolean }).additionalProperties,
     false,
   );
   // loading tools never changes the wire tools
