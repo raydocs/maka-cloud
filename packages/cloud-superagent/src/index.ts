@@ -208,17 +208,29 @@ export {
 } from './subjects.js';
 export {
   AUTHORITIES,
+  DEFAULT_AUTONOMY,
+  DEFAULT_BOX_DELETE_AFTER_SECONDS,
+  DEFAULT_IDLE_SUSPEND_MS,
+  DEFAULT_SHARED_BOX,
   DEFAULT_WATCHDOG,
+  DEFAULT_WORKERS_PER_BOX,
   emptyUsage,
   INTENSITIES,
   isLiveState,
+  isTenantBoxWorkerId,
   LIVE_STATES,
   observeMandate,
   actMandate,
   POLICY_VERSION,
+  TENANT_BOX_STATES,
+  tenantBoxAsWorker,
+  tenantBoxWorkerId,
   WORKER_STATES,
 } from './types.js';
 export type {
+  AutonomyIncident,
+  AutonomySettings,
+  AutonomyState,
   MemorySpill,
   AdmissionPolicy,
   ApprovalKind,
@@ -233,6 +245,8 @@ export type {
   OrgSecretRef,
   OrgSecretResult,
   JudgeLogEntry,
+  TenantBoxRecord,
+  TenantBoxState,
   TenantUsage,
   ProposedAction,
   RouterDecision,
@@ -310,6 +324,18 @@ export {
   type MetricsOptions,
   type MetricsReport,
 } from './metrics.js';
+export {
+  BoxCapError,
+  BoxPool,
+  BOX_NPM_CACHE,
+  BOX_TIMING_WORKERS,
+  BOX_WORK_ROOT,
+  boxSize,
+  evaluateTenantBox,
+  leaseHolder,
+  workerWorkDir,
+} from './box-pool.js';
+export { BoxDaemon, formatMiB, readVmRss, type BoxSession } from './box-daemon.js';
 export { evaluateWorker, reportsWaiting, runWatchdog } from './watchdog.js';
 export {
   DEFAULT_PHASE_MS,
@@ -349,6 +375,32 @@ export {
   runStatusCli,
   writeProgressResponse,
 } from './status.js';
+export {
+  AUTONOMY_LEDGER_KIND,
+  autonomyOf,
+  autonomyUsage,
+  compactHistory,
+  emptyAutonomy,
+  estimateTokens,
+  evaluateAutonomy,
+  observeStreamSilence,
+  observeTimeLimit,
+  observeToolCall,
+  observeTurn,
+} from './autonomy.js';
+export {
+  appendMessage,
+  buildRequest,
+  cacheHitShare,
+  diffPrefix,
+  loadTool,
+  recordCacheBreak,
+  setTail,
+  toAnthropicBody,
+  workerCacheHitShare,
+  type WorkerRequest,
+} from './prompt-cache.js';
+export { FakeProvider, runWorkerTurn } from './session.js';
 export {
   createWorkspaceStore,
   GitCloneStore,
