@@ -8,6 +8,60 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
+## 2026-11-02 18:10 MST — cursor/superagent-review-verify-51be — 14619a92c
+
+- **PR:** [#479](https://github.com/raydocs/maka-cloud/pull/479)
+- **What:** merge: cursor/superagent-learning-review-51be format fix into Super-agent review-verify. Biome format now clean. Keep every CHANGELOG entry, newest first.
+- **Why:** Carry the Linux format:check fix through the linearized stack.
+- **Tests:** 263 `@maka-cloud/superagent` tests passed after the merge
+- **Live:** n/a
+- **Migrations / risk:** none
+
+## 2026-11-02 18:10 MST — cursor/superagent-learning-review-51be — 25fb6cb27
+
+- **PR:** [#478](https://github.com/raydocs/maka-cloud/pull/478)
+- **What:** merge: cursor/superagent-watchdog-duplex-51be format fix into Super-agent learning-review. Biome format now clean. Keep every CHANGELOG entry, newest first.
+- **Why:** Carry the Linux format:check fix through the linearized stack.
+- **Tests:** 245 `@maka-cloud/superagent` tests passed after the merge
+- **Live:** n/a
+- **Migrations / risk:** none
+
+## 2026-11-02 18:10 MST — cursor/superagent-watchdog-duplex-51be — 710908087
+
+- **PR:** [#476](https://github.com/raydocs/maka-cloud/pull/476)
+- **What:** merge: cursor/superagent-byom-spec-51be format fix into Super-agent watchdog-duplex. Kept applyWatchdogCommand and preempt coalesce. Biome format now clean. Keep every CHANGELOG entry, newest first.
+- **Why:** Carry the Linux format:check fix through the linearized stack.
+- **Tests:** 233 `@maka-cloud/superagent` tests passed after the merge
+- **Live:** n/a
+- **Migrations / risk:** none
+
+## 2026-11-02 18:09 MST — cursor/superagent-byom-spec-51be — d6ada5292
+
+- **PR:** [#475](https://github.com/raydocs/maka-cloud/pull/475)
+- **What:** merge: cursor/superagent-intake-merge-51be format fix into Super-agent byom-spec. Biome format now clean. Keep every CHANGELOG entry, newest first. This branch is now a descendant of the formatted #477.
+- **Why:** Carry the Linux format:check fix through the linearized stack.
+- **Tests:** 223 `@maka-cloud/superagent` tests passed after the merge
+- **Live:** n/a
+- **Migrations / risk:** none
+
+## 2026-11-02 18:09 MST — cursor/superagent-intake-merge-51be — 5f6a49fae
+
+- **PR:** [#477](https://github.com/raydocs/maka-cloud/pull/477)
+- **What:** merge: cursor/superagent-scheduler-router-51be format fix into Super-agent intake-merge. Biome format now clean. Keep every CHANGELOG entry, newest first. This branch is now a descendant of the formatted #474.
+- **Why:** Carry the Linux format:check fix through the linearized stack.
+- **Tests:** 194 `@maka-cloud/superagent` tests passed after the merge
+- **Live:** n/a
+- **Migrations / risk:** none
+
+## 2026-11-02 18:08 MST — cursor/superagent-scheduler-router-51be — 3524bb276
+
+- **PR:** [#474](https://github.com/raydocs/maka-cloud/pull/474)
+- **What:** biome format on scheduler/intake/recall/runtime/judge-client and the queue-row web line so Linux `format:check` passes. No behavior change.
+- **Why:** CI `test` job failed on formatting after the main merge, not on tests.
+- **Tests:** `@maka-cloud/superagent` suite re-run after format
+- **Live:** n/a
+- **Migrations / risk:** none
+
 ## 2026-11-02 17:59 MST — cursor/superagent-decisions-policy-51be — 8df73c97e
 
 - **PR:** [#480](https://github.com/raydocs/maka-cloud/pull/480)

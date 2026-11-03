@@ -163,7 +163,10 @@ test('spawn admission caps concurrent Instabox boxes', async () => {
   assert.equal(second.reason, 'box_cap');
   assert.equal(second.state, 'queued');
   assert.equal(second.judgeCalls, 1);
-  assert.equal(agent.queueOf(TENANT).some((row) => row.reason === 'box_cap'), true);
+  assert.equal(
+    agent.queueOf(TENANT).some((row) => row.reason === 'box_cap'),
+    true,
+  );
 });
 
 test('spawn admission refuses work after the tenant spend cap', async () => {
