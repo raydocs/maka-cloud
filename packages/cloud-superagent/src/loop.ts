@@ -3,7 +3,10 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import type { EvidenceBlock } from './types.js';
+import { boxLoopWorkspace, type CoderLoopStats, type LoopWorkspace } from './coder-loop.js';
 import type {
+  AutonomyIncident,
+  AutonomyState,
   HandlerResult,
   NormalizedEvent,
   ProposedAction,
@@ -42,6 +45,11 @@ export interface CoderResult {
   files: Record<string, string>;
   summary: string;
   usage?: Partial<Usage>;
+  /** Multi-turn coder only: requests, tokens, cache and autonomy counters. */
+  loop?: CoderLoopStats;
+  autonomy?: AutonomyState;
+  /** A bound that stopped the coder loop; the runtime acts on it like any worker incident. */
+  incident?: AutonomyIncident;
 }
 
 export interface CoderPort {
@@ -51,6 +59,9 @@ export interface CoderPort {
     brief: string;
     event: NormalizedEvent;
     worker: WorkerRecord;
+    /** Box checkout for a multi-turn coder; single-shot coders ignore it. */
+    workspace?: LoopWorkspace;
+    testCommand?: string;
   }): Promise<CoderResult>;
 }
 
@@ -438,6 +449,7 @@ export class CodingLoopHandler implements WorkerHandler {
     }
 
     await enter('edit', `model step: ${brief.slice(0, 80)}`);
+    const testCommand = this.ports.testCommand ?? 'node add.test.js';
     const coded = await this.timed('edit', async () => {
       const snapshot = boxed ? await boxed.snapshot() : undefined;
       const result = await this.ports.coder.apply({
@@ -446,6 +458,7 @@ export class CodingLoopHandler implements WorkerHandler {
         brief,
         event,
         worker,
+        ...(boxed ? { workspace: boxLoopWorkspace(boxed), testCommand } : {}),
       });
       if (boxed) await boxed.writeFiles(result.files);
       return result;
@@ -463,8 +476,9 @@ export class CodingLoopHandler implements WorkerHandler {
         body: formatModelUsage(coded.usage),
       });
     }
-
-    const testCommand = this.ports.testCommand ?? 'node add.test.js';
+    if (coded.loop) {
+      evidence.push({ kind: 'step', label: 'coder-loop', body: formatCoderLoop(coded.loop) });
+    }
     const tested = await this.timed('test', async () => {
       if (boxed && this.ports.installCommand) {
         await enter('install', this.ports.installCommand);
@@ -526,6 +540,7 @@ export class CodingLoopHandler implements WorkerHandler {
         memory: `tests failed: ${tested.output.slice(0, 200)}`,
         plan: 'fix tests after failure',
         usage: coded.usage,
+        ...coderOutcome(coded),
         evidence,
         stepSignature: `test-fail:${event.type}`,
       };
@@ -539,6 +554,7 @@ export class CodingLoopHandler implements WorkerHandler {
         memory: 'box-tests ok',
         plan: 'box-tests',
         usage: coded.usage,
+        ...coderOutcome(coded),
         evidence,
         stepSignature: `box:${event.type}`,
       };
@@ -580,6 +596,7 @@ export class CodingLoopHandler implements WorkerHandler {
           memory: reviewed.feedback,
           plan: reviewed.waiting ? 'peer-review waiting on human' : 'fix peer-review findings',
           usage: coded.usage,
+          ...coderOutcome(coded),
           evidence,
           stepSignature: `peer-review:${reviewed.severity}`,
           progressUpdate: reviewed.waiting
@@ -629,6 +646,7 @@ export class CodingLoopHandler implements WorkerHandler {
       memory: `pushed ${pushed.sha} pr=${pr.url}`,
       plan: `open-pr ${pr.url}`,
       usage: coded.usage,
+      ...coderOutcome(coded),
       evidence,
       stepSignature: `loop:${event.type}:${pushed.sha}`,
       progressUpdate: {
@@ -786,6 +804,39 @@ function boxTest(
     ].join('\n'),
     command,
   };
+}
+
+/** Autonomy counters and a stopping incident from a multi-turn coder, for the HandlerResult. */
+function coderOutcome(coded: CoderResult): Pick<HandlerResult, 'autonomy' | 'incident'> {
+  return {
+    ...(coded.autonomy ? { autonomy: coded.autonomy } : {}),
+    ...(coded.incident ? { incident: coded.incident } : {}),
+  };
+}
+
+export function formatCoderLoop(loop: CoderLoopStats): string {
+  return [
+    `stop=${loop.stop}`,
+    `tests_passed=${loop.testsPassed}`,
+    `turns=${loop.turns}`,
+    `requests=${loop.modelRequests}`,
+    `tool_calls=${loop.toolCalls}`,
+    `input=${loop.inputTokens}`,
+    `output=${loop.outputTokens}`,
+    `cache_read=${loop.cacheReadTokens}`,
+    `cache_write=${loop.cacheWriteTokens}`,
+    `cache_hit=${loop.cacheHitShare.toFixed(3)}`,
+    `cache_breaks=${loop.cacheBreaks}`,
+    `nudges=${loop.nudges}`,
+    `stream_retries=${loop.streamRetries}`,
+    `provider_retries=${loop.providerRetries}`,
+    `compactions=${loop.compactions}`,
+    loop.toolsLoaded.length ? `loaded=${loop.toolsLoaded.join(',')}` : undefined,
+    loop.backgroundJobs ? `background_jobs=${loop.backgroundJobs}` : undefined,
+    `usd=${(loop.usdMicros / 1_000_000).toFixed(6)}`,
+  ]
+    .filter(Boolean)
+    .join(' ');
 }
 
 export function formatModelUsage(usage: {

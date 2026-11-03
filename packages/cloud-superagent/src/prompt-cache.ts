@@ -9,9 +9,15 @@ export interface ToolDef {
   inputSchema?: unknown;
 }
 
+/** One Messages API content block (text, tool_use, tool_result, thinking, ...), kept as sent. */
+export interface ContentBlock {
+  type: string;
+  [key: string]: unknown;
+}
+
 export interface RequestMessage {
   role: 'user' | 'assistant';
-  content: string;
+  content: string | ContentBlock[];
 }
 
 /**
@@ -50,7 +56,7 @@ export function buildRequest(input: {
   return {
     system: input.system ?? '',
     tools: (input.tools ?? []).map(cloneTool),
-    messages: (input.messages ?? []).map((row) => ({ ...row })),
+    messages: (input.messages ?? []).map(cloneMessage),
     appendedTools: (input.appendedTools ?? []).map(cloneTool),
     tail: { ...(input.tail ?? {}) },
     endpoint: input.endpoint ?? 'https://api.anthropic.com/v1/messages',
@@ -67,7 +73,7 @@ export function loadTool(prev: WorkerRequest, tool: ToolDef): WorkerRequest {
 
 export function appendMessage(prev: WorkerRequest, message: RequestMessage): WorkerRequest {
   const next = cloneRequest(prev);
-  next.messages.push({ ...message });
+  next.messages.push(cloneMessage(message));
   return next;
 }
 
@@ -159,9 +165,10 @@ export function toAnthropicBody(
   request: WorkerRequest,
   extras: { model: string; maxTokens: number } = { model: 'claude-haiku-5-5', maxTokens: 4096 },
 ): Record<string, unknown> {
-  const messages: Array<{ role: string; content: string }> = request.messages.map((row) => ({
-    ...row,
-  }));
+  const messages: Array<{ role: string; content: RequestMessage['content'] }> =
+    request.messages.map((row) => ({
+      ...row,
+    }));
   if (request.appendedTools.length > 0) {
     messages.push({
       role: 'user',
@@ -191,14 +198,48 @@ export function toAnthropicBody(
   };
 }
 
+/**
+ * Messages body for a multi-turn tool loop. `wireTools` is the frozen `tools`
+ * param for the whole session (deferred tools carry `defer_loading`), so tools
+ * loaded mid-session arrive as `tool_reference` blocks inside messages, not as
+ * a rewritten tools array. One breakpoint on the system block caches tools +
+ * system; top-level `cache_control` caches the growing conversation tail.
+ */
+export function toAnthropicLoopBody(
+  request: WorkerRequest,
+  extras: { model: string; maxTokens: number; wireTools: ReadonlyArray<Record<string, unknown>> },
+): Record<string, unknown> {
+  return {
+    model: extras.model,
+    max_tokens: extras.maxTokens,
+    stream: true,
+    cache_control: { type: 'ephemeral' },
+    system: [{ type: 'text', text: request.system, cache_control: { type: 'ephemeral' } }],
+    tools: extras.wireTools,
+    messages: request.messages.map((row) => ({
+      role: row.role,
+      content:
+        typeof row.content === 'string' ? row.content : row.content.map((block) => ({ ...block })),
+    })),
+  };
+}
+
 export function cloneRequest(request: WorkerRequest): WorkerRequest {
   return {
     system: request.system,
     tools: request.tools.map(cloneTool),
-    messages: request.messages.map((row) => ({ ...row })),
+    messages: request.messages.map(cloneMessage),
     appendedTools: request.appendedTools.map(cloneTool),
     tail: { ...request.tail },
     endpoint: request.endpoint,
+  };
+}
+
+function cloneMessage(row: RequestMessage): RequestMessage {
+  return {
+    role: row.role,
+    content:
+      typeof row.content === 'string' ? row.content : row.content.map((block) => ({ ...block })),
   };
 }
 

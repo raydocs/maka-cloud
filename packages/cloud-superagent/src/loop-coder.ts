@@ -1,7 +1,9 @@
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { z } from 'zod';
-import { CODER_MAX_TOKENS, createJudgeClientFromEnv } from './judge-client.js';
+import { AnthropicLoopModel } from './coder-model.js';
+import { ToolLoopCoder, type LoopTool } from './coder-loop.js';
+import { CODER_MAX_TOKENS, DEFAULT_JUDGE_MODEL, createJudgeClientFromEnv } from './judge-client.js';
 import { FakeCoder, type CoderPort, type CoderResult } from './loop.js';
 import type { ModelCompletion } from './router.js';
 import type { NormalizedEvent, WorkerRecord } from './types.js';
@@ -89,17 +91,43 @@ export function parseCoderJson(
   return data.data;
 }
 
+/**
+ * `MAKA_CLOUD_CODER_LOOP=1` (default off) swaps the single-request coder for
+ * the multi-turn tool loop; the single-request coder stays its fallback when
+ * there is no box workspace. `MAKA_CLOUD_TOOL_LOADING=1` starts the loop with
+ * core tools only. `MAKA_CLOUD_CODER_MODEL` picks the loop model.
+ */
 export function createCoderFromEnv(
   env: NodeJS.ProcessEnv = process.env,
   fetchImpl: typeof fetch = fetch,
-): { coder: CoderPort; kind: 'fake' | 'model' } {
+  extras: { extraTools?: readonly LoopTool[] } = {},
+): { coder: CoderPort; kind: 'fake' | 'model' | 'model-loop' } {
   const live = env.MAKA_CLOUD_LOOP_LIVE === '1';
-  const hasKey = Boolean(env.ANTHROPIC_API_KEY?.trim() || env.MAKA_CLOUD_JUDGE_API_KEY?.trim());
-  if (!live || !hasKey) return { coder: new FakeCoder(), kind: 'fake' };
+  const apiKey = env.ANTHROPIC_API_KEY?.trim() || env.MAKA_CLOUD_JUDGE_API_KEY?.trim() || '';
+  if (!live || !apiKey) return { coder: new FakeCoder(), kind: 'fake' };
   const client = createJudgeClientFromEnv(env, fetchImpl, { maxTokens: CODER_MAX_TOKENS });
   const detailed = client.completeDetailed?.bind(client);
   if (!detailed) throw new Error('Coder needs a judge client that implements completeDetailed.');
-  return { coder: new HttpCoder((prompt) => detailed(prompt)), kind: 'model' };
+  const single = new HttpCoder((prompt) => detailed(prompt));
+  if (env.MAKA_CLOUD_CODER_LOOP !== '1') return { coder: single, kind: 'model' };
+  const model = new AnthropicLoopModel({
+    apiKey,
+    baseUrl: env.ANTHROPIC_BASE_URL?.trim() || env.MAKA_CLOUD_JUDGE_BASE_URL?.trim() || undefined,
+    model:
+      env.MAKA_CLOUD_CODER_MODEL?.trim() ||
+      env.MAKA_CLOUD_JUDGE_MODEL?.trim() ||
+      DEFAULT_JUDGE_MODEL,
+    fetch: fetchImpl,
+  });
+  return {
+    coder: new ToolLoopCoder({
+      model,
+      fallback: single,
+      toolLoading: env.MAKA_CLOUD_TOOL_LOADING === '1',
+      ...(extras.extraTools ? { extraTools: extras.extraTools } : {}),
+    }),
+    kind: 'model-loop',
+  };
 }
 
 async function snapshotFiles(dir: string): Promise<string> {

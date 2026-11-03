@@ -514,6 +514,36 @@ export {
 } from './loop-box.js';
 export { HttpCoder, createCoderFromEnv, parseCoderJson } from './loop-coder.js';
 export {
+  CODER_LOOP_SYSTEM,
+  DEFAULT_CORE_TOOLS,
+  ToolLoopCoder,
+  boxLoopWorkspace,
+  builtinTools,
+  sandboxLoopWorkspace,
+  type CoderLoopStats,
+  type CoderLoopStop,
+  type LoopTool,
+  type LoopToolContext,
+  type LoopToolOutput,
+  type LoopWorkspace,
+  type ToolLoopOptions,
+} from './coder-loop.js';
+export {
+  AnthropicLoopModel,
+  FakeLoopModel,
+  LOOP_PRICES,
+  LoopProviderError,
+  StreamAccumulator,
+  StreamSilenceError,
+  loopUsdMicros,
+  textTurn,
+  toolTurn,
+  type FakeLoopStep,
+  type LoopModel,
+  type LoopModelTurn,
+  type LoopUsage,
+} from './coder-model.js';
+export {
   GITHUB_TOKEN_ENV,
   LOOP_REPO_ENV,
   LOOP_SEED_ENV,
@@ -734,6 +764,7 @@ export {
   workerCacheHitShare,
   type WorkerRequest,
 } from './prompt-cache.js';
+export { toAnthropicLoopBody, type ContentBlock } from './prompt-cache.js';
 export { FakeProvider, runWorkerTurn } from './session.js';
 export {
   createWorkspaceStore,
