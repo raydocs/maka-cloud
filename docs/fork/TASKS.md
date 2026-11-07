@@ -629,7 +629,7 @@ Depends on: T6, T8, T23, T28.
 - Tests with a fake instabox and a fake GitHub: idle pause, no pause while a
   task runs, resume on a message, the ship path, and the bounded CI fix loop.
 
-## T27: the user's own Claude and ChatGPT plans, on many boxes
+## T27: the user's own ChatGPT plan (and, once Anthropic approves, Claude plan), on many boxes
 
 Depends on: T6, T21, T25, T26.
 
@@ -644,7 +644,12 @@ for, and we pay only for boxes.
   was linked, when it expires, and Unlink. The conductor, planner, verifier
   and helpers keep using the gateway with its reservations; only the coding
   runners use a linked plan.
-- Claude plan: the user runs `claude setup-token` on their own computer
+- Owner decision (2026-10-23): build the ChatGPT plan path now. The Claude
+  plan path below waits for written approval from Anthropic, whose terms do
+  not let third-party products offer claude.ai login or plan usage without
+  it; until then Claude runs on API keys (ours through the gateway, or the
+  user's own key). Ask Anthropic before building it.
+- Claude plan (blocked on Anthropic's approval): the user runs `claude setup-token` on their own computer
   (Anthropic's own sign-in) and pastes the one-year token, the way
   Anthropic's devcontainer docs describe for a Codespaces secret. Store it
   encrypted at rest per invite, never log it, never send it to the browser
