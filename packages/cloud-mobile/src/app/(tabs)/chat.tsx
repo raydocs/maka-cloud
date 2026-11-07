@@ -63,6 +63,7 @@ import { type Idea, startersFor, useProjects } from '@/lib/ideas';
 import { keepLive } from '@/lib/live';
 import { readSecure, removeSecure, writeDurableSecure } from '@/lib/secure';
 import { useWorkspace } from '@/lib/session';
+import { useTaskLink } from '@/lib/taskLink';
 import {
   STEER_MAX_CHARS,
   type Steer,
@@ -86,12 +87,14 @@ type Message = ConversationState['messages'][number];
 export default function Chat() {
   const { conversations, chosen } = useWorkspace();
   const selected = conversations.find((c) => c.conversationId === chosen);
+  const link = useTaskLink();
   return (
     <Screen>
       {selected ? (
         <ConversationScreen
           key={selected.conversationId}
           conversationId={selected.conversationId}
+          link={link}
         />
       ) : (
         <NewConversation />
@@ -627,7 +630,14 @@ const secureStore = { get: readSecure, set: writeDurableSecure, remove: removeSe
 
 const quietlyLive = (task: TaskView) => !TERMINAL.has(task.state) && task.state !== 'paused';
 
-function ConversationScreen({ conversationId }: { conversationId: string }) {
+function ConversationScreen({
+  conversationId,
+  link,
+}: {
+  conversationId: string;
+  /** A task a notification or a link opened, to bring into view once it is in this conversation. */
+  link: ReturnType<typeof useTaskLink>;
+}) {
   const { client, conversations } = useWorkspace();
   const { t: say, tx } = useT();
   const reduce = useReduceMotion();
@@ -891,6 +901,14 @@ function ConversationScreen({ conversationId }: { conversationId: string }) {
     atEnd.current = false;
     scroll.current?.scrollToIndex({ index, animated: !reduce, viewPosition: 0.3 });
   };
+
+  // Once the linked task is in the timeline.
+  useEffect(() => {
+    const { focus } = link;
+    if (focus === undefined || !timeline.some((item) => item.key === `task-${focus}`)) return;
+    goToTask(focus);
+    link.done();
+  }, [link.focus, timeline.length]);
 
   const renderItem = ({ item }: { item: ChatItem }) => {
     switch (item.type) {

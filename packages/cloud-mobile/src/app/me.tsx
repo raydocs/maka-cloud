@@ -10,6 +10,7 @@ import { useRouter } from 'expo-router';
 import { useCallback, useEffect, useState } from 'react';
 import { ScrollView, View } from 'react-native';
 import { Devices } from '@/components/Devices';
+import { NotificationsCard } from '@/components/Notifications';
 import { ButtonRow, Card, PillButton, QuietButton, Screen, T } from '@/components/ui';
 import { type ModeChoice, useAppearance } from '@/lib/appearance';
 import { type Language, useT } from '@/lib/i18n';
@@ -251,6 +252,7 @@ export default function Me() {
           </ButtonRow>
         </Card>
         <LanguagePicker />
+        <NotificationsCard place="me" />
         <Memory />
         <KeptApprovals />
         <Devices client={client} />

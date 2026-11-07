@@ -6,6 +6,7 @@ import SectionsLayout from '@/app/(tabs)/_layout';
 
 // The layout's landing (open the latest conversation after signing in) needs a session; not here.
 jest.mock('@/lib/landing', () => ({ useLanding: () => {} }));
+jest.mock('@/lib/pushRouting', () => ({ usePushRouting: () => {} }));
 
 const root = join(__dirname, '..');
 

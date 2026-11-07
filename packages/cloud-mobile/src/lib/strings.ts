@@ -382,6 +382,22 @@ export const EN = {
   'idea.fix': 'Fix the failing tests in {repo}',
   'idea.review': 'Review the open pull requests in {repo}',
   'idea.continue': 'Pick up “{title}”',
+  'push.title': 'Notifications',
+  'push.body':
+    'Get a notification when {name} needs a decision from you or a result is ready. It says only that; the details stay in the app, and you approve things only in the app.',
+  'push.turnOn': 'Turn on notifications',
+  'push.notNow': 'Not now',
+  'push.turnOff': 'Turn off',
+  'push.on': 'Notifications are on for this phone.',
+  'push.declined': 'Notifications are off for this phone.',
+  'push.denied':
+    'Notifications are off in the phone’s settings. Turn them on there to hear from {name}.',
+  'push.unavailable': 'This server or this version of the app does not send notifications yet.',
+  'push.failed': 'Notifications could not be turned on. Try again.',
+  'push.action.gotIt': 'Got it',
+  'push.action.notNow': 'Not now',
+  'push.action.open': 'Open',
+  'home.linked': 'The decision you opened',
 } as const;
 
 export type Key = keyof typeof EN;
@@ -756,6 +772,21 @@ export const ZH: Record<Key, string> = {
   'idea.fix': '修复 {repo} 里失败的测试',
   'idea.review': '审查 {repo} 里未合并的拉取请求',
   'idea.continue': '继续“{title}”',
+  'push.title': '通知',
+  'push.body':
+    '{name} 需要你做决定或结果已就绪时通知你。通知只说这些，详情留在 App 里；批准只能在 App 里进行。',
+  'push.turnOn': '打开通知',
+  'push.notNow': '以后再说',
+  'push.turnOff': '关闭',
+  'push.on': '这部手机已打开通知。',
+  'push.declined': '这部手机的通知已关闭。',
+  'push.denied': '手机设置里关闭了通知。在设置里打开，才能收到 {name} 的通知。',
+  'push.unavailable': '这个服务器或这个版本的 App 还不能发送通知。',
+  'push.failed': '没能打开通知，请重试。',
+  'push.action.gotIt': '知道了',
+  'push.action.notNow': '以后再说',
+  'push.action.open': '打开',
+  'home.linked': '你打开的决定',
 };
 
 /**
