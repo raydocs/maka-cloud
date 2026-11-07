@@ -60,6 +60,7 @@ import {
 import { createHttpMailer } from './mail.js';
 import {
   type CloudServerOptions,
+  type ExpoTransport,
   InviteStore,
   type JwksSource,
   type PushTransport,
@@ -119,6 +120,8 @@ export interface StackDependencies {
   spendAlertTiming?: { pollMs?: number; now?: () => number };
   /** Replaces the Web Push transport, for tests; the product sends over HTTPS. */
   pushTransport?: PushTransport;
+  /** Replaces the Expo push service, for tests; the product sends over HTTPS. */
+  expoTransport?: ExpoTransport;
   /** Replaces the mail service's HTTP call and the providers' key fetch, for tests; the product calls them over HTTPS. */
   mailFetch?: typeof fetch;
   jwks?: JwksSource;
@@ -495,6 +498,18 @@ export async function startStack(
           },
       },
       ...(push === undefined ? {} : { push }),
+      // Phone push is on with MAKA_CLOUD_EXPO_PUSH=1. The access token, when the Expo project needs
+      // one, is read here from the environment and goes to the server only.
+      ...(config.nativePushSet
+        ? {
+            nativePush: {
+              ...(env.MAKA_CLOUD_EXPO_ACCESS_TOKEN?.trim()
+                ? { accessToken: env.MAKA_CLOUD_EXPO_ACCESS_TOKEN.trim() }
+                : {}),
+              ...(dependencies.expoTransport ? { transport: dependencies.expoTransport } : {}),
+            },
+          }
+        : {}),
       ...(signInOn ? { auth } : {}),
       ...(duties === undefined ? {} : { duties: duties.service }),
       dbPath: config.dbPath,

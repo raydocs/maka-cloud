@@ -68,15 +68,23 @@ export interface InboxSetup {
 /**
  * Starts the supervisor inside the server. It reads every conversation's feed, checks finished
  * work with a model of another vendor than the runner, keeps the inbox, and tells the human
- * through a notice in the conversation. It holds no orchestrator token.
+ * through a notice in the conversation and, when phone push is on, on their phones. It holds no
+ * orchestrator token.
  */
 export async function startInbox(setup: InboxSetup, context: InboxContext): Promise<InboxService> {
   const { parts, conductor } = context;
   const override = setup.override ?? {};
+  const notice = conductorNotifier(conductor, parts.languageOf);
   const host: SupervisorHost = {
     feed: parts.feed,
     publish: (event) => parts.publish(event),
-    notifier: conductorNotifier(conductor, parts.languageOf),
+    notifier: {
+      // The phones first (ids and fixed words only), so a notice that fails does not hold them back.
+      interrupt: (interrupt) => {
+        parts.notifyDevices(interrupt.items);
+        return notice.interrupt(interrupt);
+      },
+    },
     answers: parts.answers,
     messages: parts.messages,
     ...(setup.proposals === undefined ? {} : { proposals: setup.proposals }),

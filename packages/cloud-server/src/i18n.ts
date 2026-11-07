@@ -45,6 +45,8 @@ export interface Messages {
   push: {
     taskFinished: { title: string; body: string };
     spendAlert: { title: string; body: string };
+    /** The phone's notice that an inbox item waits for the person: fixed words, never the item's. */
+    decisionWaiting: { title: string; body: string };
   };
   note: {
     pullRequestMerged: (repo: string, number: number, checks: Checks) => string;
@@ -88,6 +90,7 @@ const en: Messages = {
       body: 'Open Maka to review the result.',
     },
     spendAlert: { title: 'Spending is high today', body: 'Open Maka to see where it went.' },
+    decisionWaiting: { title: 'A decision is waiting', body: 'Open Maka to answer it.' },
   },
   note: {
     pullRequestMerged: (repo, number, checks) =>
@@ -150,6 +153,7 @@ const zhHans: Messages = {
   push: {
     taskFinished: { title: '后台任务已完成', body: '打开 Maka 查看结果。' },
     spendAlert: { title: '今天的花费偏高', body: '打开 Maka 查看明细。' },
+    decisionWaiting: { title: '有一项决定在等你', body: '打开 Maka 作答。' },
   },
   note: {
     pullRequestMerged: (repo, number, checks) =>
@@ -211,6 +215,7 @@ const zhHant: Messages = {
   push: {
     taskFinished: { title: '背景任務已完成', body: '開啟 Maka 查看結果。' },
     spendAlert: { title: '今天的花費偏高', body: '開啟 Maka 查看明細。' },
+    decisionWaiting: { title: '有一項決定在等你', body: '開啟 Maka 作答。' },
   },
   note: {
     pullRequestMerged: (repo, number, checks) =>

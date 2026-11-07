@@ -69,6 +69,8 @@ interface Stack {
   verifier: { requests: Array<Parameters<GenerateText>[0]>; reply: (claimIds: string[]) => string };
   fetched: string[];
   page: { text: string };
+  /** What the phones were told through the (fake) Expo push service. */
+  phone: Array<{ to: string; title: string; body: string; data: Record<string, string> }>;
   conversationId: string;
   runId: string | undefined;
   api(path: string, init?: { method?: string; body?: unknown }): Promise<Response>;
@@ -93,6 +95,7 @@ async function startStack(
     warnings: [],
     fetched: [],
     page: { text: `<html><body><p>${QUOTE}</p></body></html>` },
+    phone: [],
     conversationId: '',
     runId: undefined,
   } as unknown as Stack;
@@ -151,6 +154,15 @@ async function startStack(
       },
     },
     onWarning: (message: string, detail?: unknown) => stack.warnings.push({ message, detail }),
+    nativePush: {
+      transport: {
+        send: async (messages: Stack['phone']) => {
+          stack.phone.push(...messages);
+          return messages.map(() => ({ status: 'ok' as const, id: 'ticket' }));
+        },
+        receipts: async () => ({}),
+      },
+    },
     supervisor: (
       context: Parameters<NonNullable<Parameters<typeof startCloud>[0]['supervisor']>>[0],
     ) =>
@@ -354,9 +366,14 @@ test('a finished research task is checked against its report and the cited page,
   assert.deepEqual(stack.warnings, []);
 });
 
-test('a quote that is not in the cited page fails the task, nobody pays for a model, and the human is told in the conversation', async (t) => {
+test('a quote that is not in the cited page fails the task, nobody pays for a model, and the human is told in the conversation and on the phone', async (t) => {
   const stack = await startStack(t);
   stack.page.text = 'Something else entirely, nothing about any tunnel.';
+  const phone = 'ExponentPushToken[inbox-e2e-phone]';
+  const registered = await stack.api('/v1/push/devices', {
+    body: { token: phone, platform: 'ios' },
+  });
+  assert.equal(registered.status, 201);
   await runTask(stack);
   const events = await readEvents(
     stack,
@@ -379,6 +396,16 @@ test('a quote that is not in the cited page fails the task, nobody pays for a mo
     (e) => e.event === 'conductor.notice' && /Needs you/.test(String(e.data.text)),
   );
   assert.doesNotMatch(String(notice?.data.text), VENDOR_NAMES);
+  // The phone is told the item waits, by its id and fixed words; never what the check found.
+  const needed = () => stack.phone.filter((m) => m.data.type === 'inbox.needed');
+  for (let i = 0; i < 100 && needed().length === 0; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.deepEqual(
+    needed().map((m) => [m.to, m.data.itemId, m.data.kind, m.title]),
+    [[phone, failed?.data.itemId, 'decision', 'A decision is waiting']],
+  );
+  assert.doesNotMatch(JSON.stringify(stack.phone), /tunnel|1994/u);
 });
 
 test('the human accepts a failed check over HTTP and a repeat is a duplicate; a stale hash is refused with the item as it is now', async (t) => {
