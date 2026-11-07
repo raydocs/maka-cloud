@@ -1,9 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import {
-  InstaboxApiError,
-  type InstaboxClient,
-  type InstaboxExecResult,
-} from '@maka-cloud/instabox';
+import { InstaboxApiError, type SandboxApi, type InstaboxExecResult } from '@maka-cloud/instabox';
 import { scrubSecretShapes } from '@maka-cloud/orchestrator';
 import { asAgentUser, PREPARE_AGENT_SCRIPT } from './agent-user.js';
 import {
@@ -123,7 +119,7 @@ function isAsleep(error: unknown): boolean {
 /** The scripts of this package run against one sandbox. No state beyond ids. */
 export class RemoteMachine {
   constructor(
-    readonly client: InstaboxClient,
+    readonly client: SandboxApi,
     readonly machineId: string,
     /** Directory in the sandbox that holds one folder per task. */
     readonly root: string,
