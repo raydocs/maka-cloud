@@ -170,6 +170,20 @@ test('a task with no picture and no diff is a sentence with no empty frame', () 
   expect(reads).toEqual([]);
 });
 
+test('a task the runner took no screenshots of says why, beside the changes', () => {
+  const { client } = fakeClient();
+  const manifest = {
+    summary: 'Verified change to acme/calc: add() adds.',
+    done: ['no screenshots: no page was named to look at'],
+    notDone: [],
+    confidence: 'high' as const,
+    knownIssues: [],
+  };
+  render(<DeliveryCard client={client} task={task({ manifest })} listings={[diff]} sources={[]} />);
+  expect(screen.getByText('No screenshots: no page was named to look at')).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Open large: the changes' })).toBeTruthy();
+});
+
 test('a picture that cannot be read leaves the sentence and says so', async () => {
   const { client } = fakeClient({});
   render(<DeliveryCard client={client} task={task()} listings={[shot]} sources={[]} />);

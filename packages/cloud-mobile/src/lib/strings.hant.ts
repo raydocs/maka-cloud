@@ -160,6 +160,7 @@ export const ZH_HANT: Record<Key, string> = {
   'delivery.openFile': '開啟 {name}',
   'delivery.openLarge': '放大檢視：{name}',
   'delivery.picture': '圖片',
+  'delivery.noPicture': '沒有截圖：{reason}',
   'delivery.viewer': '檢視：{title}',
   'delivery.sources': '來源',
   'delivery.sourcesCount': '來源（{count}）',

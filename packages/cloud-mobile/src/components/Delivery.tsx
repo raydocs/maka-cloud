@@ -422,6 +422,9 @@ export function DeliveryCard({
         </View>
       ) : null}
       {caption && !views && !(shot && proofUri) ? <T kind="muted">{caption}</T> : null}
+      {model.noPicture ? (
+        <T kind="muted">{say('delivery.noPicture', { reason: model.noPicture })}</T>
+      ) : null}
       {(failed || proofFailed) && <T kind="muted">{say('delivery.pictureFailed')}</T>}
       {(files.length > 0 || (diff && !views && !shot)) && (
         <View>

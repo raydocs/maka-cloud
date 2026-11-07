@@ -1,4 +1,5 @@
 import { AGENT_READS_DIR, type CodingTask, REPRO_FILE, type Vendor } from './task.js';
+import { PREVIEW_FILE } from './viewport.js';
 
 /** What the second vendor is told about the first one's attempt (`failure_brief.json`). */
 export interface FailureBrief {
@@ -53,6 +54,12 @@ export function agentBrief(input: {
       '',
       `When you finish, the runner checks the work itself, outside your session: \`${task.testCommand}\` must pass, and the reproduction test must pass with your change and fail when your changes outside its files are reverted. What you report is not taken as proof.`,
     ].join('\n'),
+    '## If the change shows on a web page',
+    [
+      `Also write \`${dir}/${PREVIEW_FILE}\` as \`{"command": "...", "port": 5173, "paths": ["/"]}\`: \`command\` starts the app from the repository root and keeps it running on 127.0.0.1 at \`port\` (a dev or preview server, with what it needs installed), \`paths\` are up to 3 pages that show the change.`,
+      'The runner then opens those pages itself in a headless browser at 1280 and 390 px wide, with your change and without it, and shows the screenshots to the owner with what it found (horizontal overflow, console errors, controls under 44 px on the phone). It does not fail the task.',
+      'Leave it out when nothing visible changes.',
+    ].join(' '),
     '## Rules',
     NO_TAMPERING,
   ];
