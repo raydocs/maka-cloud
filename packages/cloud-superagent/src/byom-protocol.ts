@@ -1,7 +1,6 @@
 /**
  * BYOM wire protocol. The device always dials out (no inbound ports).
  * The device daemon package was removed (it was not wired in); recover it from git history if BYOM returns.
- * file: same `v: 1` envelopes and field names.
  */
 
 export const BYOM_PROTOCOL_VERSION = 1 as const;
