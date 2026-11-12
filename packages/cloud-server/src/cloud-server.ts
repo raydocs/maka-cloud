@@ -292,6 +292,12 @@ export interface CloudServerOptions {
   };
   /** Reports things that must not stop the server: a failed sweep, a handler that threw. */
   onWarning?: (message: string, detail?: unknown) => void;
+  /** Super-agent live progress. Without it `/v1/superagent/progress` is 404. */
+  progress?: {
+    snapshot(owner: string): unknown;
+    ask?(owner: string, text: string): Promise<unknown> | unknown;
+    instruct?(owner: string, text: string): Promise<unknown> | unknown;
+  };
 }
 
 /** What an in-process caller starts a conversation with. Public routes cannot send any of it. */
@@ -679,6 +685,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
     const homeStore = new HomeStore(db);
     const api = new PublicApi({
       ...(options.quota ? { quota: options.quota } : {}),
+      ...(options.progress ? { progress: options.progress } : {}),
       db,
       memory,
       invites,

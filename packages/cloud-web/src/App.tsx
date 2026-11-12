@@ -67,6 +67,7 @@ import {
   clearSteerReceipts,
   RunningClock,
   SteerComposer,
+  SuperagentProgress,
   WaitingJump,
   ConversationChoices,
   ApprovalReceipt,
@@ -625,6 +626,7 @@ export function ConversationView({
           </p>
         )}
         <aside className="work-panel" aria-label={t('Work and results')}>
+          <SuperagentProgress client={client} />
           {(running > 0 || total.usd !== undefined) && (
             <section className="card section-card work-summary" aria-label={t('Running')}>
               <div className="section-heading">

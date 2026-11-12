@@ -745,7 +745,13 @@ test('a running stack backs itself up: the copy restores, holds no key and no pu
   const done = await stack.backup();
   const layout = backupLayoutOf(dataDir);
   const manifest = await verifyBackup(done.path, layout);
-  for (const name of ['cloud.db', 'invites.db', 'supervisor.db', 'gateway-spend.db']) {
+  for (const name of [
+    'cloud.db',
+    'invites.db',
+    'supervisor.db',
+    'gateway-spend.db',
+    'superagent.db',
+  ]) {
     assert.ok(
       manifest.files.some((file) => file.path === name),
       `${name} is in the backup`,
@@ -1966,4 +1972,127 @@ test('a pull request a task opened is followed: green is a quiet update in its c
   );
   // The quiet update's line reached the conversation through the conductor without a hitch.
   assert.deepEqual(warnings, []);
+});
+
+test('the stack always starts Super-agent in process and a stalled worker is a stuck card', async (t) => {
+  let now = 1_700_000_000_000;
+  const { stack, inviteId } = await start(t, undefined, {}, true, {
+    superagent: {
+      clock: () => now,
+      tickMs: 0,
+      admission: { allowActors: ['alice'] },
+      handler: {
+        async handle() {
+          return { progress: false, plan: 'spin on login.ts' };
+        },
+      },
+      watchdog: { stallAfterMs: 1_000, heartbeatAfterMs: 60_000, loopRepeat: 9 },
+    },
+  });
+  assert.ok(stack.superagent);
+  const spawned = await stack.superagent.ingest({
+    source: 'github',
+    tenantId: inviteId,
+    deliveryId: 'sa-open',
+    event: 'issues',
+    payload: issueEvent(42),
+  });
+  assert.equal(spawned.result, 'spawned');
+  if (spawned.result !== 'spawned') return;
+  const worker = stack.superagent.agent.worker(inviteId, spawned.workerId);
+  assert.ok(worker);
+  stack.superagent.agent.store.putWorker({
+    ...worker,
+    state: 'running',
+    lastProgressAt: now - 5,
+    lastHeartbeatAt: now,
+  });
+  now += 2_000;
+  const nudged = await stack.superagent.tick();
+  assert.equal(
+    nudged.some(
+      (row) => row.rule === 'stuck' && row.action === 'nudge' && row.workerId === spawned.workerId,
+    ),
+    true,
+  );
+  assert.equal(stack.superagent.cards.length, 0, 'W2 nudges once before the stuck card');
+  now += 2_000;
+  const findings = await stack.superagent.tick();
+  assert.equal(
+    findings.some(
+      (row) =>
+        row.rule === 'stuck' && row.action === 'escalate' && row.workerId === spawned.workerId,
+    ),
+    true,
+  );
+  assert.equal(stack.superagent.cards.length, 1);
+  assert.equal(stack.superagent.cards[0]?.reason, 'stuck');
+  assert.equal(
+    stack.cloud.server.conversationsOf(inviteId).length > 0,
+    true,
+    'the stuck card is placed in a conversation of the tenant',
+  );
+
+  const denied = await stack.superagent.ingest({
+    source: 'github',
+    tenantId: inviteId,
+    deliveryId: 'sa-mallory',
+    event: 'issue_comment',
+    payload: {
+      action: 'created',
+      issue: { number: 99, title: 'Other', pull_request: {} },
+      comment: { id: 1, body: 'please fix this' },
+      repository: { full_name: 'acme/widgets' },
+      sender: { login: 'mallory', type: 'User' },
+    },
+  });
+  assert.equal(denied.result, 'ignored');
+  if (denied.result !== 'ignored') return;
+  assert.equal(denied.reason, 'actor_denied');
+});
+
+test('a HMAC-verified duty delivery is a Super-agent Source; a comment from a non-allowed actor does not spawn', async (t) => {
+  const own = dutyOwner();
+  const { stack } = await start(
+    t,
+    undefined,
+    DUTY_ENV,
+    true,
+    { superagent: { tickMs: 0, admission: { allowActors: ['alice'] } } },
+    own.prepare,
+  );
+  const hook = (event: string, payload: unknown, id: string) =>
+    fetch(`${stack.cloud.server.url}/github/webhook`, signed(event, payload, id));
+  assert.equal((await hook('issues', issueEvent(7), 'sa-src-1')).status, 200);
+  await stack.superagent.flushed();
+  const workers = stack.superagent.agent.workers(own.made.inviteId);
+  assert.equal(workers.length, 1, 'alice opening an issue spawns one worker');
+
+  assert.equal(
+    (
+      await hook(
+        'issue_comment',
+        {
+          action: 'created',
+          issue: {
+            number: 8,
+            title: 'Nope',
+            user: { login: 'alice', type: 'User' },
+          },
+          comment: { id: 2, body: 'please fix this' },
+          repository: { full_name: 'acme/widgets' },
+          installation: { id: 7 },
+          sender: { login: 'mallory', type: 'User' },
+        },
+        'sa-src-2',
+      )
+    ).status,
+    200,
+  );
+  await stack.superagent.flushed();
+  assert.equal(
+    stack.superagent.agent.workers(own.made.inviteId).length,
+    1,
+    'mallory does not spawn a second worker',
+  );
 });

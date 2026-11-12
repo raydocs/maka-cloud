@@ -32,6 +32,7 @@ import type {
 } from '@maka/core/events';
 import {
   ChatSurfaceLayout,
+  MessageCardSendContext,
   ChatView,
   applyLiveTurnBufferEvent,
   reconcileLiveTurnBuffer,
@@ -44,6 +45,7 @@ import {
   useUiLocale,
 } from '@maka/ui';
 import type { ChatModelChoice, ComposerHandle, SessionViewMode, TurnViewModel, LiveTurnBuffer } from '@maka/ui';
+import { PersonalAssistantChatLayout, PersonalAssistantComposer } from '../src/renderer/features/personal-assistant/stories';
 import { SessionRail, type SessionRailStoryProps } from '../../../packages/ui/stories/session-rail-harness.js';
 import { deriveMessageQueueProjection } from '../src/renderer/application/contracts/message-queue-projection';
 import { retractQueuedEntryToDraft, withQueuedSteeringTransients } from '../src/renderer/application/contracts/transient-message-projection';
@@ -507,10 +509,11 @@ function ComposedShell(props: {
             // padding, so a story without it measures its own box.
             (<div className="maka-detail-with-artifacts">
               <div className="mainColumn" inert={props.switchingSession || undefined}>
-              <ChatSurfaceLayout
+              <PersonalAssistantChatLayout
+                session={active}
                 hidden={props.chatHidden}
                 composer={
-                  <Composer
+                  <PersonalAssistantComposer
                     {...baseComposerProps}
                     activeSession={active}
                     modelSwitchHasHistory={messages.some(
@@ -528,7 +531,7 @@ function ComposedShell(props: {
                   {...props.chat}
                   revisionNavigation={revisionNavigation}
                 />
-              </ChatSurfaceLayout>
+              </PersonalAssistantChatLayout>
               </div>
             </div>)
           )}
@@ -5065,41 +5068,90 @@ export const CompletedProcessExpanded: Story = {
 };
 
 
-function EventWaitContextStory(props: { label: string }) {
-  return <GoalContextStory goal={{ condition: 'Run the background tests and inspect their result',
-    status: 'active', iterations: 1, maxIterations: 12, setAt: Date.now() - 60000, onPause: noop, onClear: noop,
-    eventWait: { label: props.label, detail: 'Inspect the finished tests · maka://runtime/background-tasks/95ff8bdc-23bb-43ea-aea9-5d82c8d939fe · Oct 20, 2026, 10:00',
-      cancelLabel: 'Cancel wait and pause', cancelDescription: 'Cancel the wait and pause the Goal. The background task keeps running.', onCancel: noop } }} />;
+const PARALLEL_EVENT_WAIT_IDS = ['a', 'b'].map((value) => `wait_${value.repeat(64)}`);
+
+function ParallelEventWaitsStory() {
+  const [waits, setWaits] = useState(PARALLEL_EVENT_WAIT_IDS);
+  return <ComposedShell session={{ streaming: true }} chat={{
+    eventWaitIndicators: waits.map((id) => ({
+      id, label: 'Waiting for external event', detail: 'Background build process',
+      cancelLabel: 'Cancel wait', cancelDescription: 'Cancel this wait. The underlying work keeps running.',
+      onCancel: () => setWaits((current) => current.filter((wait) => wait !== id)),
+    })),
+  }} />;
 }
 
-async function assertEventWaitLayout({ canvasElement }: { canvasElement: HTMLElement }) {
-  const canvas = within(canvasElement);
-  const button = await canvas.findByRole('button', { name: 'Cancel wait and pause' });
-  const row = button.closest('.maka-session-context__wait')!;
-  expect(row.scrollWidth).toBeLessThanOrEqual(row.clientWidth + 1);
-  expect(button.getBoundingClientRect().right).toBeLessThanOrEqual(canvasElement.getBoundingClientRect().right + 1);
-  await userEvent.hover(button);
-  await expect(within(document.body).findByRole('tooltip')).resolves.toHaveTextContent('background task keeps running');
-  await userEvent.unhover(button);
+// Real path: an admitted Goal Turn opens two waits for the same ShellRun, then the user clears the Goal.
+// The fixture supplies the remaining Session projections to the production ChatView frame.
+export const ParallelEventWaitsAfterGoalClear: Story = {
+  render: () => <ParallelEventWaitsStory />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    for (const id of PARALLEL_EVENT_WAIT_IDS) {
+      await expect(canvas.getByRole('button', { name: `Cancel wait ${id}` })).toBeVisible();
+      await expect(canvas.getByText(id)).toBeVisible();
+    }
+    await expect(canvas.getAllByText('Background build process')).toHaveLength(2);
+    const rows = canvasElement.querySelectorAll('.maka-session-context__wait');
+    expect(rows).toHaveLength(2);
+    for (const row of rows) {
+      const cancel = row.querySelector('button')!.getBoundingClientRect();
+      const frame = row.getBoundingClientRect();
+      expect(cancel.left).toBeGreaterThanOrEqual(frame.left);
+      expect(cancel.right).toBeLessThanOrEqual(frame.right);
+    }
+  },
+};
+
+
+function AssistantCardsDemo() {
+  const [accepted, setAccepted] = useState<StoredMessage[]>([]);
+  const composer = useRef<ComposerHandle>(null);
+  const messages: StoredMessage[] = [
+    user('cards-user', 'cards', 3, '今天事情有点多，也想看看周末能去哪儿走走。'),
+    { type: 'assistant', id: 'cards-offer', turnId: 'assistant-output:offer', ts: NOW - 1000, modelId: 'bot', text: '材料我先核对了一遍，你可以选一下怎么处理。', card: {
+      type: 'offer', title: '报销这边，我可以帮你收尾', items: [{ title: '报销这边，我可以帮你收尾', description: '材料找到了 3 份，还缺用车凭证。要我先把已有材料整理好吗？', actions: [
+        { kind: 'reply', label: '帮我整理', value: '请帮我整理这次出差的报销材料，先对应已有车票、酒店发票和行程，列出缺失材料。餐费暂不计入。' },
+        { kind: 'reply', label: '缺什么？', value: '这次报销还缺哪些材料？' },
+        { kind: 'reply', label: '先不用', value: '报销先不用帮我整理，我自己处理。' },
+      ] }],
+    } },
+    { type: 'assistant', id: 'cards-recommendation', turnId: 'assistant-output:recommendation', ts: NOW, modelId: 'bot', text: '周末，换个地方慢下来', card: {
+      type: 'recommendation', title: '周末，换个地方慢下来', items: [
+        { title: '城市影像 · 摄影展', description: '看看人与城市的日常切片，逛完还能顺路喝杯茶。', facts: [{ label: '时间', value: '周六下午' }, { label: '位置', value: '城市艺术中心' }], actions: [{ kind: 'reply', label: '看看详情', value: '帮我查一下城市影像摄影展的开放时间和预约方式。' }] },
+        { title: '河畔散步 · 顺路喝茶', description: '不用赶场，沿河走一段，再找个安静的地方坐坐。', facts: [{ label: '时间', value: '周日下午' }, { label: '步行', value: '约 40 分钟' }], actions: [{ kind: 'reply', label: '看看路线', value: '帮我安排周日下午沿河散步和喝茶的路线。' }] },
+      ],
+    } },
+  ];
+  return <MessageCardSendContext.Provider value={async text => { setAccepted(old => [...old, user(`card-reply-${old.length}`, `reply-${old.length}`, 0, text)]); return true; }}>
+    <ComposedShell sidebarCollapsed frameHeight="100vh" session={{ labels: ['personal-assistant'], name: '个人助手' }} chat={{ messages: [...messages, ...accepted] }} composer={{ ref: composer, draftKey: 'assistant-card-demo' }} />
+  </MessageCardSendContext.Provider>;
 }
 
-// Real path: a Goal Turn starts builtin background Bash, calls WaitForEvent and
-// yields. The existing ChatView context layer renders the Host wait projection.
-export const SessionContextEventWait: Story = {
-  render: () => <EventWaitContextStory label="Waiting for background task" />,
-  play: assertEventWaitLayout,
-};
-
-// Real path: the Host cannot currently read the task source, so the existing
-// outstanding wait is unknown. The narrow smoke viewport exercises wrapping.
-export const SessionContextEventWaitUnknownNarrow: Story = {
-  render: () => <EventWaitContextStory label="Background task state temporarily unverifiable" />,
-  play: assertEventWaitLayout,
-};
-
-// Real path: the terminal fact is durable while a user Turn owns Root admission.
-// The wait remains visible until its existing continuation can be admitted.
-export const SessionContextEventWaitReady: Story = {
-  render: () => <EventWaitContextStory label="Result available, waiting to continue" />,
-  play: assertEventWaitLayout,
+// Real path: personal assistant → Bot SendUser with recommendation/offer cards → click a reply to send directly through the chat action boundary.
+// The example places and itinerary are synthetic presentation fixtures.
+export const AssistantCards: Story = {
+  render: () => <AssistantCardsDemo />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await waitFor(() => expect(canvas.getByRole('button', { name: '帮我整理' })).toBeVisible());
+    expect(canvasElement.querySelectorAll('.maka-message-card')).toHaveLength(2);
+    const card = canvasElement.querySelector<HTMLElement>('.maka-message-card')!;
+    expect(card.getBoundingClientRect().width).toBeGreaterThan(250);
+    const bubble = card.closest<HTMLElement>('.maka-chat-message-bubble-assistant')!;
+    expect(getComputedStyle(bubble).paddingLeft).toBe('12px');
+    expect(getComputedStyle(bubble).backgroundColor).not.toBe('rgba(0, 0, 0, 0)');
+    expect(getComputedStyle(bubble, '::before').display).not.toBe('none');
+    expect(getComputedStyle(card.closest<HTMLElement>('.maka-turn')!).maxWidth).toBe('800px');
+    const choices = [...card.querySelectorAll<HTMLButtonElement>('button')];
+    expect(choices).toHaveLength(3);
+    expect(new Set(choices.map(button => getComputedStyle(button).backgroundColor)).size).toBe(1);
+    expect(card.querySelectorAll('h3, h4')).toHaveLength(1);
+    expect(card.querySelector('img')).toBeNull();
+    const editor = canvasElement.querySelector<HTMLElement>('[contenteditable="true"]')!;
+    const draft = editor.textContent;
+    await userEvent.click(canvas.getByRole('button', { name: '帮我整理' }));
+    await waitFor(() => expect(canvas.getByText('请帮我整理这次出差的报销材料，先对应已有车票、酒店发票和行程，列出缺失材料。餐费暂不计入。')).toBeVisible());
+    expect(editor.textContent).toBe(draft);
+  },
 };

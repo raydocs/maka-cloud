@@ -147,6 +147,9 @@ export function fingerprint(store: Store, context: ItemContext): unknown {
     // A suggestion is a proposed card; a refreshed card is a new id, so the item's hash moves with it.
     case 'suggestion':
       return { subject: 'suggestion', id: context.detail ?? null };
+    // A Super-agent watchdog card stays until the owner taps it.
+    case 'stuck':
+      return { subject: 'stuck', workerId: context.detail ?? null };
     case 'verification': {
       const verification = store.verification(context.taskId ?? '');
       return {
@@ -312,6 +315,36 @@ export function followUpSpec(
     options: input.needsYou ? FOLLOW_UP_OPTIONS : FINISHED_OPTIONS,
     allowText: input.needsYou,
     evidence,
+    context,
+    precondition: preconditionOf(store, context),
+  };
+}
+
+export interface StuckChoice {
+  conversationId: string;
+  workerId: string;
+  ask: string;
+  options: Array<{ id: string; label: string; recommended: boolean }>;
+}
+
+/** A T33 stuck report: blocked item, local options, never an approval. */
+export function stuckSpec(store: Store, input: StuckChoice): ItemSpec {
+  const context: ItemContext = { subject: 'stuck', detail: input.workerId };
+  return {
+    kind: 'blocked',
+    conversationId: input.conversationId,
+    taskId: null,
+    dedupeKey: `stuck:${input.workerId}`,
+    ask: clip(input.ask, MAX_ASK),
+    options: input.options.map((option) => ({
+      id: option.id.slice(0, 60),
+      label: clip(option.label, 120),
+      recommended: option.recommended,
+      effect: 'local' as const,
+      closeReason: option.recommended ? 'accepted' : 'acknowledged',
+    })),
+    allowText: false,
+    evidence: [],
     context,
     precondition: preconditionOf(store, context),
   };
@@ -908,6 +941,7 @@ export function reassess(store: Store, item: ItemRecord, at: number): Reassessme
     // Whether the card still holds is read from GitHub, which takes a request: the supervisor asks
     // the host before it takes an answer (`precheckSuggestion`), not here.
     case 'suggestion':
+    case 'stuck':
       return { action: 'keep' };
     case 'verification':
       // Checked again, or settled differently, since the human looked.

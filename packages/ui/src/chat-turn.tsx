@@ -17,10 +17,12 @@
  * under the License.
  */
 
+import { assistantMessageText, type AssistantCard } from '@maka/core/assistant-card';
+import { MessageCard } from './message-card.js';
+
 import { Fragment, memo, useEffect, useMemo, useRef, useState, type ComponentPropsWithoutRef, type ReactNode } from 'react';
 import { ICON_SIZE, GitBranch, Pencil, RefreshCcw, Timer } from './icons.js';
 import { useClipboardCopyFeedback } from './clipboard-feedback.js';
-import { MessageSummary } from './message-summary.js';
 import { TranscriptDisclosure } from './transcript-disclosure.js';
 import { Markdown } from './markdown.js';
 import { formatTurnDuration } from './chat-display-helpers.js';
@@ -880,7 +882,7 @@ export const TurnView = memo(function TurnView(props: {
                     ? (actionId) => props.onFooterAction?.(turn.turnId, actionId)
                     : undefined
                 }
-                assistantText={finalReply?.text ?? ''}
+                assistantText={finalReply ? assistantMessageText(finalReply) : ''}
               />
             )}
             </LocalizedChatMessage>
@@ -1316,7 +1318,7 @@ export function ModelProviderRetryIndicator(props: { retry: LiveProviderRetry })
  */
 type AssistantAnswerPhase = 'historical' | 'streaming' | 'settled';
 
-type AssistantAnswerBubbleProps = { summary?: string; imageIdentity?: { turnId: string; messageId: string }; imageDisplay?: 'image' | 'link' } & (
+type AssistantAnswerBubbleProps = { card?: AssistantCard; summary?: string; imageIdentity?: { turnId: string; messageId: string }; imageDisplay?: 'image' | 'link' } & (
   | { text: string; phase: 'historical'; interrupted?: true }
   | {
       text: string;
@@ -1372,10 +1374,12 @@ const AssistantAnswerBubble = memo(function AssistantAnswerBubble(props: Assista
           : 'maka-chat-message-bubble maka-chat-message-bubble-assistant maka-bubble-streaming'
       }
     >
-      <MessageSummary summary={props.summary}>
+      {(!props.card || props.summary || props.text.trim() !== props.card.title.trim()) && <>
       <ImageMessageProvider identity={props.imageIdentity} streaming={isProgressiveStreamingEnabled(props.phase === 'streaming')}>
         <Markdown
           text={props.text}
+          summary={props.summary}
+          separateStickers
           imageDisplay={props.imageDisplay}
           streaming={props.phase === 'streaming'}
           settledText={settledText}
@@ -1392,7 +1396,8 @@ const AssistantAnswerBubble = memo(function AssistantAnswerBubble(props: Assista
           density="compact"
         />
       </ImageMessageProvider>
-      </MessageSummary>
+      </>}
+      {props.card && <ImageMessageProvider identity={props.imageIdentity}><MessageCard card={props.card} messageId={props.imageIdentity?.messageId} imageDisplay={props.imageDisplay} /></ImageMessageProvider>}
       {truncated && (
         <Tooltip content={copy.outputTruncatedTitle}>
           {/* Colour-name archive, not the semantic one: Astryx paints
@@ -1461,12 +1466,14 @@ const TurnTimelineEntry = memo(function TurnTimelineEntry(props: {
     );
   }
   // Same component either way — a type swap here would remount the answer.
-  if (item.live !== true) return <AssistantAnswerBubble imageIdentity={props.turnId ? { turnId: props.turnId, messageId: item.messageId } : undefined} imageDisplay={props.imageDisplay} text={item.text} summary={item.summary} interrupted={item.interrupted} phase="historical" />;
+  if (item.live !== true) return <AssistantAnswerBubble imageIdentity={props.turnId ? { turnId: props.turnId, messageId: item.messageId } : undefined} imageDisplay={props.imageDisplay} text={item.text} summary={item.summary} card={item.card} interrupted={item.interrupted} phase="historical" />;
   return (
     <AssistantAnswerBubble
       imageIdentity={props.turnId ? { turnId: props.turnId, messageId: item.messageId } : undefined}
       imageDisplay={props.imageDisplay}
       text={item.text}
+      summary={item.summary}
+      card={item.card}
       interrupted={item.interrupted}
       phase={item.complete === true ? 'settled' : 'streaming'}
       settledText={props.initialLiveContent?.get(`text:${item.messageId}`)}

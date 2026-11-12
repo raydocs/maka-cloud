@@ -58,6 +58,7 @@ async function populate(dataDir: string, tag = 'a'): Promise<void> {
     paths.supervisorDbPath,
     paths.gatewaySpendPath,
     paths.dutiesDbPath,
+    paths.superagentDbPath,
   ]) {
     createDb(path, [`${tag} in ${path.slice(dataDir.length)}`]);
   }
@@ -121,6 +122,7 @@ test('a backup holds every database and file, each one consistent, and a manifes
     'supervisor.db',
     'gateway-spend.db',
     'duties.db',
+    'superagent.db',
     'runner-sessions.json',
     'coding-deliveries.json',
     'conductor/conductor.db',

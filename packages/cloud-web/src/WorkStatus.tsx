@@ -31,6 +31,102 @@ export function ApprovalReceipt({ option }: { option: string }) {
   ) : null;
 }
 
+/** Super-agent worker snapshot. Same shape as GET /v1/superagent/progress. */
+export type WorkerProgressView = {
+  workerId: string;
+  phase: string;
+  k: number;
+  n: number;
+  percent: number;
+  elapsedMs: number;
+  etaMs: number;
+  lastActivity: string;
+  look: 'running' | 'waiting' | 'stuck' | 'paused' | 'done';
+  waiting?: { kind: string; detail: string };
+};
+
+export type QueueProgressView = {
+  taskId: string;
+  title: string;
+  state: string;
+  reason?: string;
+  waitMs: number;
+  reserved?: boolean;
+};
+
+export function SuperagentProgress({ client }: { client: CloudClient }) {
+  const [views, setViews] = useState<WorkerProgressView[]>([]);
+  const [queue, setQueue] = useState<QueueProgressView[]>([]);
+  useEffect(() => {
+    let current = true;
+    const load = () => {
+      void client
+        .request<{ workers?: WorkerProgressView[]; queue?: QueueProgressView[] }>(
+          '/v1/superagent/progress',
+        )
+        .then(
+          (body) => {
+            if (!current) return;
+            setViews(Array.isArray(body.workers) ? body.workers : []);
+            setQueue(Array.isArray(body.queue) ? body.queue : []);
+          },
+          () => {
+            if (!current) return;
+            setViews([]);
+            setQueue([]);
+          },
+        );
+    };
+    load();
+    const tick = setInterval(load, 15_000);
+    return () => {
+      current = false;
+      clearInterval(tick);
+    };
+  }, [client]);
+  if (views.length === 0 && queue.length === 0) return null;
+  return (
+    <section className="card section-card" data-testid="superagent-progress-list">
+      {views.map((view) => (
+        <WorkerProgressBar key={view.workerId} view={view} />
+      ))}
+      {queue.map((row) => (
+        <p key={row.taskId} className="muted" data-testid="superagent-queue-row">
+          {row.state}
+          {row.reason ? `: ${row.reason}` : ''} · wait {Math.round(row.waitMs / 1000)}s ·{' '}
+          {row.title}
+        </p>
+      ))}
+    </section>
+  );
+}
+
+export function WorkerProgressBar({ view }: { view: WorkerProgressView }) {
+  const label =
+    view.look === 'waiting'
+      ? `Waiting on ${view.waiting?.kind ?? 'human'}: ${view.waiting?.detail ?? ''}`
+      : view.look === 'stuck'
+        ? `Looks stuck · ${view.phase} ${view.k}/${view.n}`
+        : `${view.phase} ${view.k}/${view.n}`;
+  return (
+    <div className="worker-progress" data-look={view.look} data-testid="worker-progress">
+      <p className="muted">{label}</p>
+      {view.look !== 'waiting' && view.look !== 'done' && (
+        <div
+          role="progressbar"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={view.percent}
+          aria-label={label}
+        >
+          <i style={{ width: `${Math.min(100, Math.max(0, view.percent))}%` }} />
+        </div>
+      )}
+      <p className="muted mono">{view.lastActivity}</p>
+    </div>
+  );
+}
+
 export function elapsed(ms: number) {
   const seconds = Math.max(0, Math.floor(ms / 1000));
   return `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;

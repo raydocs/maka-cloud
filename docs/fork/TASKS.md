@@ -1034,6 +1034,46 @@ of another person's task is refused; a move to a box and back keeps every
 message and the session id and never overwrites a dirty folder; no model
 credential is read from the computer.
 
+## T34: Super-agent (event routing, persistent workers, watchdog)
+
+Depends on: T23 (duties as a Source), T28 (durable executions), T20
+(supervisor inbox). Builds on open PR #460 (PR follow-up as the first
+WorkItem) and the `SandboxApi` seam of open PR #452. Does not depend on
+the parked boat.dev PRs (#451, #453, #455). T32 stays after launch.
+
+Architecture (read first): `docs/fork/architecture/superagent.md`.
+
+Objective: maka-cloud becomes a DeepSeek-Harness-style Super-agent for a
+paid hosted product. Events whose subject (PR, issue, chat thread) is
+already owned go straight to that worker (no Router tokens). Unowned
+events go through admission and a Router judge (`ignore` / `answer` /
+`spawn`). Each worker owns one subject, sleeps, resumes, and retires
+when the subject closes. An external watchdog detects stuck, looping,
+over-budget and crashed workers. Safety (Mandate, budgets, exact-text
+approvals, tenant isolation, metering hooks) is the differentiator
+against the DSH prototype's full-access operator user.
+
+- Package: `packages/cloud-superagent` (`@maka-cloud/superagent`).
+- P1: new package only; do not import host/server/conductor/duties/runners.
+- P2: the host composes it in-process (`startStack`); duties export
+  `readDelivery` so HMAC-verified GitHub deliveries are a Source; the
+  watchdog emits T33 stuck cards; `ModelJudge` takes an injectable client
+  (`HeuristicJudge` stays default).
+- Persistence: package-local SQLite (`superagent.db` next to the server
+  dir), not a `cloud-server` migration. P4 adds `usage_events` as schema
+  2 in that same file (additive). **No cloud-server migration.**
+- `WorkspaceStore`: git clone default on the T6 fleet; LayerFS adapter
+  compiled, off, no FUSE/Docker/server. Spike harness:
+  `packages/cloud-runners/scripts/layerfs-gates.mjs` (four gates; `--local`
+  only in CI).
+- Tests (fakes only, no live model or sandbox): pass-through has zero
+  judge calls; duplicate Trigger → one worker; sqlite restore resumes
+  inbox and plan; looping handler → W3; merge/push/secrets/deploy
+  without a matching grant → `awaiting_approval`; tenant A cannot read
+  tenant B.
+- Check: `npm run typecheck -w @maka-cloud/superagent` and the
+  package's `test:dist`.
+
 ---
 
 # Batch 3: personal assistant feel

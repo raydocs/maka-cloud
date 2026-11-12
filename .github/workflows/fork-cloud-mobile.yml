@@ -111,11 +111,13 @@ jobs:
           npm --workspace @maka/storage run build
           npm --workspace @maka/mcp run build
           npm --workspace @maka/runtime run build
+          npm --workspace @maka-cloud/maka-engine run build
           npm --workspace @maka-cloud/orchestrator run build
           npm --workspace @maka-cloud/modes run build
           npm --workspace @maka-cloud/memory run build
           npm --workspace @maka-cloud/server run build
           npm --workspace @maka-cloud/instabox run build
+          npm --workspace @maka-cloud/superagent run build
           npm --workspace @maka-cloud/runners run build
           npm --workspace @maka-cloud/conductor-checks run build
           npm --workspace @maka-cloud/conductor run build
@@ -254,11 +256,13 @@ jobs:
           npm --workspace @maka/storage run build
           npm --workspace @maka/mcp run build
           npm --workspace @maka/runtime run build
+          npm --workspace @maka-cloud/maka-engine run build
           npm --workspace @maka-cloud/orchestrator run build
           npm --workspace @maka-cloud/modes run build
           npm --workspace @maka-cloud/memory run build
           npm --workspace @maka-cloud/server run build
           npm --workspace @maka-cloud/instabox run build
+          npm --workspace @maka-cloud/superagent run build
           npm --workspace @maka-cloud/runners run build
           npm --workspace @maka-cloud/conductor-checks run build
           npm --workspace @maka-cloud/conductor run build

@@ -41,7 +41,26 @@ import {
   type TaskDirectory,
   TenantMachineProvider,
 } from '@maka-cloud/runners';
+import {
+  createJudgeFromEnv,
+  createWatchdogNarratorFromEnv,
+  EnvOrgSecrets,
+  type SuperagentOptions,
+  type SuperagentStore,
+} from '@maka-cloud/superagent';
 import type { Supervisor } from '@maka-cloud/supervisor';
+import {
+  attachDutySource,
+  type HostSuperagent,
+  instaboxSandboxPort,
+  openHostSuperagent,
+  startHostSuperagent,
+} from './superagent.js';
+import {
+  startSuperagentFeatureTimers,
+  superagentOptionsFromFeatures,
+  sweepTargets,
+} from './superagent-features.js';
 import { createHttpMailer } from './mail.js';
 import {
   type CloudServerOptions,
@@ -123,6 +142,15 @@ export interface StackDependencies {
    * for tests. Unset in the product: the pool uses the account's `INSTABOX_API_KEY` and the real guard.
    */
   boxes?: Pick<BoxServiceOptions, 'guard' | 'timers'> & { client?: InstaboxClient };
+  /**
+   * Super-agent runs in this process (recommended). Tests replace the store,
+   * handler, judge, clock or tick timer. HeuristicJudge stays the default.
+   */
+  superagent?: Omit<SuperagentOptions, 'store' | 'onEscalate'> & {
+    store?: SuperagentStore;
+    tickMs?: number;
+    every?: (fn: () => void, ms: number) => () => void;
+  };
   onWarning?: (message: string, detail?: unknown) => void;
   /** Routine events worth a log line, such as a finished backup. */
   onInfo?: (event: string, fields: Record<string, string | number>) => void;
@@ -142,6 +170,8 @@ export interface Stack {
   cards?: CardsRuntime;
   /** Follows the checks of every pull request a coding task opens. */
   followUp: PrFollowUp;
+  /** In-process Super-agent: event intake, workers, watchdog. Always present. */
+  superagent: HostSuperagent;
   /** Writes a backup now, as the daily one does. Throws when `MAKA_CLOUD_BACKUP_DIR` is not set. */
   backup(): Promise<BackupResult>;
   /** Looks at the day's spend now and sends the alert if it is due. A no-op without an alert set. */
@@ -182,6 +212,7 @@ export async function startStack(
     | {
         backupTo(destination: string): Promise<void>;
         raiseProposal(input: Parameters<Supervisor['raiseProposal']>[0]): boolean;
+        raiseStuck(input: Parameters<Supervisor['raiseStuck']>[0]): boolean;
         raiseSuggestion(input: Parameters<Supervisor['raiseSuggestion']>[0]): boolean;
         raiseFollowUp(input: Parameters<Supervisor['raiseFollowUp']>[0]): boolean;
         raiseSuggestionOffer(input: Parameters<Supervisor['raiseSuggestionOffer']>[0]): boolean;
@@ -272,6 +303,9 @@ export async function startStack(
   // The pull requests coding tasks open, followed until their checks have spoken (see PrFollowUp).
   let followUp: PrFollowUp | undefined;
   let releaseFollowUp: (() => void) | undefined;
+  let superagentRt: HostSuperagent | undefined;
+  let releaseSuperagentTick: (() => void) | undefined;
+  let releaseFeatureTimers: (() => void) | undefined;
   try {
     if (config.agentChannel !== undefined) {
       await mkdir(dirname(config.transcriptsDbPath), { recursive: true });
@@ -358,9 +392,10 @@ export async function startStack(
       });
     }
     const publicUrl = config.mcp.publicUrl;
+    let instaboxClient: InstaboxClient | undefined;
     if (config.boxes !== undefined) {
       const apiKey = env.INSTABOX_API_KEY;
-      const client =
+      instaboxClient =
         dependencies.boxes?.client ??
         (apiKey === undefined || apiKey === ''
           ? undefined
@@ -368,9 +403,9 @@ export async function startStack(
               apiKey,
               baseUrl: config.instabox.apiUrl ?? DEFAULT_INSTABOX_BASE_URL,
             }));
-      if (client === undefined) throw new Error('INSTABOX_API_KEY is not set.');
+      if (instaboxClient === undefined) throw new Error('INSTABOX_API_KEY is not set.');
       boxService = startBoxService({
-        client,
+        client: instaboxClient,
         templateId: config.boxes.templateId,
         maxPerInvite: config.boxes.maxPerInvite,
         ...(config.agentChannel === undefined ? {} : { agent: config.agentChannel }),
@@ -430,6 +465,39 @@ export async function startStack(
       dependencies.createRunners ?? ((options) => createCloudRunnersFromEnv(env, options))
     )(runnerOptions);
 
+    const superagentOptions = dependencies.superagent ?? {};
+    const {
+      store: superagentStore,
+      tickMs: superagentTickMs,
+      every: superagentEvery,
+      ...agentOpts
+    } = superagentOptions;
+    const featureOptions = superagentOptionsFromFeatures(config.superagentFeatures, env);
+    const wiredSuperagent = {
+      ...featureOptions,
+      ...agentOpts,
+      sharedBox: agentOpts.sharedBox ?? true,
+      sandbox:
+        agentOpts.sandbox ??
+        (instaboxClient === undefined ? undefined : instaboxSandboxPort(instaboxClient)),
+      orgSecrets: agentOpts.orgSecrets ?? new EnvOrgSecrets({ env }),
+      judge: agentOpts.judge ?? createJudgeFromEnv(env),
+      watchdogNarrator: agentOpts.watchdogNarrator ?? createWatchdogNarratorFromEnv(env),
+      admission: {
+        ...agentOpts.admission,
+        ...(config.superagentActors.length > 0 && agentOpts.admission?.allowActors === undefined
+          ? { allowActors: config.superagentActors }
+          : {}),
+      },
+    };
+    superagentRt =
+      superagentStore === undefined
+        ? await openHostSuperagent(config.superagentDbPath, wiredSuperagent)
+        : startHostSuperagent(superagentStore, wiredSuperagent);
+    if (duties !== undefined && webhookSecret !== undefined) {
+      attachDutySource(duties.service, webhookSecret, config.dutyLinks, superagentRt);
+    }
+
     coding = createCodingRunner(runners, {
       deliveries,
       modes: config.modes,
@@ -488,6 +556,21 @@ export async function startStack(
     cloud = await startCloud({
       modelAvailable: () => Boolean(env.ANTHROPIC_API_KEY?.trim() || env.OPENAI_API_KEY?.trim()),
       quota: quotaSource(journal, invites!, config.spend),
+      progress: {
+        snapshot: (owner) => superagentRt?.agent.statusSnapshot(owner) ?? { at: 0, workers: [] },
+        ask: (owner, text) =>
+          superagentRt?.agent.askWatchdog(owner, text) ?? {
+            text: 'superagent offline',
+            citations: [],
+            source: 'fallback' as const,
+          },
+        instruct: (owner, text) =>
+          superagentRt?.agent.instructWatchdog(owner, text) ?? {
+            text: 'superagent offline',
+            citations: [],
+            source: 'fallback' as const,
+          },
+      },
       ...(push === undefined ? {} : { push }),
       ...(signInOn ? { auth } : {}),
       ...(duties === undefined ? {} : { duties: duties.service }),
@@ -595,9 +678,46 @@ export async function startStack(
     followTimer.unref();
     releaseFollowUp = () => clearInterval(followTimer);
     ownFollowUp.kick();
+    if (superagentRt === undefined) throw new Error('Super-agent did not start');
+    superagentRt.bindInbox({
+      createConversation: (input) => cloud.server.createConversation(input),
+      raiseStuck: (input) => supervisorRef?.raiseStuck(input) ?? false,
+      postNotice: (conversationId, text) => cloud.conductor.postNotice({ conversationId, text }),
+    });
+    await superagentRt.agent.restore();
+    const tickEvery = superagentEvery ?? defaultEvery;
+    const tickMs = superagentTickMs ?? 60_000;
+    if (tickMs > 0) {
+      releaseSuperagentTick = tickEvery(() => {
+        void superagentRt
+          ?.tick()
+          .catch((error: unknown) => warn('A Super-agent tick failed', error));
+      }, tickMs);
+    }
+    releaseFeatureTimers = startSuperagentFeatureTimers({
+      features: config.superagentFeatures,
+      every: tickEvery,
+      reloadRules: () => {
+        superagentRt?.agent.rules.maybeReload();
+      },
+      sweep: () => {
+        const tenants = sweepTargets(
+          config.superagentFeatures,
+          config.dutyLinks.map((link) => link.inviteId),
+        );
+        for (const tenantId of tenants) {
+          void superagentRt?.agent
+            .runSweep(tenantId, config.superagentFeatures.sweepRepo)
+            .catch((error: unknown) => warn('A Super-agent sweep failed', error));
+        }
+      },
+    });
   } catch (error) {
     releaseFollowUp?.();
     await followUp?.stop();
+    releaseFeatureTimers?.();
+    releaseSuperagentTick?.();
+    superagentRt?.close();
     await cards?.stop();
     await duties?.stop();
     duties?.close();
@@ -637,6 +757,12 @@ export async function startStack(
         ...(duties === undefined
           ? {}
           : { [relative(config.dataDir, config.dutiesDbPath)]: (to) => duties.backupTo(to) }),
+        ...(superagentRt === undefined
+          ? {}
+          : {
+              [relative(config.dataDir, config.superagentDbPath)]: (to) =>
+                superagentRt.backupTo(to),
+            }),
         ...(transcripts === undefined
           ? {}
           : {
@@ -724,6 +850,7 @@ export async function startStack(
     ...(duties === undefined ? {} : { duties }),
     ...(cards === undefined ? {} : { cards }),
     followUp: followUp as PrFollowUp,
+    superagent: superagentRt as HostSuperagent,
     backup,
     checkSpendAlert: () => alerts?.tick() ?? Promise.resolve(),
     // The watcher stops first, then the runs, then the gateway cuts whatever is still in flight.
@@ -742,9 +869,14 @@ export async function startStack(
             await followUp?.stop();
             await cards?.stop();
             await duties?.stop();
+            releaseFeatureTimers?.();
+            releaseFeatureTimers = undefined;
+            releaseSuperagentTick?.();
+            releaseSuperagentTick = undefined;
             await cloud.close();
           } finally {
             duties?.close();
+            superagentRt?.close();
             await boxService?.close();
             transcripts?.close();
             await gateway.close();
@@ -756,4 +888,10 @@ export async function startStack(
       return closing;
     },
   };
+}
+
+function defaultEvery(fn: () => void, ms: number): () => void {
+  const timer = setInterval(fn, ms);
+  timer.unref();
+  return () => clearInterval(timer);
 }

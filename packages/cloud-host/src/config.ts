@@ -14,6 +14,11 @@ import { assertAgentChannel } from '@maka-cloud/runners';
 import { DEFAULT_TASKS_PER_INVITE, proxyList, pushConfigFromEnv } from '@maka-cloud/server';
 import { type BackupLayout, withoutSecretShapesInJson } from './backup.js';
 import { type InboxConfig, readInboxConfig } from './inbox/config.js';
+import {
+  readSuperagentFeatureConfig,
+  SUPERAGENT_FEATURES_OFF,
+  type SuperagentFeatureConfig,
+} from './superagent-features.js';
 
 /**
  * Everything the stack needs, read from the environment. Secret values are kept
@@ -44,6 +49,21 @@ export interface StackConfig {
   gatewaySpendPath: string;
   /** The standing duties' database: projects, duties, webhook deliveries and the run ledger. */
   dutiesDbPath: string;
+  /**
+   * Super-agent's package-local sqlite (not a cloud-server migration). Exclusive
+   * to this process, next to the other stack databases.
+   */
+  superagentDbPath: string;
+  /**
+   * GitHub logins that may spawn an unowned Super-agent worker. Empty: any
+   * non-bot login is admitted (P1 heuristic).
+   */
+  superagentActors: string[];
+  /**
+   * Second-batch Super-agent features. Every flag defaults off. The stack
+   * reads them here and passes options in; Superagent does not read env.
+   */
+  superagentFeatures: SuperagentFeatureConfig;
   /** The conversations of Claude tasks, kept off the sandboxes. Made only with `agentChannel`. */
   transcriptsDbPath: string;
   /**
@@ -199,6 +219,7 @@ export function dataPathsOf(
   | 'supervisorDbPath'
   | 'gatewaySpendPath'
   | 'dutiesDbPath'
+  | 'superagentDbPath'
   | 'transcriptsDbPath'
 > {
   return {
@@ -212,6 +233,7 @@ export function dataPathsOf(
     supervisorDbPath: join(dataDir, 'supervisor.db'),
     gatewaySpendPath: join(dataDir, 'gateway-spend.db'),
     dutiesDbPath: join(dataDir, 'duties.db'),
+    superagentDbPath: join(dataDir, 'superagent.db'),
     transcriptsDbPath: join(dataDir, 'transcripts.db'),
   };
 }
@@ -228,6 +250,7 @@ export function backupLayoutOf(dataDir: string): BackupLayout {
       rel(paths.supervisorDbPath),
       rel(paths.gatewaySpendPath),
       rel(paths.dutiesDbPath),
+      rel(paths.superagentDbPath),
       rel(paths.transcriptsDbPath),
     ],
     files: [
@@ -579,6 +602,10 @@ export const ENV_VARIABLES = [
     'the GitHub App’s webhook secret (16 characters or more), kept in memory only. Set: signed deliveries are accepted at /github/webhook and standing duties run. Unset: no standing duties',
   ],
   [
+    'MAKA_CLOUD_SUPERAGENT_ACTORS',
+    'comma separated GitHub logins that may spawn an unowned Super-agent worker. Unset: any non-bot login is admitted',
+  ],
+  [
     'MAKA_CLOUD_DEEP_MODE',
     '1 turns on deep mode. Off at launch: deep research has a provenance gap that is parked until after launch, so a request for deep runs in standard mode with a notice and the conductor is not told about deep. Unset or 0: off',
   ],
@@ -611,6 +638,35 @@ export const ENV_VARIABLES = [
     'MAKA_CLOUD_DUTY_REPOS',
     'comma separated owner/name@<installation id>=<invite id> links a project may be registered through: the repository, the GitHub App installation it lives in and the one invite that owns it; needs MAKA_GITHUB_WEBHOOK_SECRET. Unset: no project can be registered',
   ],
+  [
+    'MAKA_CLOUD_BYOM',
+    '1 turns on bring-your-own-machine execution for Super-agent. Unset or 0: Instabox only',
+  ],
+  [
+    'MAKA_CLOUD_BYOM_REPOS',
+    'comma separated owner/name repos that may run on a paired machine. Used only with MAKA_CLOUD_BYOM=1',
+  ],
+  ['MAKA_CLOUD_PEER_REVIEW', '1 turns on cross-model review before push. Unset or 0: off'],
+  [
+    'MAKA_CLOUD_PEER_REVIEW_URL',
+    'http(s) URL of the peer-review completer. Unset: review is enabled but has no client',
+  ],
+  ['MAKA_CLOUD_PEER_REVIEW_MODEL', 'model name passed to the peer-review client'],
+  [
+    'MAKA_CLOUD_RELEASE_VERIFY',
+    '1 turns on the post-deploy /version check. Unset or 0: off. With no MAKA_CLOUD_RELEASE_VERIFY_URL the probe is skipped',
+  ],
+  ['MAKA_CLOUD_RELEASE_VERIFY_URL', 'http(s) /version URL. Unset: the probe is skipped'],
+  ['MAKA_CLOUD_SWEEP', '1 turns on the weekly cleanup sweep. Unset or 0: no timer'],
+  ['MAKA_CLOUD_SWEEP_TENANT', 'invite id the weekly sweep runs as. Unset: duty-link invites'],
+  ['MAKA_CLOUD_SWEEP_REPO', 'owner/name the weekly sweep opens its PR on'],
+  ['MAKA_CLOUD_SWEEP_EVERY_MS', 'milliseconds between sweeps, default 7 days'],
+  ['MAKA_CLOUD_LEARNING', '1 turns on the mistake book. Unset or 0: off'],
+  [
+    'MAKA_CLOUD_SUPERAGENT_RULES',
+    'path of superagent.rules.json. Unset: no rules file. The stack reloads it when the file changes',
+  ],
+  ['MAKA_CLOUD_RULES_EVERY_MS', 'milliseconds between rules-file reloads, default 60000'],
 ] as const;
 
 /** The spend caps an environment sets itself; one it leaves out is not listed (its default is not a choice). */
@@ -741,6 +797,8 @@ export function readStackConfig(
     cardsSet: false,
     prAutoFix: false,
     dutyLinks: [],
+    superagentActors: [],
+    superagentFeatures: SUPERAGENT_FEATURES_OFF,
     signIn: { appleClientIds: [], googleClientIds: [], trustedProxies: [...DEFAULT_PROXIES] },
   };
   const modes = readModes(value('MAKA_CLOUD_MODES'), config.gateway.models, problems);
@@ -783,6 +841,15 @@ export function readStackConfig(
       config.dutyLinks = links;
     }
   }
+  const superagentActors = value('MAKA_CLOUD_SUPERAGENT_ACTORS');
+  if (superagentActors !== undefined) {
+    const actors = parseLogins(superagentActors);
+    if (typeof actors === 'string') problems.push(`MAKA_CLOUD_SUPERAGENT_ACTORS ${actors}`);
+    else config.superagentActors = actors;
+  }
+  const superagentFeatures = readSuperagentFeatureConfig(env);
+  problems.push(...superagentFeatures.problems);
+  config.superagentFeatures = superagentFeatures.features;
   config.signIn = readSignIn(value, problems);
   const github = githubTokenProblem(env.MAKA_GITHUB_TOKEN);
   if (github !== undefined) config.githubTokenProblem = github;
@@ -911,6 +978,16 @@ const DUTY_LINK =
  * and one installation: the operator is the one who knows who owns what, so a repository named
  * twice is a mistake, not a choice. The problem as text, or the links.
  */
+function parseLogins(text: string): string[] | string {
+  const logins = text
+    .split(',')
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+  if (logins.length === 0) return 'must name at least one login';
+  if (logins.some((login) => /\s/u.test(login))) return 'logins cannot contain spaces';
+  return logins;
+}
+
 function parseDutyLinks(text: string): DutyLink[] | string {
   const links: DutyLink[] = [];
   for (const entry of text.split(',').map((part) => part.trim())) {
@@ -1070,6 +1147,10 @@ function gatewayModels(raw: string | undefined, problems: string[]): ModelPrice[
 }
 
 /** The resolved configuration without secret values, one setting per line. */
+function onOff(enabled: boolean): 'on' | 'off' {
+  return enabled ? 'on' : 'off';
+}
+
 export function describeConfig(config: StackConfig): string[] {
   return [
     `data directory:      ${config.dataDir}`,
@@ -1092,6 +1173,8 @@ export function describeConfig(config: StackConfig): string[] {
     `GitHub token:        ${config.githubTokenProblem ?? 'set (fine-grained)'}`,
     `PR follow-up:        checks of each pull request the employee opens are followed (${config.dutiesSet ? 'webhook, and a poll every 10 min' : 'a poll every 2 min'}, at most 6 h); on red ${config.prAutoFix ? 'one verified fix is pushed, then a second red needs you' : 'it needs you and offers the fix (set MAKA_CLOUD_PR_AUTOFIX=1 to push one fix by itself)'}`,
     `standing duties:     ${config.dutiesSet ? `on, projects may be registered for ${config.dutyLinks.length === 0 ? 'no repository yet' : config.dutyLinks.map((link) => link.repo).join(', ')}` : 'off (set MAKA_GITHUB_WEBHOOK_SECRET to turn them on)'}`,
+    `super-agent:         in-process (${config.superagentDbPath}${config.superagentActors.length === 0 ? '' : `; spawn limited to ${config.superagentActors.join(', ')}`})`,
+    `super-agent features: byom ${onOff(config.superagentFeatures.byom)}, peer-review ${onOff(config.superagentFeatures.peerReview)}, release-verify ${onOff(config.superagentFeatures.releaseVerify)}${config.superagentFeatures.releaseVerifyUrl ? '' : ' (no /version endpoint)'}, sweep ${onOff(config.superagentFeatures.sweep)}, learning ${onOff(config.superagentFeatures.learning)}, rules ${config.superagentFeatures.rulesPath ? 'file' : 'off'}`,
     `sign-in:             ${describeSignIn(config.signIn)}`,
     `deep mode:           ${config.deepMode ? 'on' : 'off (set MAKA_CLOUD_DEEP_MODE=1 to turn it on)'}`,
     `proposed cards:      ${config.cardsSet ? 'on, each project is scanned read-only once a day' : 'off (set MAKA_CLOUD_CARDS=1 to turn them on)'}`,

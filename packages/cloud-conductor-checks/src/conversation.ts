@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { MakaTool } from '@maka/runtime/tool-runtime';
+import type { MakaTool } from '@maka-cloud/maka-engine';
 import type { FakeAnthropicServer, ScriptedReply, ThinkingMode } from './fake-anthropic.js';
 import type { Harness, TurnOutcome } from './harness.js';
 

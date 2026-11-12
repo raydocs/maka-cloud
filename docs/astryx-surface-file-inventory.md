@@ -6,7 +6,7 @@ Generated against `@astryxdesign/core@0.6.3` (195 component exports).
 
 Wiki bar: Design Conventions · API Use-the-System · Theming · Container Padding.
 
-**Totals:** 347 files — blocker 0, reimplementation 0, polish 5, aligned 342.
+**Totals:** 350 files — blocker 0, reimplementation 0, polish 5, aligned 345.
 
 ## Exclusions (explicit)
 
@@ -50,7 +50,6 @@ Wiki bar: Design Conventions · API Use-the-System · Theming · Container Paddi
 | `apps/desktop/src/renderer/composer-mentions.tsx` | shell-chrome-or-panel | none | aligned — no raw controls; no Astryx JSX usage | aligned |
 | `apps/desktop/src/renderer/composition/desktop-feature-services.tsx` | other | none | aligned — no raw controls; no Astryx JSX usage | aligned |
 | `apps/desktop/src/renderer/composition/legacy-desktop-region.tsx` | other | none | aligned — no raw controls; no Astryx JSX usage | aligned |
-| `apps/desktop/src/renderer/custom-pet-companion.tsx` | other | none | aligned — no raw controls; no Astryx JSX usage | aligned |
 | `apps/desktop/src/renderer/error-boundary.tsx` | other | Button, Card | aligned — uses Astryx (Button, Card) | aligned |
 | `apps/desktop/src/renderer/features/app-update/services-context.tsx` | other | none | aligned — no raw controls; no Astryx JSX usage | aligned |
 | `apps/desktop/src/renderer/features/app-update/ui/app-update-provider.tsx` | other | none | aligned — no raw controls; no Astryx JSX usage | aligned |
@@ -102,10 +101,12 @@ Wiki bar: Design Conventions · API Use-the-System · Theming · Container Paddi
 | `apps/desktop/src/renderer/features/overlays/ui/overlays-root.tsx` | other | none | aligned — no raw controls; no Astryx JSX usage | aligned |
 | `apps/desktop/src/renderer/features/overlays/ui/search-modal-host.tsx` | dialog-overlay | none | aligned — no raw controls; no Astryx JSX usage | aligned |
 | `apps/desktop/src/renderer/features/personal-assistant/avatar.tsx` | other | none | aligned — no raw controls; no Astryx JSX usage | aligned |
+| `apps/desktop/src/renderer/features/personal-assistant/card-actions.tsx` | other | none | aligned — no raw controls; no Astryx JSX usage | aligned |
 | `apps/desktop/src/renderer/features/personal-assistant/chat-presentation.tsx` | shell-chrome-or-panel | none | aligned — no raw controls; no Astryx JSX usage | aligned |
 | `apps/desktop/src/renderer/features/personal-assistant/original-reader.css` | styles | n/a (css) | aligned — no off-rhythm control heights flagged | aligned |
 | `apps/desktop/src/renderer/features/personal-assistant/original-reader.tsx` | other | Button | aligned — uses Astryx (Button) | aligned |
 | `apps/desktop/src/renderer/features/personal-assistant/personal-assistant.css` | styles | n/a (css) | off-rhythm control height 30px (Design size) | polish |
+| `apps/desktop/src/renderer/features/personal-assistant/pet-bridge.tsx` | other | none | aligned — no raw controls; no Astryx JSX usage | aligned |
 | `apps/desktop/src/renderer/features/personal-assistant/task-float.css` | styles | n/a (css) | aligned — no off-rhythm control heights flagged | aligned |
 | `apps/desktop/src/renderer/features/personal-assistant/task-float.tsx` | other | Button | aligned — uses Astryx (Button) | aligned |
 | `apps/desktop/src/renderer/features/personal-assistant/task-layout.tsx` | other | none | aligned — no raw controls; no Astryx JSX usage | aligned |
@@ -327,10 +328,12 @@ Wiki bar: Design Conventions · API Use-the-System · Theming · Container Paddi
 | `packages/ui/src/locale-context.tsx` | ui-composition | none | aligned — no raw controls; no Astryx JSX usage | aligned |
 | `packages/ui/src/maka-wordmark.tsx` | ui-composition | none | aligned — no raw controls; no Astryx JSX usage | aligned |
 | `packages/ui/src/markdown-body.tsx` | ui-composition | CodeBlock, Link, Markdown | aligned — uses Astryx (CodeBlock, Link, Markdown) | aligned |
-| `packages/ui/src/markdown-image.tsx` | ui-composition | Button, IconButton, Link, Spinner, Tooltip | aligned — uses Astryx (Button, IconButton, Link, Spinner, Tooltip) | aligned |
+| `packages/ui/src/markdown-image.tsx` | ui-composition | Button, Dialog, DialogHeader, IconButton, Link, Spinner, Tooltip | aligned — uses Astryx (Button, Dialog, DialogHeader, IconButton, Link, Spinner, Tooltip) | aligned |
 | `packages/ui/src/markdown-math.tsx` | ui-composition | none | aligned — no raw controls; no Astryx JSX usage | aligned |
 | `packages/ui/src/markdown.tsx` | ui-composition | none | aligned — no raw controls; no Astryx JSX usage | aligned |
 | `packages/ui/src/mermaid-diagram.tsx` | ui-composition | Button, CodeBlock, Collapsible, Dialog, IconButton, Toolbar | aligned — uses Astryx (Button, CodeBlock, Collapsible, Dialog, IconButton, Toolbar) | aligned |
+| `packages/ui/src/message-card.css` | ui-composition | n/a (css) | aligned — no off-rhythm control heights flagged | aligned |
+| `packages/ui/src/message-card.tsx` | ui-composition | Button, Card, Link | aligned — uses Astryx (Button, Card, Link) | aligned |
 | `packages/ui/src/message-summary.tsx` | ui-composition | Button | aligned — uses Astryx (Button) | aligned |
 | `packages/ui/src/model-picker-internals.tsx` | ui-composition | SelectorOption | aligned — uses Astryx (SelectorOption) | aligned |
 | `packages/ui/src/model-picker.tsx` | ui-composition | Selector | aligned — uses Astryx (Selector) | aligned |

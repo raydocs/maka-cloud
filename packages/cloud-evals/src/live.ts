@@ -1,6 +1,6 @@
 import { mkdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import type { ExperimentSpec } from '@maka/eval';
+import type { ExperimentSpec } from '@maka-cloud/maka-engine/eval';
 import { SqliteSpendJournal } from '@maka-cloud/gateway';
 import {
   gatewayModelAccess,
