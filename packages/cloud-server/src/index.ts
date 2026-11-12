@@ -75,3 +75,10 @@ export { SqliteSessionStore } from './sqlite-session-store.js';
 export { SqliteTaskStore } from './sqlite-task-store.js';
 export { type PushConfig, pushConfigFromEnv } from './push.js';
 export type { PushTransport } from './push-transport.js';
+export type {
+  ExpoMessage,
+  ExpoReceipt,
+  ExpoTicket,
+  ExpoTransport,
+  NativePushOptions,
+} from './native-push.js';
