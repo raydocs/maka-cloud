@@ -374,6 +374,21 @@ export const ZH_HANT: Record<Key, string> = {
   'idea.fix': '修正 {repo} 裡失敗的測試',
   'idea.review': '審查 {repo} 裡尚未合併的拉取要求',
   'idea.continue': '繼續「{title}」',
+  'push.title': '通知',
+  'push.body':
+    '{name} 需要你做決定或結果已就緒時通知你。通知只說這些，詳情留在 App 裡；核准只能在 App 裡進行。',
+  'push.turnOn': '開啟通知',
+  'push.notNow': '以後再說',
+  'push.turnOff': '關閉',
+  'push.on': '這支手機已開啟通知。',
+  'push.declined': '這支手機的通知已關閉。',
+  'push.denied': '手機設定裡關閉了通知。在設定裡開啟，才能收到 {name} 的通知。',
+  'push.unavailable': '這個伺服器或這個版本的 App 還不能傳送通知。',
+  'push.failed': '無法開啟通知，請再試一次。',
+  'push.action.gotIt': '知道了',
+  'push.action.notNow': '以後再說',
+  'push.action.open': '開啟',
+  'home.linked': '你開啟的決定',
 };
 
 /** The shared logic's finished English, in Traditional Chinese (see `PHRASES_ZH`). */

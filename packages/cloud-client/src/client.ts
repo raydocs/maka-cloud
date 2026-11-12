@@ -439,9 +439,33 @@ export class CloudClient {
       'devices',
     );
   }
-  /** Ends this device's own session on the server. Refused (400) for an invite token, which is not a device. */
-  endSession() {
-    return this.request<void>('/v1/auth/sign-out', { method: 'POST' });
+  /**
+   * Ends this device's own session on the server. Refused (400) for an invite token, which is not a
+   * device. `pushEndpoint` (a browser's endpoint or a phone's push token) is removed with it.
+   */
+  endSession(pushEndpoint?: string) {
+    return this.request<void>('/v1/auth/sign-out', {
+      method: 'POST',
+      ...(pushEndpoint === undefined ? {} : { body: JSON.stringify({ pushEndpoint }) }),
+    });
+  }
+  /**
+   * Keeps this phone's push token for this account (`POST /v1/push/devices`); again on every
+   * signed-in start, so a token another account held moves here. 404 while the server has phone
+   * push off. Answers the account tag the server puts in every notification.
+   */
+  registerDevice(token: string, platform: 'ios' | 'android') {
+    return this.request<{ accountTag: string }>('/v1/push/devices', {
+      method: 'POST',
+      body: JSON.stringify({ token, platform }),
+    });
+  }
+  /** Forgets this phone's push token: no notification reaches it any more. */
+  removeDevice(token: string) {
+    return this.request<void>('/v1/push/devices', {
+      method: 'DELETE',
+      body: JSON.stringify({ token }),
+    });
   }
   private owner: Promise<string | undefined> | undefined;
   /**

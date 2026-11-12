@@ -15,6 +15,7 @@ import { SessionProvider, useSession } from '@/lib/session';
 
 // The tab screens run outside a navigator here.
 jest.mock('expo-router', () => ({
+  useLocalSearchParams: () => ({}),
   useRouter: () => ({ navigate: () => {} }),
   useFocusEffect: () => {},
 }));

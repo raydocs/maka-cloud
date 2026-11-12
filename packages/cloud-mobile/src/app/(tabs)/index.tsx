@@ -9,12 +9,13 @@ import {
   dutyTime,
   verbOf,
 } from '@maka-cloud/client';
-import { useFocusEffect, useRouter } from 'expo-router';
+import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { AppState, Pressable, ScrollView, View } from 'react-native';
 import { Composer, Dock, TopFade, useConversationSheet } from '@/components/Composer';
 import { DecisionCard } from '@/components/Decision';
 import { InboxStatus } from '@/components/InboxStatus';
+import { NotificationsCard } from '@/components/Notifications';
 
 import {
   ButtonRow,
@@ -30,6 +31,7 @@ import {
 import { type Language, useT } from '@/lib/i18n';
 import { startersFor } from '@/lib/ideas';
 import { useWorkspace } from '@/lib/session';
+import { useTheme } from '@/lib/theme';
 import {
   partOfDay,
   type SinceRow,
@@ -50,6 +52,9 @@ import {
 export default function Home() {
   const { client, conversations, visits, started, open } = useWorkspace();
   const router = useRouter();
+  /** A decision a notification or a link opened (`makacloud://decision/<id>`): marked among the cards. */
+  const { decision: linked } = useLocalSearchParams<{ decision?: string }>();
+  const theme = useTheme();
   const { t: say, tx, lang } = useT();
   const starter = useMemo(() => new ConversationStarter(client), [client]);
   const feed = useMemo(() => new HomeFeed(client, visits), [client, visits]);
@@ -186,7 +191,19 @@ export default function Home() {
                 </T>
               </View>
               {needs.map((item) => (
-                <View key={item.itemId} style={{ gap: 8 }}>
+                <View
+                  key={item.itemId}
+                  testID={item.itemId === linked ? 'home-linked-decision' : undefined}
+                  accessibilityLabel={item.itemId === linked ? say('home.linked') : undefined}
+                  style={[
+                    { gap: 8 },
+                    item.itemId === linked && {
+                      borderLeftWidth: 3,
+                      borderLeftColor: theme.warn,
+                      paddingLeft: 10,
+                    },
+                  ]}
+                >
                   <Chip>{tx(verbOf(item.kind))}</Chip>
                   <DecisionCard
                     item={item}
@@ -211,6 +228,8 @@ export default function Home() {
               {answerError ? <T kind="error">{tx(answerError)}</T> : null}
             </Card>
           )}
+
+          <NotificationsCard place="home" />
 
           {/* Where the decisions would be: bars while they are read, a retry when they could not be. */}
           {needs.length === 0 && !known && (
