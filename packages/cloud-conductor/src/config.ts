@@ -24,6 +24,8 @@ export interface ModelAccess {
   baseUrl?: string;
   /** Stable id of this connection; every Maka session is created with it (T3 path 6). */
   connectionId?: string;
+  /** The conductor's model. Defaults to `MODEL_ID`; a key limited to one model sets it here. */
+  model?: string;
   /**
    * The model gateway in this process. With it, every model request is reserved in the run ledger
    * at its worst-case cost before it is sent and settled there at what it cost; the reported
@@ -105,6 +107,10 @@ export function connectionIdOf(access: ModelAccess): string {
   return access.connectionId ?? DEFAULT_CONNECTION_ID;
 }
 
+export function modelOf(access: ModelAccess): string {
+  return access.model ?? MODEL_ID;
+}
+
 /**
  * An API-key Anthropic connection. Maka's model metadata stops at
  * claude-opus-5, so the connection declares Opus 5.5's thinking levels itself.
@@ -116,10 +122,10 @@ export function conductorConnection(access: ModelAccess): LlmConnection {
     name: 'Anthropic (conductor)',
     providerType: 'anthropic',
     ...(access.baseUrl ? { baseUrl: access.baseUrl } : {}),
-    defaultModel: MODEL_ID,
-    models: [{ id: MODEL_ID, contextWindow: 1_000_000 }],
+    defaultModel: modelOf(access),
+    models: [{ id: modelOf(access), contextWindow: 1_000_000 }],
     modelOverrides: {
-      [MODEL_ID]: { thinkingLevels: ['low', 'medium', 'high', 'xhigh', 'max'] },
+      [modelOf(access)]: { thinkingLevels: ['low', 'medium', 'high', 'xhigh', 'max'] },
     },
     enabled: true,
     createdAt: 1,
@@ -133,7 +139,7 @@ export function conductorConnection(access: ModelAccess): LlmConnection {
  */
 export function providerStateIdentity(access: ModelAccess): `sha256:${string}` {
   const digest = createHash('sha256')
-    .update(`${connectionIdOf(access)}\0${MODEL_ID}`)
+    .update(`${connectionIdOf(access)}\0${modelOf(access)}`)
     .digest('hex');
   return `sha256:${digest}`;
 }

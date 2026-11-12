@@ -519,6 +519,7 @@ export async function startStack(
           ...(config.conductor.connectionId === undefined
             ? {}
             : { connectionId: config.conductor.connectionId }),
+          ...(config.conductor.model === undefined ? {} : { model: config.conductor.model }),
           gateway: conductorGateway(gateway.gateway, ownerOfSession),
         },
         playbooks: STACK_PLAYBOOKS,

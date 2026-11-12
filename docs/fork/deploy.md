@@ -488,6 +488,7 @@ the build. Run `maka-cloud` with no arguments for the same list.
 | `MAKA_CLOUD_MODES` | JSON: the modes (quick, standard, deep) as "maka-cloud modes" prints them: per mode the conductor, implementer, reviewer and helper models and effort, and the budgets; every model named needs a gateway price. Unset: the built-in modes |
 | `MAKA_CLOUD_VERIFIER_MODELS` | JSON array of models that check finished work: {vendor, model, inputPerMTokUsd, outputPerMTokUsd}; none means only the checks that need no model run |
 | `MAKA_CLOUD_VERIFIER_DAILY_CAP_USD` | daily cap on model checks, default 5; changeable in the inbox settings |
+| `MAKA_CLOUD_CONDUCTOR_MODEL` | Anthropic model the conductor talks with (default claude-opus-5-5); must have a gateway price |
 | `MAKA_CLOUD_SUMMARY_MODEL` | model that writes the digest summary (default claude-haiku-5-5) |
 | `MAKA_CLOUD_INVITE_DAILY_USD` | most an invite may spend per UTC day unless set with "cloud-server invite limits", default 5 |
 | `MAKA_CLOUD_INVITE_MONTHLY_USD` | most an invite may spend per UTC month unless set with "cloud-server invite limits", default 50 |
