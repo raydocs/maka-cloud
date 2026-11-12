@@ -72,6 +72,10 @@ export interface InstaboxCreateMachineRequest {
   /** At most 32 labels, keys of 1-64 `[A-Za-z0-9_.-]`, values up to 512 characters. */
   metadata?: Record<string, string>;
   desiredState?: 'running' | 'stopped';
+  /**
+   * Ignored: Instabox sizes are fixed per template (`POST /v1/machines` answers 400
+   * `spec_not_allowed` when a size is sent), so `createMachine` never sends these.
+   */
   vcpus?: number;
   memMiB?: number;
 }
@@ -231,10 +235,12 @@ export class InstaboxClient {
     if ((request.templateId === undefined) === (request.snapshotId === undefined)) {
       throw new Error('createMachine needs exactly one of templateId and snapshotId.');
     }
+    // Sizes are fixed per template; sending one is rejected with `spec_not_allowed`.
+    const { vcpus: _vcpus, memMiB: _memMiB, ...body } = request;
     return await this.send<InstaboxOperation>({
       method: 'POST',
       path: '/v1/machines',
-      body: request,
+      body,
       idempotencyKey: options.idempotencyKey ?? `maka-create-${randomUUID()}`,
       ...(options.signal ? { signal: options.signal } : {}),
       timeoutMs: API_TIMEOUT_MS,
