@@ -1,6 +1,6 @@
 /**
  * BYOM wire protocol. The device always dials out (no inbound ports).
- * Keep the daemon package (`@maka-cloud/superagent-device`) aligned with this
+ * The device daemon package was removed (it was not wired in); recover it from git history if BYOM returns.
  * file: same `v: 1` envelopes and field names.
  */
 

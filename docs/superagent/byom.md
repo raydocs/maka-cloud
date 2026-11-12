@@ -1,5 +1,7 @@
 # BYOM — Bring Your Own Machine
 
+> Removed 2026-11-12: the `@maka-cloud/superagent-device` package was deleted because nothing ran it. Recover it from git history if BYOM comes back.
+
 Default **off**. A worker still runs on an Instabox box unless the owner
 turns this on, pairs a device, and opts a repo in.
 
