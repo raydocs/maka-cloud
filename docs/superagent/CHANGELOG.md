@@ -8,6 +8,14 @@ file is missing from the branch diff, when a later Super-agent commit
 omits it, when uncommitted Super-agent edits leave it unchanged, or when
 a heading time is more than five minutes off that SHA's committer date.
 
+## 2026-11-12 04:44 MST — chore/drop-orphan-packages
+
+- **What:** `byom-protocol.ts` header comment no longer points at the deleted `@maka-cloud/superagent-device` package. Comment only.
+- **Why:** `cloud-plans` and `cloud-superagent-device` were never wired into the product and are removed.
+- **Tests:** `@maka-cloud/superagent` changelog suite.
+- **Live:** n/a
+- **Migrations / risk:** none.
+
 ## 2026-11-02 18:37 MST — cursor/superagent-wiring-51be
 
 - **What:** merge the updated `cursor/superagent-decisions-policy-51be` tip (`3c7049b04`), which already contains scheduler, intake, BYOM, duplex, lessons, and review-verify. Kept decision-card wiring (`recordFromCardResolution`, must-ask rows on `statusSnapshot.decisions`), host flags default off, and `CodingLoopHandler` on `DuplexLoop`. Speculative still runs only after a cross-source merge misses. sqlite `user_version` stays 2.
