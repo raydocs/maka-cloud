@@ -618,7 +618,7 @@ export const ENV_VARIABLES = [
   ],
   [
     'MAKA_CLOUD_SUPERAGENT_ACTORS',
-    'comma separated GitHub logins that may spawn an unowned Super-agent worker. Unset: any non-bot login is admitted',
+    'comma separated GitHub logins that may spawn an unowned Super-agent worker. Set: Super-agent runs in the host process and takes the signed GitHub deliveries. Unset: Super-agent does not start',
   ],
   [
     'MAKA_CLOUD_DEEP_MODE',
@@ -1191,7 +1191,7 @@ export function describeConfig(config: StackConfig): string[] {
     `GitHub token:        ${config.githubTokenProblem ?? 'set (fine-grained)'}`,
     `PR follow-up:        checks of each pull request the employee opens are followed (${config.dutiesSet ? 'webhook, and a poll every 10 min' : 'a poll every 2 min'}, at most 6 h); on red ${config.prAutoFix ? 'one verified fix is pushed, then a second red needs you' : 'it needs you and offers the fix (MAKA_CLOUD_PR_AUTOFIX=0)'}; on green ${config.prAutoMerge ? 'a reviewed change on the employee’s own branch is merged' : 'nothing is merged (MAKA_CLOUD_AUTOMERGE=0)'}`,
     `standing duties:     ${config.dutiesSet ? `on, projects may be registered for ${config.dutyLinks.length === 0 ? 'no repository yet' : config.dutyLinks.map((link) => link.repo).join(', ')}` : 'off (set MAKA_GITHUB_WEBHOOK_SECRET to turn them on)'}`,
-    `super-agent:         in-process (${config.superagentDbPath}${config.superagentActors.length === 0 ? '' : `; spawn limited to ${config.superagentActors.join(', ')}`})`,
+    `super-agent:         ${config.superagentActors.length === 0 ? 'off (set MAKA_CLOUD_SUPERAGENT_ACTORS to turn it on)' : `in-process (${config.superagentDbPath}; spawn limited to ${config.superagentActors.join(', ')})`}`,
     `super-agent features: byom ${onOff(config.superagentFeatures.byom)}, peer-review ${onOff(config.superagentFeatures.peerReview)}, release-verify ${onOff(config.superagentFeatures.releaseVerify)}${config.superagentFeatures.releaseVerifyUrl ? '' : ' (no /version endpoint)'}, sweep ${onOff(config.superagentFeatures.sweep)}, learning ${onOff(config.superagentFeatures.learning)}, rules ${config.superagentFeatures.rulesPath ? 'file' : 'off'}`,
     `sign-in:             ${describeSignIn(config.signIn)}`,
     `deep mode:           ${config.deepMode ? 'on' : 'off (set MAKA_CLOUD_DEEP_MODE=1 to turn it on)'}`,

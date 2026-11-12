@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { createECDH, createHmac, randomBytes } from 'node:crypto';
@@ -722,7 +723,7 @@ test('a running stack backs itself up: the copy restores, holds no key and no pu
     CLOUD_PUSH_VAPID_PRIVATE: vapid.privateKey,
     CLOUD_PUSH_SUBJECT: 'mailto:ops@example.test',
   };
-  const started = await start(t, undefined, env);
+  const started = await start(t, undefined, env, true, { superagent: {} });
   const { stack, dataDir } = started;
   const invite = stack.cloud.server.invites.create('backed up');
   const headers = { authorization: `Bearer ${invite.token}`, 'content-type': 'application/json' };
@@ -1977,7 +1978,7 @@ test('a pull request a task opened is followed: green is a quiet update in its c
   assert.deepEqual(warnings, []);
 });
 
-test('the stack always starts Super-agent in process and a stalled worker is a stuck card', async (t) => {
+test('a stack given Super-agent runs it in process and a stalled worker is a stuck card', async (t) => {
   let now = 1_700_000_000_000;
   const { stack, inviteId } = await start(t, undefined, {}, true, {
     superagent: {
@@ -2066,9 +2067,11 @@ test('a HMAC-verified duty delivery is a Super-agent Source; a comment from a no
   );
   const hook = (event: string, payload: unknown, id: string) =>
     fetch(`${stack.cloud.server.url}/github/webhook`, signed(event, payload, id));
+  const superagent = stack.superagent;
+  assert.ok(superagent);
   assert.equal((await hook('issues', issueEvent(7), 'sa-src-1')).status, 200);
-  await stack.superagent.flushed();
-  const workers = stack.superagent.agent.workers(own.made.inviteId);
+  await superagent.flushed();
+  const workers = superagent.agent.workers(own.made.inviteId);
   assert.equal(workers.length, 1, 'alice opening an issue spawns one worker');
 
   assert.equal(
@@ -2092,12 +2095,29 @@ test('a HMAC-verified duty delivery is a Super-agent Source; a comment from a no
     ).status,
     200,
   );
-  await stack.superagent.flushed();
+  await superagent.flushed();
   assert.equal(
-    stack.superagent.agent.workers(own.made.inviteId).length,
+    superagent.agent.workers(own.made.inviteId).length,
     1,
     'mallory does not spawn a second worker',
   );
+});
+
+test('without MAKA_CLOUD_SUPERAGENT_ACTORS Super-agent does not start: a signed delivery spawns nothing and the progress route is 404', async (t) => {
+  const own = dutyOwner();
+  const { stack, dataDir } = await start(t, undefined, DUTY_ENV, true, {}, own.prepare);
+  assert.equal(stack.superagent, undefined);
+  const hook = await fetch(
+    `${stack.cloud.server.url}/github/webhook`,
+    signed('issues', issueEvent(7), 'sa-off-1'),
+  );
+  assert.equal(hook.status, 200, 'the standing duties still take the delivery');
+  const token = stack.cloud.server.invites.create('test').token;
+  const progress = await fetch(`${stack.cloud.server.url}/v1/superagent/progress`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  assert.equal(progress.status, 404);
+  assert.equal(existsSync(join(dataDir, 'superagent.db')), false);
 });
 
 test('a wait the conductor registers is listed for its owner and, once it holds, wakes the conversation', async (t) => {

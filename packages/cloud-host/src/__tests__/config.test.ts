@@ -436,7 +436,7 @@ test('standing duties are off without a webhook secret, and the data layout name
   assert.equal(config.superagentDbPath, '/srv/maka/superagent.db');
   assert.deepEqual(config.superagentActors, []);
   assert.match(describeConfig(config).join('\n'), /standing duties:\s+off/);
-  assert.match(describeConfig(config).join('\n'), /super-agent:\s+in-process/);
+  assert.match(describeConfig(config).join('\n'), /super-agent:\s+off/);
 });
 
 test('standing duties need a long enough secret and a list of repositories, and no message prints the secret', () => {
@@ -738,10 +738,9 @@ test('proposed cards are off unless asked for, and need duties and a GitHub toke
   const on = readStackConfig({ ...duties, MAKA_GITHUB_TOKEN: token, MAKA_CLOUD_CARDS: '1' });
   assert.equal(on.cardsSet, true);
   assert.match(describeConfig(on).join('\n'), /proposed cards:\s+on/);
-  assert.deepEqual(
-    readStackConfig({ ...ENV, MAKA_CLOUD_SUPERAGENT_ACTORS: 'alice, bob' }).superagentActors,
-    ['alice', 'bob'],
-  );
+  const actors = readStackConfig({ ...ENV, MAKA_CLOUD_SUPERAGENT_ACTORS: 'alice, bob' });
+  assert.deepEqual(actors.superagentActors, ['alice', 'bob']);
+  assert.match(describeConfig(actors).join('\n'), /super-agent:\s+in-process .*alice, bob/);
   assert.ok(ENV_VARIABLES.some(([name]) => name === 'MAKA_CLOUD_SUPERAGENT_ACTORS'));
   assert.ok(!describeConfig(on).join('\n').includes(token));
   assert.equal(readStackConfig({ ...duties, MAKA_CLOUD_CARDS: '0' }).cardsSet, false);
