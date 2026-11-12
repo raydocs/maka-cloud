@@ -59,7 +59,6 @@ import {
 import {
   startSuperagentFeatureTimers,
   superagentOptionsFromFeatures,
-  sweepTargets,
 } from './superagent-features.js';
 import { createHttpMailer } from './mail.js';
 import {
@@ -525,7 +524,7 @@ export async function startStack(
       ...agentOpts
     } = superagentOptions;
     if (superagentOn) {
-      const featureOptions = superagentOptionsFromFeatures(config.superagentFeatures, env);
+      const featureOptions = superagentOptionsFromFeatures(config.superagentFeatures);
       const wiredSuperagent = {
         ...featureOptions,
         ...agentOpts,
@@ -777,17 +776,6 @@ export async function startStack(
         every: tickEvery,
         reloadRules: () => {
           superagentRt?.agent.rules.maybeReload();
-        },
-        sweep: () => {
-          const tenants = sweepTargets(
-            config.superagentFeatures,
-            config.dutyLinks.map((link) => link.inviteId),
-          );
-          for (const tenantId of tenants) {
-            void superagentRt?.agent
-              .runSweep(tenantId, config.superagentFeatures.sweepRepo)
-              .catch((error: unknown) => warn('A Super-agent sweep failed', error));
-          }
         },
       });
     }

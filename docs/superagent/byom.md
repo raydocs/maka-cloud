@@ -89,12 +89,9 @@ stuck. Inbox events are not consumed until the device is back.
 
 ## Enable (owner)
 
-Cloud (still off unless both are set):
-
-```bash
-export MAKA_CLOUD_BYOM=1
-export MAKA_CLOUD_BYOM_REPOS='acme/ios,acme/app'
-```
+The host no longer reads `MAKA_CLOUD_BYOM` or `MAKA_CLOUD_BYOM_REPOS`: BYOM
+cannot be turned on in the product. `byomSettingsFromEnv()` still parses them
+for a caller that constructs `Superagent` itself.
 
 The Super-agent constructor does **not** read those itself. The host
 must pass `byomSettingsFromEnv()` / a `ByomHub` in. Tests never set

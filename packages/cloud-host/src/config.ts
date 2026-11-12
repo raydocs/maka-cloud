@@ -654,30 +654,6 @@ export const ENV_VARIABLES = [
     'comma separated owner/name@<installation id>=<invite id> links a project may be registered through: the repository, the GitHub App installation it lives in and the one invite that owns it; needs MAKA_GITHUB_WEBHOOK_SECRET. Unset: no project can be registered',
   ],
   [
-    'MAKA_CLOUD_BYOM',
-    '1 turns on bring-your-own-machine execution for Super-agent. Unset or 0: Instabox only',
-  ],
-  [
-    'MAKA_CLOUD_BYOM_REPOS',
-    'comma separated owner/name repos that may run on a paired machine. Used only with MAKA_CLOUD_BYOM=1',
-  ],
-  ['MAKA_CLOUD_PEER_REVIEW', '1 turns on cross-model review before push. Unset or 0: off'],
-  [
-    'MAKA_CLOUD_PEER_REVIEW_URL',
-    'http(s) URL of the peer-review completer. Unset: review is enabled but has no client',
-  ],
-  ['MAKA_CLOUD_PEER_REVIEW_MODEL', 'model name passed to the peer-review client'],
-  [
-    'MAKA_CLOUD_RELEASE_VERIFY',
-    '1 turns on the post-deploy /version check. Unset or 0: off. With no MAKA_CLOUD_RELEASE_VERIFY_URL the probe is skipped',
-  ],
-  ['MAKA_CLOUD_RELEASE_VERIFY_URL', 'http(s) /version URL. Unset: the probe is skipped'],
-  ['MAKA_CLOUD_SWEEP', '1 turns on the weekly cleanup sweep. Unset or 0: no timer'],
-  ['MAKA_CLOUD_SWEEP_TENANT', 'invite id the weekly sweep runs as. Unset: duty-link invites'],
-  ['MAKA_CLOUD_SWEEP_REPO', 'owner/name the weekly sweep opens its PR on'],
-  ['MAKA_CLOUD_SWEEP_EVERY_MS', 'milliseconds between sweeps, default 7 days'],
-  ['MAKA_CLOUD_LEARNING', '1 turns on the mistake book. Unset or 0: off'],
-  [
     'MAKA_CLOUD_SUPERAGENT_RULES',
     'path of superagent.rules.json. Unset: no rules file. The stack reloads it when the file changes',
   ],
@@ -1165,10 +1141,6 @@ function gatewayModels(raw: string | undefined, problems: string[]): ModelPrice[
 }
 
 /** The resolved configuration without secret values, one setting per line. */
-function onOff(enabled: boolean): 'on' | 'off' {
-  return enabled ? 'on' : 'off';
-}
-
 export function describeConfig(config: StackConfig): string[] {
   return [
     `data directory:      ${config.dataDir}`,
@@ -1192,7 +1164,7 @@ export function describeConfig(config: StackConfig): string[] {
     `PR follow-up:        checks of each pull request the employee opens are followed (${config.dutiesSet ? 'webhook, and a poll every 10 min' : 'a poll every 2 min'}, at most 6 h); on red ${config.prAutoFix ? 'one verified fix is pushed, then a second red needs you' : 'it needs you and offers the fix (MAKA_CLOUD_PR_AUTOFIX=0)'}; on green ${config.prAutoMerge ? 'a reviewed change on the employee’s own branch is merged' : 'nothing is merged (MAKA_CLOUD_AUTOMERGE=0)'}`,
     `standing duties:     ${config.dutiesSet ? `on, projects may be registered for ${config.dutyLinks.length === 0 ? 'no repository yet' : config.dutyLinks.map((link) => link.repo).join(', ')}` : 'off (set MAKA_GITHUB_WEBHOOK_SECRET to turn them on)'}`,
     `super-agent:         ${config.superagentActors.length === 0 ? 'off (set MAKA_CLOUD_SUPERAGENT_ACTORS to turn it on)' : `in-process (${config.superagentDbPath}; spawn limited to ${config.superagentActors.join(', ')})`}`,
-    `super-agent features: byom ${onOff(config.superagentFeatures.byom)}, peer-review ${onOff(config.superagentFeatures.peerReview)}, release-verify ${onOff(config.superagentFeatures.releaseVerify)}${config.superagentFeatures.releaseVerifyUrl ? '' : ' (no /version endpoint)'}, sweep ${onOff(config.superagentFeatures.sweep)}, learning ${onOff(config.superagentFeatures.learning)}, rules ${config.superagentFeatures.rulesPath ? 'file' : 'off'}`,
+    `super-agent rules:   ${config.superagentFeatures.rulesPath ? 'file' : 'off'}`,
     `sign-in:             ${describeSignIn(config.signIn)}`,
     `deep mode:           ${config.deepMode ? 'on' : 'off (set MAKA_CLOUD_DEEP_MODE=1 to turn it on)'}`,
     `proposed cards:      ${config.cardsSet ? 'on, each project is scanned read-only once a day' : 'off (set MAKA_CLOUD_CARDS=1 to turn them on)'}`,
