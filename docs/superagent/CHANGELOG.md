@@ -16,7 +16,7 @@ a heading time is more than five minutes off that SHA's committer date.
 - **Live:** n/a
 - **Migrations / risk:** none.
 
-## 2026-11-12 03:50 MST — chore/superagent-drop-offline-tools
+## 2026-11-12 03:50 MST — chore/superagent-drop-offline-tools — 4f809cc65
 
 - **What:** Remove the stand-alone harnesses nothing in the product calls: `local-loop`, `real-loop`, `live-smoke`, `metrics` (sources, tests, `scripts/*.mjs`, npm scripts), their helpers `loop-coder.ts` and `loop-github.ts`, and the unused `prompt-cache.ts` / `session.ts`. `CiStatus` moves into `loop.ts`, its only remaining user. `status`, BYOM, hi-device and everything `runtime.ts` imports stay. Docs: `real-loop.md` and `p0-checklist.md` removed, `quickstart.md` cut to what still exists.
 - **Why:** The host starts Super-agent with no handler, so none of this ran in production; it was only reachable from the package's own npm scripts and tests.
