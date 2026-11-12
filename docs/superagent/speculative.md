@@ -44,5 +44,6 @@ export MAKA_CLOUD_SPECULATIVE_REPOS='acme/app'
 export MAKA_CLOUD_SPECULATIVE_ISSUE='login'   # optional issue rule
 ```
 
-The Super-agent constructor does **not** read those itself. The host
-must pass `speculativeSettingsFromEnv()` in. Tests never set these.
+The Super-agent constructor does **not** read those itself, and the host does
+not pass `speculativeSettingsFromEnv()` in: speculative runs cannot be turned
+on in the product. Tests never set these.

@@ -510,18 +510,6 @@ the build. Run `maka-cloud` with no arguments for the same list.
 | `MAKA_CLOUD_MAIL_FROM` | the sender of sign-in mail, an address or Name <address> your mail service allows |
 | `MAKA_CLOUD_TRUST_PROXY` | comma separated IP addresses or ranges of the reverse proxy in front of the server. Only a request from one of them has its X-Forwarded-For client counted in the sign-in limits; from any other peer the header is ignored. Default 127.0.0.1,::1 (a proxy on the same host); under Compose the proxy’s fixed address. 0: trust none |
 | `MAKA_CLOUD_DUTY_REPOS` | comma separated owner/name@<installation id>=<invite id> links a project may be registered through: the repository, the GitHub App installation it lives in and the one invite that owns it; needs MAKA_GITHUB_WEBHOOK_SECRET. Unset: no project can be registered |
-| `MAKA_CLOUD_BYOM` | 1 turns on bring-your-own-machine execution for Super-agent. Unset or 0: Instabox only |
-| `MAKA_CLOUD_BYOM_REPOS` | comma separated owner/name repos that may run on a paired machine. Used only with MAKA_CLOUD_BYOM=1 |
-| `MAKA_CLOUD_PEER_REVIEW` | 1 turns on cross-model review before push. Unset or 0: off |
-| `MAKA_CLOUD_PEER_REVIEW_URL` | http(s) URL of the peer-review completer. Unset: review is enabled but has no client |
-| `MAKA_CLOUD_PEER_REVIEW_MODEL` | model name passed to the peer-review client |
-| `MAKA_CLOUD_RELEASE_VERIFY` | 1 turns on the post-deploy /version check. Unset or 0: off. With no MAKA_CLOUD_RELEASE_VERIFY_URL the probe is skipped |
-| `MAKA_CLOUD_RELEASE_VERIFY_URL` | http(s) /version URL. Unset: the probe is skipped |
-| `MAKA_CLOUD_SWEEP` | 1 turns on the weekly cleanup sweep. Unset or 0: no timer |
-| `MAKA_CLOUD_SWEEP_TENANT` | invite id the weekly sweep runs as. Unset: duty-link invites |
-| `MAKA_CLOUD_SWEEP_REPO` | owner/name the weekly sweep opens its PR on |
-| `MAKA_CLOUD_SWEEP_EVERY_MS` | milliseconds between sweeps, default 7 days |
-| `MAKA_CLOUD_LEARNING` | 1 turns on the mistake book. Unset or 0: off |
 | `MAKA_CLOUD_SUPERAGENT_RULES` | path of superagent.rules.json. Unset: no rules file. The stack reloads it when the file changes |
 | `MAKA_CLOUD_RULES_EVERY_MS` | milliseconds between rules-file reloads, default 60000 |
 <!-- env:end -->
