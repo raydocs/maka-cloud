@@ -1057,10 +1057,9 @@ against the DSH prototype's full-access operator user.
 - Persistence: package-local SQLite (`superagent.db` next to the server
   dir), not a `cloud-server` migration. P4 adds `usage_events` as schema
   2 in that same file (additive). **No cloud-server migration.**
-- `WorkspaceStore`: git clone default on the T6 fleet; LayerFS adapter
-  compiled, off, no FUSE/Docker/server. Spike harness:
-  `packages/cloud-runners/scripts/layerfs-gates.mjs` (four gates; `--local`
-  only in CI).
+- `WorkspaceStore`: git clone default, inside `@maka-cloud/superagent` only
+  (the T6 fleet and the coding playbook do not use it); LayerFS adapter
+  compiled, off, no FUSE/Docker/server.
 - Tests (fakes only, no live model or sandbox): pass-through has zero
   judge calls; duplicate Trigger → one worker; sqlite restore resumes
   inbox and plan; looping handler → W3; merge/push/secrets/deploy
