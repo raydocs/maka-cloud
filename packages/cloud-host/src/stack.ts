@@ -152,8 +152,8 @@ export interface StackDependencies {
    */
   boxes?: Pick<BoxServiceOptions, 'guard' | 'timers'> & { client?: InstaboxClient };
   /**
-   * Super-agent runs in this process (recommended). Tests replace the store,
-   * handler, judge, clock or tick timer. HeuristicJudge stays the default.
+   * Passing this starts Super-agent in this process, as `MAKA_CLOUD_SUPERAGENT_ACTORS` does.
+   * Tests replace the store, handler, judge, clock or tick timer.
    */
   superagent?: Omit<SuperagentOptions, 'store' | 'onEscalate'> & {
     store?: SuperagentStore;
@@ -181,8 +181,11 @@ export interface Stack {
   followUp: PrFollowUp;
   /** The conversation-bound waits the conductor registers with `wait_for`. */
   automations: Automations;
-  /** In-process Super-agent: event intake, workers, watchdog. Always present. */
-  superagent: HostSuperagent;
+  /**
+   * In-process Super-agent: event intake, workers, watchdog. Absent while
+   * `MAKA_CLOUD_SUPERAGENT_ACTORS` is not set: no worker spawns and no judge call is made.
+   */
+  superagent?: HostSuperagent;
   /** Writes a backup now, as the daily one does. Throws when `MAKA_CLOUD_BACKUP_DIR` is not set. */
   backup(): Promise<BackupResult>;
   /** Looks at the day's spend now and sends the alert if it is due. A no-op without an alert set. */
@@ -512,6 +515,8 @@ export async function startStack(
       dependencies.createRunners ?? ((options) => createCloudRunnersFromEnv(env, options))
     )(runnerOptions);
 
+    const superagentOn =
+      dependencies.superagent !== undefined || config.superagentActors.length > 0;
     const superagentOptions = dependencies.superagent ?? {};
     const {
       store: superagentStore,
@@ -519,30 +524,32 @@ export async function startStack(
       every: superagentEvery,
       ...agentOpts
     } = superagentOptions;
-    const featureOptions = superagentOptionsFromFeatures(config.superagentFeatures, env);
-    const wiredSuperagent = {
-      ...featureOptions,
-      ...agentOpts,
-      sharedBox: agentOpts.sharedBox ?? true,
-      sandbox:
-        agentOpts.sandbox ??
-        (instaboxClient === undefined ? undefined : instaboxSandboxPort(instaboxClient)),
-      orgSecrets: agentOpts.orgSecrets ?? new EnvOrgSecrets({ env }),
-      judge: agentOpts.judge ?? createJudgeFromEnv(env),
-      watchdogNarrator: agentOpts.watchdogNarrator ?? createWatchdogNarratorFromEnv(env),
-      admission: {
-        ...agentOpts.admission,
-        ...(config.superagentActors.length > 0 && agentOpts.admission?.allowActors === undefined
-          ? { allowActors: config.superagentActors }
-          : {}),
-      },
-    };
-    superagentRt =
-      superagentStore === undefined
-        ? await openHostSuperagent(config.superagentDbPath, wiredSuperagent)
-        : startHostSuperagent(superagentStore, wiredSuperagent);
-    if (duties !== undefined && webhookSecret !== undefined) {
-      attachDutySource(duties.service, webhookSecret, config.dutyLinks, superagentRt);
+    if (superagentOn) {
+      const featureOptions = superagentOptionsFromFeatures(config.superagentFeatures, env);
+      const wiredSuperagent = {
+        ...featureOptions,
+        ...agentOpts,
+        sharedBox: agentOpts.sharedBox ?? true,
+        sandbox:
+          agentOpts.sandbox ??
+          (instaboxClient === undefined ? undefined : instaboxSandboxPort(instaboxClient)),
+        orgSecrets: agentOpts.orgSecrets ?? new EnvOrgSecrets({ env }),
+        judge: agentOpts.judge ?? createJudgeFromEnv(env),
+        watchdogNarrator: agentOpts.watchdogNarrator ?? createWatchdogNarratorFromEnv(env),
+        admission: {
+          ...agentOpts.admission,
+          ...(config.superagentActors.length > 0 && agentOpts.admission?.allowActors === undefined
+            ? { allowActors: config.superagentActors }
+            : {}),
+        },
+      };
+      superagentRt =
+        superagentStore === undefined
+          ? await openHostSuperagent(config.superagentDbPath, wiredSuperagent)
+          : startHostSuperagent(superagentStore, wiredSuperagent);
+      if (duties !== undefined && webhookSecret !== undefined) {
+        attachDutySource(duties.service, webhookSecret, config.dutyLinks, superagentRt);
+      }
     }
 
     coding = createCodingRunner(runners, {
@@ -605,24 +612,20 @@ export async function startStack(
       ...(signIn.trustedProxies.length > 0 ? { trustedProxies: signIn.trustedProxies } : {}),
     };
     const signInOn = auth.apple || auth.google || auth.mailer;
+    const progressAgent = superagentRt?.agent;
     cloud = await startCloud({
       modelAvailable: () => Boolean(env.ANTHROPIC_API_KEY?.trim() || env.OPENAI_API_KEY?.trim()),
       quota: quotaSource(journal, invites!, config.spend),
-      progress: {
-        snapshot: (owner) => superagentRt?.agent.statusSnapshot(owner) ?? { at: 0, workers: [] },
-        ask: (owner, text) =>
-          superagentRt?.agent.askWatchdog(owner, text) ?? {
-            text: 'superagent offline',
-            citations: [],
-            source: 'fallback' as const,
-          },
-        instruct: (owner, text) =>
-          superagentRt?.agent.instructWatchdog(owner, text) ?? {
-            text: 'superagent offline',
-            citations: [],
-            source: 'fallback' as const,
-          },
-      },
+      // Absent while Super-agent is off: the server answers 404 and the web hides the list.
+      ...(progressAgent === undefined
+        ? {}
+        : {
+            progress: {
+              snapshot: (owner) => progressAgent.statusSnapshot(owner),
+              ask: (owner, text) => progressAgent.askWatchdog(owner, text),
+              instruct: (owner, text) => progressAgent.instructWatchdog(owner, text),
+            },
+          }),
       ...(push === undefined ? {} : { push }),
       ...(signInOn ? { auth } : {}),
       ...(duties === undefined ? {} : { duties: duties.service }),
@@ -753,40 +756,41 @@ export async function startStack(
     automationTimer.unref();
     releaseAutomations = () => clearInterval(automationTimer);
     void ownAutomations.kick();
-    if (superagentRt === undefined) throw new Error('Super-agent did not start');
-    superagentRt.bindInbox({
-      createConversation: (input) => cloud.server.createConversation(input),
-      raiseStuck: (input) => supervisorRef?.raiseStuck(input) ?? false,
-      postNotice: (conversationId, text) => cloud.conductor.postNotice({ conversationId, text }),
-    });
-    await superagentRt.agent.restore();
-    const tickEvery = superagentEvery ?? defaultEvery;
-    const tickMs = superagentTickMs ?? 60_000;
-    if (tickMs > 0) {
-      releaseSuperagentTick = tickEvery(() => {
-        void superagentRt
-          ?.tick()
-          .catch((error: unknown) => warn('A Super-agent tick failed', error));
-      }, tickMs);
+    if (superagentRt !== undefined) {
+      superagentRt.bindInbox({
+        createConversation: (input) => cloud.server.createConversation(input),
+        raiseStuck: (input) => supervisorRef?.raiseStuck(input) ?? false,
+        postNotice: (conversationId, text) => cloud.conductor.postNotice({ conversationId, text }),
+      });
+      await superagentRt.agent.restore();
+      const tickEvery = superagentEvery ?? defaultEvery;
+      const tickMs = superagentTickMs ?? 60_000;
+      if (tickMs > 0) {
+        releaseSuperagentTick = tickEvery(() => {
+          void superagentRt
+            ?.tick()
+            .catch((error: unknown) => warn('A Super-agent tick failed', error));
+        }, tickMs);
+      }
+      releaseFeatureTimers = startSuperagentFeatureTimers({
+        features: config.superagentFeatures,
+        every: tickEvery,
+        reloadRules: () => {
+          superagentRt?.agent.rules.maybeReload();
+        },
+        sweep: () => {
+          const tenants = sweepTargets(
+            config.superagentFeatures,
+            config.dutyLinks.map((link) => link.inviteId),
+          );
+          for (const tenantId of tenants) {
+            void superagentRt?.agent
+              .runSweep(tenantId, config.superagentFeatures.sweepRepo)
+              .catch((error: unknown) => warn('A Super-agent sweep failed', error));
+          }
+        },
+      });
     }
-    releaseFeatureTimers = startSuperagentFeatureTimers({
-      features: config.superagentFeatures,
-      every: tickEvery,
-      reloadRules: () => {
-        superagentRt?.agent.rules.maybeReload();
-      },
-      sweep: () => {
-        const tenants = sweepTargets(
-          config.superagentFeatures,
-          config.dutyLinks.map((link) => link.inviteId),
-        );
-        for (const tenantId of tenants) {
-          void superagentRt?.agent
-            .runSweep(tenantId, config.superagentFeatures.sweepRepo)
-            .catch((error: unknown) => warn('A Super-agent sweep failed', error));
-        }
-      },
-    });
   } catch (error) {
     releaseAutomations?.();
     await automations?.stop();
@@ -935,7 +939,7 @@ export async function startStack(
     ...(cards === undefined ? {} : { cards }),
     followUp: followUp as PrFollowUp,
     automations: automations as Automations,
-    superagent: superagentRt as HostSuperagent,
+    ...(superagentRt === undefined ? {} : { superagent: superagentRt }),
     backup,
     checkSpendAlert: () => alerts?.tick() ?? Promise.resolve(),
     // The watcher stops first, then the runs, then the gateway cuts whatever is still in flight.
