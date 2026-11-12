@@ -675,7 +675,7 @@ vendor keys in the box.
 - Every Super-agent API takes `tenantId` as an explicit argument, not from
   the event body.
 - `listWorkers(tenantId)` cannot return another tenant's rows.
-- Sandbox acquire is already `tenantId`-keyed in `@maka-cloud/boxes`.
+- Sandbox acquire is already `tenantId`-keyed in `@maka-cloud/runners` (`TenantMachineProvider`).
   Super-agent passes that id through `SandboxPort` metadata.
 - One box per invite at launch (`isolation-model.md` §8). Super-agent does
   not invent a shared pool.

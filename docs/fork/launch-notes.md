@@ -7,7 +7,6 @@ each is off unless its setting is present, so the launch environment file simply
 
 | Off at launch | How it is off | What it would change | Turn it on when |
 | --- | --- | --- | --- |
-| Box pool | `MAKA_CLOUD_BOXES` unset (and `MAKA_CLOUD_BOX_TEMPLATE`, `MAKA_CLOUD_BOX_MAX` unset) | the server would make, sleep and delete sandboxes itself, a pool per invite, instead of the fixed `MAKA_CLOUD_SANDBOXES` machine per invite | the pool's own review items are closed and a second invite needs more than one box |
 | Proposed cards | `MAKA_CLOUD_CARDS` unset or `0` | a daily read-only scan of each registered project, with up to 3 one-tap cards in the inbox | the cards' own review items (secrets in GitHub text, rendering as plain text) are closed |
 | Deep mode | `MAKA_CLOUD_DEEP_MODE` unset or `0` | the conductor is not told about `deep`, a suggestion of it runs as `standard`, and a user's pick of it runs as `standard` with the notice "Deep mode is not available yet"; `deep` holds `standard`'s values everywhere the modes are read | the provenance gap in `docs/fork/post-launch-backlog.md` (Deep research) is closed |
 | Plan vault | removed: `packages/cloud-plans` was imported by no server package; deleted until it is needed (git history keeps it) | the user's own Claude or ChatGPT plan used on the boxes (T27) | revisit after launch; BYO plans carry terms risk |
@@ -46,8 +45,7 @@ confirmed or the task is cancelled.
 
 ## What to check at launch
 
-- `MAKA_CLOUD_SANDBOXES` is set (one machine per invite) and `MAKA_CLOUD_BOXES` is not. The server refuses
-  both set, and refuses neither.
+- `MAKA_CLOUD_SANDBOXES` is set (one machine per invite). The server refuses to start without it.
 - `MAKA_CLOUD_CARDS` is not in the environment file. The start-up summary then says
   `proposed cards:      off (set MAKA_CLOUD_CARDS=1 to turn them on)` and
   `sandbox machines:    N (one per invite)`.

@@ -1,7 +1,6 @@
 import { mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { type Delivery, type Headers, readDelivery } from '@maka-cloud/duties';
-import type { InstaboxClient } from '@maka-cloud/instabox';
 import type { DutyService } from '@maka-cloud/server';
 import type { StuckChoice } from '@maka-cloud/supervisor';
 import {
@@ -110,49 +109,6 @@ export function startHostSuperagent(
     statusSnapshot: (tenantId) => agent.statusSnapshot(tenantId),
     askWatchdog: (tenantId, text) => agent.askWatchdog(tenantId, text),
     instructWatchdog: (tenantId, text) => agent.instructWatchdog(tenantId, text),
-  };
-}
-
-/** Structural wrap so InstaboxClient's extra snapshot signature does not leak. */
-export function instaboxSandboxPort(client: InstaboxClient): SandboxPort {
-  return {
-    ensureRunning: (machineId) => client.ensureRunning(machineId),
-    exec: async (machineId, request) => {
-      const result = await client.exec(machineId, request);
-      return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode };
-    },
-    getMachine: async (machineId) => {
-      const machine = await client.getMachine(machineId);
-      return { id: machine.id, state: machine.state };
-    },
-    createSnapshot: async (machineId, name) => {
-      const snapshot = await client.createSnapshot(machineId, { name });
-      return { id: snapshot.id };
-    },
-    deleteSnapshot: (snapshotId) => client.deleteSnapshot(snapshotId),
-    waitForSnapshot: async (snapshotId) => {
-      await client.waitForSnapshot(snapshotId);
-    },
-    putActivityLease: (machineId, holder) => client.putActivityLease(machineId, holder, 60),
-    deleteActivityLease: (machineId, holder) => client.deleteActivityLease(machineId, holder),
-    suspend: async (machineId) => {
-      await client.suspendMachine(machineId);
-    },
-    createMachine: async (request) => {
-      const created = await client.createMachine({
-        name: request.name,
-        metadata: request.metadata,
-        vcpus: request.vcpus,
-        memMiB: request.memMiB,
-        ...(request.snapshotId
-          ? { snapshotId: request.snapshotId }
-          : { templateId: request.templateId ?? 'universal' }),
-      });
-      return { id: created.machineId ?? created.id };
-    },
-    deleteMachine: async (machineId) => {
-      await client.deleteMachine(machineId);
-    },
   };
 }
 
