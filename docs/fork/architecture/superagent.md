@@ -885,8 +885,8 @@ Filled in by the implementation PR; kept accurate here:
 | Metering hooks | implemented; P4 append-only tenant ledger in `superagent.db` (`usage_events`, schema 2). **No cloud-server migration** |
 | Org Secrets | `OrgSecretPort`; `UnconfiguredOrgSecrets` default; `EnvOrgSecrets` for local/env. Never returns a raw secret |
 | Evidence blocks | `HandlerResult.evidence` → worker output / stuck card |
-| `WorkspaceStore` + `GitCloneStore` | implemented; runners default; coding playbook `prepareHostWorkspace` |
-| `LayerFsStore` | metadata adapter; live mount throws; gate 3 harness `--local` |
+| `WorkspaceStore` + `GitCloneStore` | implemented in `@maka-cloud/superagent` only; runners and the coding playbook do not use it |
+| `LayerFsStore` | metadata adapter; live mount throws; no env flag selects it |
 | `SandboxPort` | interface + `FakeSandbox` + `HttpSandbox` (Instabox HTTP). `createSandboxFromEnv`: fake when no key; throws if key without `INSTABOX_MACHINE_ID`; live when both set. Contract-tested against a mocked HTTP server |
 | Host / duties / conductor wiring | P2: `startStack` creates one in-process Superagent; duties `readDelivery` is the GitHub Source; watchdog escalations are T33 stuck cards. Host passes `instaboxSandboxPort`, `EnvOrgSecrets`, `createJudgeFromEnv` |
 | Local loop | `npm ci` + `npm run build -w @maka-cloud/superagent` + `npm run local-loop -w @maka-cloud/superagent`. CI smoke: `local-loop.test.ts` with fakes |
