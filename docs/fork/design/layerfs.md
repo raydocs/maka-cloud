@@ -1,8 +1,9 @@
 # LayerFS for task workspaces (proposal, after launch)
 
-Status: P3 harness is in-repo. `WorkspaceStore` is on the T6 fleet (`GitCloneStore`
-default). `LayerFsStore` is compiled, off, metadata-only: no FUSE, Docker or
-LayerFS server is started. The four Instabox gates have not been run.
+Status: nothing shipped. `WorkspaceStore` lives in `@maka-cloud/superagent` only
+(`GitCloneStore` default; `LayerFsStore` is metadata-only: no FUSE, Docker or
+LayerFS server is started). The T6 fleet and the coding playbook do not use it:
+the coding path clones inside the sandbox. The four Instabox gates have not been run.
 
 [LayerFS](https://github.com/Ephemeral-AI-Lab/layerfs) (MIT, Rust; 1.0.0 released 2026-10-21) gives
 each agent a complete writable workspace over shared committed history without copying the base.
@@ -25,18 +26,10 @@ already has the dependencies.
 Maka's own append-only step log stays the record of truth. LayerFS holds workspace state, and every
 LayerFS commit id is written to the step log.
 
-## How to run the four gates
+## The four gates
 
-Do **not** run these on the product Instabox from CI. The owner runs `--live` on a
-**disposable** Instabox after P0 credentials exist.
-
-```bash
-# In-repo only: gate 3 against the metadata adapter; gates 0–2 print SKIP.
-node packages/cloud-runners/scripts/layerfs-gates.mjs --local
-
-# Owner-only, disposable Instabox. This script still does not mount LayerFS.
-node packages/cloud-runners/scripts/layerfs-gates.mjs --live
-```
+Do **not** run these on the product Instabox from CI. The owner runs them on a
+**disposable** Instabox.
 
 | Gate | How | Pass | Fail |
 |---|---|---|---|
@@ -45,10 +38,11 @@ node packages/cloud-runners/scripts/layerfs-gates.mjs --live
 | 2. Gain | maka-cloud + one other real repo: wall time to first test, disk per task, vs clone+install (~9.5 min today) | ≥3× first-test | keep the interface, drop the adapter |
 | 3. Correctness | Two workers fork one baseline and edit the same file → conflict, not overwrite; `kill -9` the daemon → `exportPatch` still complete | both | fix or stop |
 
-`--local` already runs gate 3 against `LayerFsStore`. Gates 0–2 stay Instabox.
+The Super-agent tests cover gate 3 against `LayerFsStore`
+(`packages/cloud-superagent/src/__tests__/workspace-store.test.ts`). Gates 0–2 stay Instabox.
 
 The Super-agent architecture (`docs/fork/architecture/superagent.md` §10)
-matches this table. Flag: `MAKA_CLOUD_LAYERFS=1`. Default unset (`GitCloneStore`).
+matches this table. There is no flag: no product path selects `LayerFsStore`.
 
 ## Limits to respect
 
@@ -62,8 +56,7 @@ matches this table. Flag: `MAKA_CLOUD_LAYERFS=1`. Default unset (`GitCloneStore`
 
 ## First steps after the gates
 
-1. A `WorkspaceStore` interface (`@maka-cloud/superagent`, re-exported by
-   `@maka-cloud/runners`). The clone stays the default. Done in P3.
+1. A `WorkspaceStore` interface (`@maka-cloud/superagent`). The clone stays the default.
 2. Kept-change checkpoints as LayerFS commits, behind a setting. This closes the P2-2 class of bug.
 3. Parallel tasks on one repository (C6) on LayerFS overlays.
 4. Blame lines in the PR evidence block.

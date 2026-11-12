@@ -25,7 +25,6 @@ import type {
   SandboxProvider,
   SandboxTool,
 } from './types.js';
-import { type WorkspaceStore, workspaceStoreFromEnv } from './workspace.js';
 import { claudeAdapter, codexAdapter, type TokenPrices, type VendorAdapter } from './vendors.js';
 
 export type RunnerName = 'claude-agent-sdk' | 'codex';
@@ -91,12 +90,6 @@ export interface CloudRunnersOptions {
    */
   prices?: Partial<Record<RunnerName, TokenPrices>>;
   pollIntervalMs?: number;
-  /**
-   * Host-side workspace preparation (git clone default). LayerFS is off unless
-   * `MAKA_CLOUD_LAYERFS=1`. Sandbox clones for the coding playbook stay the
-   * in-box `CLONE_SCRIPT` (isolation I1 / I15).
-   */
-  workspaces?: WorkspaceStore;
   /**
    * The Claude Agent SDK. With it the Claude runner drives its CLI through the SDK (hooks write the
    * task's step log, and the SDK owns the conversation); without it, it runs the CLI directly.
@@ -181,7 +174,6 @@ export class Fleet {
   /** Activity lease renewal timers running. Zero when nothing is in flight. */
   leaseRenewals = 0;
   readonly logRoot: string;
-  readonly workspaces: WorkspaceStore;
   private readonly machines = new Map<string, RemoteMachine>();
   private readonly isolationChecks = new Map<string, Promise<void>>();
   private readonly setups = new Map<string, Promise<void>>();
@@ -199,7 +191,6 @@ export class Fleet {
     this.logRoot = (options.logRoot ?? DEFAULT_LOG_ROOT).replace(/\/+$/u, '');
     // The log directory of a task is deleted as a whole, so it must be a path of its own.
     if (!this.logRoot.startsWith('/')) throw new Error('logRoot must be an absolute path');
-    this.workspaces = options.workspaces ?? workspaceStoreFromEnv();
     this.now = options.now ?? Date.now;
     this.tools = prepareTools(options.sandboxTools ?? []);
     this.poller = new MachinePoller({

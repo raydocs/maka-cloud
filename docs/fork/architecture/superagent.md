@@ -722,8 +722,6 @@ commit id is a pointer in that log.
 Pin a release in `docs/fork/THIRD_PARTY.md` only if gate 0–3 pass and code
 is taken. Android / hi: never.
 
-Flag: `MAKA_CLOUD_LAYERFS=1`. Default unset.
-
 ## 11. Sandbox (Instabox, not boat.dev)
 
 ```ts
@@ -842,11 +840,10 @@ from a non-allowed actor does not spawn.
 
 ### P3 — WorkspaceStore in runners + LayerFS spike
 
-`@maka-cloud/runners` re-exports `WorkspaceStore`; the fleet defaults to
-`GitCloneStore`. The coding playbook calls `prepareHostWorkspace()` for
-host-side prep; sandbox clones stay `CLONE_SCRIPT`. The four-gate harness
-is `packages/cloud-runners/scripts/layerfs-gates.mjs` (`--local` in CI,
-`--live` only on a disposable Instabox). Not run on Instabox in this PR.
+Removed again: nothing on the coding path called the fleet's
+`WorkspaceStore` or `prepareHostWorkspace()`; sandbox clones are
+`CLONE_SCRIPT`. `WorkspaceStore` stays in `@maka-cloud/superagent`, and
+`@maka-cloud/runners` no longer depends on that package.
 
 ### P4 — paid layer
 
