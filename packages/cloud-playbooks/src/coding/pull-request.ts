@@ -31,6 +31,8 @@ export interface PullRequestToolOptions {
   onPublished?(input: {
     taskId: string;
     conversationId: string;
+    /** The conductor run that opened it, so the host can read the run's authority. */
+    runId: string;
     repo: string;
     pr: PublishedPullRequest;
   }): void | Promise<void>;
@@ -74,6 +76,7 @@ export function openPullRequestTool(
     loaded: LoadedChange,
     title: string,
     conversationId: string,
+    runId: string,
     signal: AbortSignal,
   ) => {
     const { delivery, changeSet, verification } = loaded;
@@ -104,6 +107,7 @@ export function openPullRequestTool(
         await options.onPublished?.({
           taskId: delivery.taskId,
           conversationId,
+          runId,
           repo: delivery.repo,
           pr,
         });
@@ -233,9 +237,13 @@ export function openPullRequestTool(
       if (latest?.publishedPr) return { ...latest.publishedPr, alreadyOpen: true };
       let pending = inFlight.get(args.taskId);
       if (!pending) {
-        pending = publish(loaded, args.title, context.conversationId, context.signal).finally(() =>
-          inFlight.delete(args.taskId),
-        );
+        pending = publish(
+          loaded,
+          args.title,
+          context.conversationId,
+          context.runId,
+          context.signal,
+        ).finally(() => inFlight.delete(args.taskId));
         inFlight.set(args.taskId, pending);
       }
       return { ...(await pending), repo: delivery.repo };

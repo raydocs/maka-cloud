@@ -243,11 +243,26 @@ export interface ChecksResult {
   failing: FailingCheck[];
 }
 
+/** The outcome of a merge attempt; `refused` carries GitHub's reason, unscrubbed. */
+export type MergeResult = { merged: true; sha: string } | { merged: false; reason: string };
+
 /** Reads what a pull request's CI says, with the host's GitHub token. */
 export interface PullRequestChecks {
   precheck(): string | undefined;
   pullRequest(repo: string, number: number, signal?: AbortSignal): Promise<PullRequestStatus>;
   checks(repo: string, sha: string, signal?: AbortSignal): Promise<ChecksResult>;
+  /**
+   * Merges the pull request only while its head is still `sha` (GitHub refuses a moved head),
+   * squash when the repository allows it, else a merge commit; then deletes its branch. Never
+   * retries: any refusal comes back as `merged: false`.
+   */
+  merge?(
+    repo: string,
+    number: number,
+    sha: string,
+    branch: string,
+    signal?: AbortSignal,
+  ): Promise<MergeResult>;
   /** The end of a failing check's log, unscrubbed; undefined when it cannot be read. */
   log(
     repo: string,
@@ -304,6 +319,39 @@ export class GitHubChecks implements PullRequestChecks {
     const problem = githubTokenProblem(token);
     if (problem) throw new Error(problem);
     return new Api(this.baseUrl, token as string, this.fetchImpl, signal);
+  }
+
+  async merge(
+    repo: string,
+    number: number,
+    sha: string,
+    branch: string,
+    signal?: AbortSignal,
+  ): Promise<MergeResult> {
+    const api = this.api(signal);
+    let merged: { sha: string };
+    try {
+      const settings = await api.get<{
+        allow_squash_merge?: boolean;
+        allow_merge_commit?: boolean;
+      }>(`/repos/${repo}`);
+      const method =
+        settings.allow_squash_merge !== false
+          ? 'squash'
+          : settings.allow_merge_commit !== false
+            ? 'merge'
+            : 'rebase';
+      merged = await api.put<{ sha: string }>(`/repos/${repo}/pulls/${number}/merge`, {
+        sha,
+        merge_method: method,
+      });
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      return { merged: false, reason: error instanceof Error ? error.message : String(error) };
+    }
+    // The branch is the employee's own; a branch that cannot be deleted stays, the merge stands.
+    await api.delete(`/repos/${repo}/git/refs/heads/${branch}`).catch(() => undefined);
+    return { merged: true, sha: merged.sha };
   }
 
   async pullRequest(
@@ -423,6 +471,14 @@ class Api {
 
   patch<T>(path: string, body: unknown): Promise<T> {
     return this.call<T>('PATCH', path, body);
+  }
+
+  put<T>(path: string, body: unknown): Promise<T> {
+    return this.call<T>('PUT', path, body);
+  }
+
+  delete(path: string): Promise<unknown> {
+    return this.call('DELETE', path);
   }
 
   /** A text body (a job's log), following GitHub's redirect to its storage; at most the last `maxChars`. */

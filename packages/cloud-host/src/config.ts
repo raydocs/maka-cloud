@@ -39,10 +39,16 @@ export interface StackConfig {
   prFollowUpsPath: string;
   /**
    * On a red check of a pull request the employee opened, one fix run of the same task is pushed
-   * onto it once it passes the same checks and review (`MAKA_CLOUD_PR_AUTOFIX=1`). Default off: a
-   * red check is a "needs you" item that offers the fix, and nothing is pushed unapproved.
+   * onto it once it passes the same checks and review. Default on (owner decision, 2026-11-12);
+   * `MAKA_CLOUD_PR_AUTOFIX=0` makes a red check a "needs you" item that offers the fix instead.
    */
   prAutoFix: boolean;
+  /**
+   * A green pull request of the employee's own branch whose change passed the cross-vendor review is
+   * merged, for runs the owner started or duties with merge-when-green authority. Default on (owner
+   * decision, 2026-11-12); `MAKA_CLOUD_AUTOMERGE=0` turns it off.
+   */
+  prAutoMerge: boolean;
   /** The supervisor's own database. */
   supervisorDbPath: string;
   /** The model gateway's journal of what tasks spent, read back after a restart. */
@@ -595,7 +601,11 @@ export const ENV_VARIABLES = [
   ],
   [
     'MAKA_CLOUD_PR_AUTOFIX',
-    '1 turns on the one automatic fix of a pull request the employee opened whose checks fail: the fix is pushed onto the same pull request, without a new approval, only after the same checks and review as the first change, and a second red is a "needs you" item. Off at launch. Unset or 0: off, a red check is a "needs you" item that offers the fix and nothing is pushed',
+    'the one automatic fix of a pull request the employee opened whose checks fail: the fix is pushed onto the same pull request, without a new approval, only after the same checks and review as the first change, and a second red is a "needs you" item. On by default (unset or 1). 0: off, a red check is a "needs you" item that offers the fix and nothing is pushed',
+  ],
+  [
+    'MAKA_CLOUD_AUTOMERGE',
+    'merging a green pull request of the employee’s own branch (maka/…) whose change passed the cross-vendor review, at the head the checks passed on, then deleting the branch; for runs the owner started and duties with merge-when-green authority. A refusal is one "needs you" item, never retried. On by default (unset or 1); needs Contents and Pull requests write on the token. 0: off',
   ],
   [
     'MAKA_GITHUB_WEBHOOK_SECRET',
@@ -795,7 +805,8 @@ export function readStackConfig(
     pushSet: false,
     dutiesSet: false,
     cardsSet: false,
-    prAutoFix: false,
+    prAutoFix: true,
+    prAutoMerge: true,
     dutyLinks: [],
     superagentActors: [],
     superagentFeatures: SUPERAGENT_FEATURES_OFF,
@@ -859,7 +870,9 @@ export function readStackConfig(
       problems.push('MAKA_CLOUD_CARDS needs MAKA_GITHUB_TOKEN, which the scan reads with');
     } else config.cardsSet = true;
   }
-  config.prAutoFix = flag('MAKA_CLOUD_PR_AUTOFIX');
+  // On unless set to 0 (owner decision, 2026-11-12): red → one fix → green → merge.
+  config.prAutoFix = value('MAKA_CLOUD_PR_AUTOFIX') === undefined || flag('MAKA_CLOUD_PR_AUTOFIX');
+  config.prAutoMerge = value('MAKA_CLOUD_AUTOMERGE') === undefined || flag('MAKA_CLOUD_AUTOMERGE');
   const backupDir = value('MAKA_CLOUD_BACKUP_DIR');
   if (backupDir !== undefined) {
     const problem = backupDirProblem(dataDir, backupDir);
@@ -1171,7 +1184,7 @@ export function describeConfig(config: StackConfig): string[] {
     `web search key:      ${config.searchKeySet ? 'set' : 'not set (tasks get no web search)'}`,
     `Web Push:            ${config.pushSet ? 'on' : 'off (set the CLOUD_PUSH_* variables to turn it on)'}`,
     `GitHub token:        ${config.githubTokenProblem ?? 'set (fine-grained)'}`,
-    `PR follow-up:        checks of each pull request the employee opens are followed (${config.dutiesSet ? 'webhook, and a poll every 10 min' : 'a poll every 2 min'}, at most 6 h); on red ${config.prAutoFix ? 'one verified fix is pushed, then a second red needs you' : 'it needs you and offers the fix (set MAKA_CLOUD_PR_AUTOFIX=1 to push one fix by itself)'}`,
+    `PR follow-up:        checks of each pull request the employee opens are followed (${config.dutiesSet ? 'webhook, and a poll every 10 min' : 'a poll every 2 min'}, at most 6 h); on red ${config.prAutoFix ? 'one verified fix is pushed, then a second red needs you' : 'it needs you and offers the fix (MAKA_CLOUD_PR_AUTOFIX=0)'}; on green ${config.prAutoMerge ? 'a reviewed change on the employee’s own branch is merged' : 'nothing is merged (MAKA_CLOUD_AUTOMERGE=0)'}`,
     `standing duties:     ${config.dutiesSet ? `on, projects may be registered for ${config.dutyLinks.length === 0 ? 'no repository yet' : config.dutyLinks.map((link) => link.repo).join(', ')}` : 'off (set MAKA_GITHUB_WEBHOOK_SECRET to turn them on)'}`,
     `super-agent:         in-process (${config.superagentDbPath}${config.superagentActors.length === 0 ? '' : `; spawn limited to ${config.superagentActors.join(', ')}`})`,
     `super-agent features: byom ${onOff(config.superagentFeatures.byom)}, peer-review ${onOff(config.superagentFeatures.peerReview)}, release-verify ${onOff(config.superagentFeatures.releaseVerify)}${config.superagentFeatures.releaseVerifyUrl ? '' : ' (no /version endpoint)'}, sweep ${onOff(config.superagentFeatures.sweep)}, learning ${onOff(config.superagentFeatures.learning)}, rules ${config.superagentFeatures.rulesPath ? 'file' : 'off'}`,

@@ -61,7 +61,14 @@ interface Setup {
 
 async function setup(
   t: TestContext,
-  options: { autoFix?: boolean; store?: MemoryFollowUpStore | JsonFileFollowUpStore } = {},
+  options: {
+    autoFix?: boolean;
+    store?: MemoryFollowUpStore | JsonFileFollowUpStore;
+    autoMerge?: boolean;
+    watchMerge?: boolean;
+    branch?: string;
+    verification?: object;
+  } = {},
 ): Promise<Setup> {
   const fake = await new FakeGitHub(REPO, BASE).start();
   t.after(() => fake.close());
@@ -76,7 +83,7 @@ async function setup(
   };
   const pr = await publisher.publish({
     changeSet: first,
-    branch: 'maka/tsk_1',
+    branch: options.branch ?? 'maka/tsk_1',
     baseRef: 'main',
     title: 'Fix add',
     body: 'body',
@@ -95,7 +102,10 @@ async function setup(
     baseSha: BASE,
     changesPath: await write('changes-1.json', firstChanges),
     changesSha256: createHash('sha256').update(firstChanges).digest('hex'),
-    verificationPath: await write('verification-1.json', JSON.stringify(record())),
+    verificationPath: await write(
+      'verification-1.json',
+      JSON.stringify(options.verification ?? record()),
+    ),
   });
   const notices: string[] = [];
   const reports: FollowUpReport[] = [];
@@ -108,6 +118,7 @@ async function setup(
     deliveries,
     store: options.store ?? new MemoryFollowUpStore(),
     ...(options.autoFix === undefined ? {} : { autoFix: options.autoFix }),
+    ...(options.autoMerge === undefined ? {} : { autoMerge: options.autoMerge }),
     now: () => clock.now,
     startFix: async (input) => {
       fixes.push({ key: input.key, brief: input.brief, title: input.title });
@@ -124,14 +135,16 @@ async function setup(
     },
   });
   t.after(() => followUp.stop());
-  const head = () => fake.refs.get('maka/tsk_1') as string;
+  const branch = options.branch ?? 'maka/tsk_1';
+  const head = () => fake.refs.get(branch) as string;
   await followUp.watch({
     taskId: 'tsk_1',
     conversationId: 'cnv_1',
     repo: REPO,
     number: pr.number,
     url: pr.url,
-    branch: 'maka/tsk_1',
+    branch,
+    ...(options.watchMerge === undefined ? {} : { autoMerge: options.watchMerge }),
   });
   await followUp.settled();
   return {
@@ -402,4 +415,54 @@ test('a GitHub that stays down past the time limit ends the watch quietly instea
   await s.pass();
   assert.equal(s.followUp.list()[0]?.outcome, 'timed_out');
   assert.equal(needsYou(s.reports).length, 0);
+});
+
+test('merge when green: a reviewed change on its own branch is merged at the passing head, and the branch is deleted', async (t) => {
+  const s = await setup(t, { autoMerge: true, watchMerge: true });
+  const head = s.head();
+  s.fake.checkRuns.set(head, [run(1, 'test', 'success')]);
+  await s.pass();
+  assert.deepEqual(s.fake.merges, [{ number: 1, sha: head, method: 'squash' }]);
+  assert.equal(s.fake.refs.has('maka/tsk_1'), false);
+  assert.equal(s.followUp.list()[0]?.outcome, 'merged');
+  assert.deepEqual(
+    s.reports.map((r) => r.needsYou),
+    [false],
+  );
+});
+
+test('merge when green: a head that moved or a merge GitHub refuses is one "needs you" item, never retried', async (t) => {
+  for (const refusal of [
+    { status: 409, message: 'Head branch was modified' },
+    { status: 405, message: 'Pull Request is not mergeable' },
+  ]) {
+    const s = await setup(t, { autoMerge: true, watchMerge: true });
+    s.fake.mergeRefusal = refusal;
+    s.fake.checkRuns.set(s.head(), [run(1, 'test', 'success')]);
+    await s.pass();
+    await s.pass();
+    assert.equal(s.fake.merges.length, 0);
+    assert.deepEqual(
+      s.reports.map((r) => r.needsYou),
+      [true],
+    );
+    assert.equal(s.followUp.list()[0]?.outcome, 'needs_you');
+    assert.equal(s.fake.calls.filter((c) => c.method === 'PUT').length, 1);
+  }
+});
+
+test("merge when green is off with the switch off, without the owner's decision, off its own branch, or for a kept change", async (t) => {
+  const cases = [
+    { autoMerge: false, watchMerge: true },
+    { autoMerge: true, watchMerge: false },
+    { autoMerge: true, watchMerge: true, branch: 'feature/x' },
+    { autoMerge: true, watchMerge: true, verification: record({ kept: { reason: 'review' } }) },
+  ];
+  for (const options of cases) {
+    const s = await setup(t, options);
+    s.fake.checkRuns.set(s.head(), [run(1, 'test', 'success')]);
+    await s.pass();
+    assert.equal(s.fake.merges.length, 0);
+    assert.equal(s.followUp.list()[0]?.outcome, 'passed');
+  }
 });

@@ -7,7 +7,7 @@ import {
   pinnedVersions,
   startBoxService,
 } from '@maka-cloud/boxes';
-import { FREE_PLAYBOOK } from '@maka-cloud/conductor';
+import { authorityReaches, FREE_PLAYBOOK } from '@maka-cloud/conductor';
 import { SqliteSpendJournal } from '@maka-cloud/gateway';
 import { DEFAULT_INSTABOX_BASE_URL, InstaboxClient } from '@maka-cloud/instabox';
 import {
@@ -333,6 +333,7 @@ export async function startStack(
       publisher: new GitHubPublisher(github),
       deliveries,
       autoFix: config.prAutoFix,
+      autoMerge: config.prAutoMerge,
       startFix: async (input) => {
         const root = rootOf(input.taskId);
         if (root === undefined) throw new Error(`Task ${input.taskId} has no conversation`);
@@ -510,15 +511,20 @@ export async function startStack(
       ownsTask: (runId, taskId) => conductor?.state.tasksOf(runId).includes(taskId) ?? false,
       ownsConversationTask: (runId, taskId) =>
         conductor?.state.conversationOwnsTask(runId, taskId) ?? false,
-      onPublished: ({ taskId, conversationId, repo, pr }) =>
-        ownFollowUp.watch({
+      onPublished: ({ taskId, conversationId, runId, repo, pr }) => {
+        // A run the owner started carries no authority and may merge; a standing duty's run
+        // only when its authority is merge-when-green.
+        const authority = conductor?.state.run(runId)?.authority ?? null;
+        return ownFollowUp.watch({
           taskId,
           conversationId,
           repo,
           number: pr.number,
           url: pr.url,
           branch: pr.branch,
-        }),
+          autoMerge: authority === null || authorityReaches(authority, 'merge-when-green'),
+        });
+      },
     });
 
     // Web Push is on when all three VAPID settings are set. The private key is read here from the

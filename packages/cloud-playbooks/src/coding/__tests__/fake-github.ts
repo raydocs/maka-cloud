@@ -60,6 +60,9 @@ export class FakeGitHub {
   readonly logs = new Map<number, string>();
   /** Answer every call with this status and message. */
   failWith: { status: number; message: string } | undefined;
+  /** A merge answers this instead of merging (405 not mergeable, for example). */
+  mergeRefusal: { status: number; message: string } | undefined;
+  readonly merges: { number: number; sha: string; method: string }[] = [];
   url = '';
   private server: Server | undefined;
   private counter = 0;
@@ -120,7 +123,7 @@ export class FakeGitHub {
     const rest = path.slice(prefix.length);
 
     if (req.method === 'GET' && rest === '')
-      return send(200, { default_branch: this.defaultBranch });
+      return send(200, { default_branch: this.defaultBranch, allow_squash_merge: true });
     let m = /^\/git\/commits\/([0-9a-f]{40})$/.exec(rest);
     if (req.method === 'GET' && m) {
       const commit = this.commits.get(m[1] as string);
@@ -213,6 +216,24 @@ export class FakeGitHub {
       }
       this.refs.set(name, body.sha);
       return send(200, { object: { sha: body.sha } });
+    }
+    m = /^\/pulls\/(\d+)\/merge$/.exec(rest);
+    if (req.method === 'PUT' && m) {
+      if (this.mergeRefusal)
+        return send(this.mergeRefusal.status, { message: this.mergeRefusal.message });
+      const pull = this.pulls.find((p) => p.number === Number(m?.[1]));
+      if (!pull) return send(404, { message: 'Not Found' });
+      if (body.sha !== this.refs.get(pull.head)) {
+        return send(409, { message: 'Head branch was modified. Review and try the merge again.' });
+      }
+      this.merges.push({ number: pull.number, sha: body.sha, method: body.merge_method });
+      this.prState = 'merged';
+      return send(200, { sha: `merged-${body.sha}`, merged: true });
+    }
+    m = /^\/git\/refs\/heads\/(.+)$/.exec(rest);
+    if (req.method === 'DELETE' && m) {
+      this.refs.delete(m[1] as string);
+      return send(200, {});
     }
     if (req.method === 'GET' && rest === '/pulls') {
       const head = url.searchParams.get('head') ?? '';

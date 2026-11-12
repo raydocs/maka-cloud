@@ -37,6 +37,8 @@ export interface Watch {
   fixLate?: boolean;
   /** The head commit a "waiting for approval" item was raised for. */
   approvalFor?: string;
+  /** Merge it once green (the owner's merge-when-green decision for this pull request). */
+  autoMerge?: boolean;
   outcome?: WatchOutcome;
 }
 
@@ -87,6 +89,12 @@ export interface FollowUpOptions extends FollowUpPorts {
    * owner's decision.
    */
   autoFix?: boolean;
+  /**
+   * Merge a green pull request of the employee's own branch (`maka/…`) whose change passed the
+   * cross-vendor review, when its watch was started with `autoMerge`. A refusal is one "needs you"
+   * item and is not retried. Default off.
+   */
+  autoMerge?: boolean;
   /** How long checks are waited for, from the pull request (or the fix) on. Default 6 hours. */
   timeLimitMs?: number;
   /** A fix run that has not ended after this long raises one item. Default 3 hours. */
@@ -195,9 +203,18 @@ export class PrFollowUp {
     number: number;
     url: string;
     branch: string;
+    /** The owner allows merging this one when green; ignored unless the follow-up merges at all. */
+    autoMerge?: boolean;
   }): Promise<void> {
     if (this.stopped || this.watches.has(input.taskId)) return;
-    this.watches.set(input.taskId, { ...input, state: 'watching', round: 0, since: this.now() });
+    const { autoMerge, ...rest } = input;
+    this.watches.set(input.taskId, {
+      ...rest,
+      state: 'watching',
+      round: 0,
+      since: this.now(),
+      ...(autoMerge === true ? { autoMerge: true } : {}),
+    });
     await this.save();
     this.kick();
   }
@@ -306,6 +323,45 @@ export class PrFollowUp {
     if (!raised) throw new Error('The inbox is not running');
   }
 
+  /** Own branch, merging on, allowed for this pull request, and the change was reviewed, not kept. */
+  private async mayMerge(watch: Watch): Promise<boolean> {
+    if (this.options.autoMerge !== true || watch.autoMerge !== true) return false;
+    if (!watch.branch.startsWith('maka/') || !this.options.checks.merge) return false;
+    const delivery = await this.options.deliveries.get(watch.taskId);
+    if (!delivery) return false;
+    try {
+      const record = JSON.parse(
+        await readFile(delivery.verificationPath, 'utf8'),
+      ) as VerificationView;
+      return record.kept === undefined && record.review?.status === 'reviewed';
+    } catch {
+      return false;
+    }
+  }
+
+  /** One merge at the head the checks passed on; GitHub refuses it if the head moved. Never retried. */
+  private async merge(watch: Watch, headSha: string): Promise<void> {
+    const merge = this.options.checks.merge as NonNullable<PullRequestChecks['merge']>;
+    const result = await merge.call(
+      this.options.checks,
+      watch.repo,
+      watch.number,
+      headSha,
+      watch.branch,
+      this.abort.signal,
+    );
+    if (result.merged) {
+      await this.quiet(watch, 'merged', `已合并 PR #${watch.number}（${watch.repo}，检查全绿）。`);
+      return this.end(watch, 'merged');
+    }
+    this.needsYou(
+      watch,
+      'merge',
+      `Checks passed on ${this.label(watch)}, but GitHub refused the merge (${scrubSecretText(result.reason).slice(0, 300)}). It was not tried again; merge it yourself?`,
+    );
+    return this.end(watch, 'needs_you');
+  }
+
   private async end(watch: Watch, outcome: WatchOutcome): Promise<void> {
     await this.update(watch, { state: 'done', outcome });
   }
@@ -324,6 +380,7 @@ export class PrFollowUp {
     }
     const result = await this.options.checks.checks(watch.repo, pr.headSha, signal);
     if (result.state === 'passed') {
+      if (await this.mayMerge(watch)) return this.merge(watch, pr.headSha);
       await this.quiet(
         watch,
         'passed',
