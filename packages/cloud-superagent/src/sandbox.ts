@@ -611,9 +611,7 @@ export function instaboxCredentialsFromEnv(
   const api = instaboxApiFromEnv(env);
   const machineId = env.INSTABOX_MACHINE_ID?.trim() ?? '';
   if (!machineId) {
-    throw new InstaboxCredentialsError(
-      'INSTABOX_MACHINE_ID is not set. The local loop can reuse one machine; live-smoke creates an ephemeral box and does not need this.',
-    );
+    throw new InstaboxCredentialsError('INSTABOX_MACHINE_ID is not set.');
   }
   return { apiKey: api.apiKey, machineId, baseUrl: api.baseUrl };
 }

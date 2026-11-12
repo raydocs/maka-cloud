@@ -74,6 +74,11 @@ export interface PullRequestResult {
   url: string;
 }
 
+export interface CiStatus {
+  verdict: 'no-checks' | 'pending' | 'success' | 'failure' | 'skipped';
+  detail: string;
+}
+
 export interface GitHostPort {
   commitAndPush(input: {
     dir: string;
@@ -102,7 +107,7 @@ export interface GitHostPort {
     number: number;
   }): Promise<{ merged: boolean; mergeSha?: string }>;
   readIssue?(input: { repo: string; number: number }): Promise<{ closed: boolean }>;
-  readCi?(sha: string, repo?: string): Promise<import('./loop-github.js').CiStatus>;
+  readCi?(sha: string, repo?: string): Promise<CiStatus>;
 }
 
 export const LOOP_TIMING_PHASES = [
@@ -301,7 +306,7 @@ export class FakeGitHost implements GitHostPort {
     return { closed: false };
   }
 
-  async readCi(): Promise<import('./loop-github.js').CiStatus> {
+  async readCi(): Promise<CiStatus> {
     return { verdict: 'success', detail: 'fake' };
   }
 }
