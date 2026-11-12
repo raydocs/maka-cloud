@@ -27,6 +27,7 @@ import { ExtensionFeed, type ExtensionEvent } from './extension-feed.js';
 import { type FeedEntry, FeedHub, readFeed } from './feed.js';
 import {
   type AnswerOutcome,
+  type AutomationRoutesPort,
   DEFAULT_HTTP_LIMITS,
   type HttpLimits,
   PublicApi,
@@ -265,6 +266,8 @@ export interface CloudServerOptions {
    * like any unknown path. The caller owns it and closes it after the server.
    */
   duties?: DutyService;
+  /** The conversation-bound waits behind `/v1/conversations/:id/automations`; absent, they 404. */
+  automations?: AutomationRoutesPort;
   /** Whether the operator has configured API-key model access. */
   modelAvailable?: () => boolean;
   quota?: QuotaSource;
@@ -382,6 +385,17 @@ export interface CloudServer {
    * item that belongs to no chat yet. Idempotent on `key`.
    */
   createConversation(input: CreateConversationInput): CreateConversationResult;
+  /**
+   * Posts `text` into an existing conversation as a message, idempotent on `key` (its client
+   * message id), and delivers it: queued behind a running turn like any message. `gone` when the
+   * conversation does not exist or its owner is no longer active. `external` taints it (T15).
+   */
+  postToConversation(input: {
+    conversationId: string;
+    key: string;
+    text: string;
+    external: boolean;
+  }): 'delivered' | 'gone';
   close(): Promise<void>;
 }
 
@@ -736,6 +750,7 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
           languageOf: (inviteId) => ownInviteStore.language(inviteId),
         },
       ),
+      ...(options.automations ? { automations: options.automations } : {}),
       ...(inbox
         ? {
             inbox: new InboxRoutes(inbox, new RateLimiter(limits.controlPerMinute), {
@@ -841,6 +856,20 @@ export async function startCloudServer(options: CloudServerOptions): Promise<Clo
           messageId: posted.messageId,
           duplicate: posted.duplicate,
         };
+      },
+      postToConversation: (input) => {
+        const keyOk = /^[A-Za-z0-9_:.-]{1,128}$/u.test(input.key);
+        const textOk = input.text.length > 0 && Buffer.byteLength(input.text) <= MAX_MESSAGE_BYTES;
+        if (!keyOk || !textOk) throw new RangeError('The message is not valid');
+        const owner = conversations.ownerOf(input.conversationId);
+        // Checked right before the effect, with nothing awaited in between.
+        if (owner === undefined || !ownInviteStore.active(owner)) return 'gone';
+        const posted = conversations.post(input.conversationId, input.text, input.key, {
+          external: input.external,
+        });
+        if (!posted.found) return 'gone';
+        if (!posted.conflict) deliverMessage({ messageId: posted.messageId });
+        return 'delivered';
       },
       backupDatabase: (destination) => sqliteBackup(db, destination).then(() => undefined),
       addHomeNote: (owner, note) => homeStore.addNote(owner, note),

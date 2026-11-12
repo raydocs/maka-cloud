@@ -92,6 +92,13 @@ import { SpendAlertWatcher } from './spend-alert.js';
 import { BackupScheduler } from './backup-schedule.js';
 import { BackupError, backupAll, type BackupResult, listBackups } from './backup.js';
 import { accountLedgerOf } from './spend.js';
+import {
+  AutomationStore,
+  Automations,
+  automationView,
+  type Condition,
+  waitForTool,
+} from './automations.js';
 
 /** What a user is told when the operator's pause switch stopped their work. */
 export const PAUSED_NOTICE =
@@ -117,6 +124,8 @@ export interface StackDependencies {
   cards?: Pick<NonNullable<Parameters<typeof createCards>[0]>, 'reader' | 'schedule'>;
   /** How often schedules are looked at and finished duty runs settled, in milliseconds. Default 60000. */
   dutyTickMs?: number;
+  /** How often due automations are checked; tests shorten it. */
+  automationTickMs?: number;
   /**
    * Replaces GitHub's base URL for the PR follow-up's reads and its fix push, and how often it
    * looks, for tests. The product reads api.github.com every 2 minutes (10 with the webhook).
@@ -170,6 +179,8 @@ export interface Stack {
   cards?: CardsRuntime;
   /** Follows the checks of every pull request a coding task opens. */
   followUp: PrFollowUp;
+  /** The conversation-bound waits the conductor registers with `wait_for`. */
+  automations: Automations;
   /** In-process Super-agent: event intake, workers, watchdog. Always present. */
   superagent: HostSuperagent;
   /** Writes a backup now, as the daily one does. Throws when `MAKA_CLOUD_BACKUP_DIR` is not set. */
@@ -303,6 +314,10 @@ export async function startStack(
   // The pull requests coding tasks open, followed until their checks have spoken (see PrFollowUp).
   let followUp: PrFollowUp | undefined;
   let releaseFollowUp: (() => void) | undefined;
+  // What the conductor waits on with `wait_for`, checked in code until it wakes the conversation.
+  let automations: Automations | undefined;
+  let automationStore: AutomationStore | undefined;
+  let releaseAutomations: (() => void) | undefined;
   let superagentRt: HostSuperagent | undefined;
   let releaseSuperagentTick: (() => void) | undefined;
   let releaseFeatureTimers: (() => void) | undefined;
@@ -364,6 +379,32 @@ export async function startStack(
       onWarning: warn,
     });
     followUp = ownFollowUp;
+    await mkdir(dirname(config.automationsDbPath), { recursive: true });
+    const ownAutomationStore = new AutomationStore(config.automationsDbPath);
+    automationStore = ownAutomationStore;
+    const ownAutomations = new Automations(ownAutomationStore, {
+      checks: new GitHubChecks(github),
+      taskState: (conversationId, taskId) =>
+        conversationOfTask?.(taskId) === conversationId
+          ? orchestrator?.taskStateOf(taskId)
+          : undefined,
+      // Bound once the server runs; until then a match stays matched and is posted on a later pass.
+      deliver: (input) => cloud.server.postToConversation(input),
+      report: (item) => {
+        supervisorRef?.raiseFollowUp({
+          conversationId: item.conversationId,
+          taskId: item.automationId,
+          key: `automation:${item.automationId}`,
+          needsYou: item.needsYou,
+          ask: item.ask,
+        });
+      },
+      onWarning: warn,
+    });
+    automations = ownAutomations;
+    const isPullRequestOf = (repo: string) => (condition: Condition) =>
+      (condition.kind === 'pr_checks_finished' || condition.kind === 'pr_merged_or_closed') &&
+      condition.repo.toLowerCase() === repo.toLowerCase();
     duties =
       webhookSecret === undefined
         ? undefined
@@ -373,7 +414,12 @@ export async function startStack(
             links: config.dutyLinks,
             cards: config.cardsSet,
             // A signed CI completion makes the follow-up look at that branch now.
-            engine: { onWorkflowRun: (event) => ownFollowUp.nudge(event.repo, event.branch) },
+            engine: {
+              onWorkflowRun: (event) => {
+                ownFollowUp.nudge(event.repo, event.branch);
+                ownAutomations.nudge(isPullRequestOf(event.repo));
+              },
+            },
             ...(dependencies.dutyInspector === undefined
               ? {}
               : { inspector: dependencies.dutyInspector }),
@@ -580,6 +626,10 @@ export async function startStack(
       ...(push === undefined ? {} : { push }),
       ...(signInOn ? { auth } : {}),
       ...(duties === undefined ? {} : { duties: duties.service }),
+      automations: {
+        list: (conversationId) => ownAutomations.list(conversationId).map(automationView),
+        cancel: (conversationId, id) => ownAutomations.cancel(conversationId, id),
+      },
       dbPath: config.dbPath,
       invitesPath: config.invitesPath,
       handoffRoot: config.handoffRoot,
@@ -607,7 +657,18 @@ export async function startStack(
         playbooks: STACK_PLAYBOOKS,
         modes: config.modes,
         deepMode: config.deepMode,
-        tools: [pullRequests],
+        tools: [
+          pullRequests,
+          waitForTool({
+            automations: ownAutomations,
+            ownsConversationTask: (conversationId, taskId) =>
+              conversationOfTask?.(taskId) === conversationId,
+          }),
+        ],
+        // A person's stop wins: nothing the conversation waits on wakes it afterwards.
+        onStopped: (conversationId) => {
+          ownAutomations.onUserStop(conversationId);
+        },
         // The orchestrator resumes its tasks after a restart, so the conductor follows them
         // instead of cancelling what it delegated.
         tasksSurviveRestart: true,
@@ -684,6 +745,14 @@ export async function startStack(
     followTimer.unref();
     releaseFollowUp = () => clearInterval(followTimer);
     ownFollowUp.kick();
+    // Waits are due every 30 seconds at the most often; a pass looks only at the due ones.
+    const automationTimer = setInterval(
+      () => void ownAutomations.kick(),
+      dependencies.automationTickMs ?? 15_000,
+    );
+    automationTimer.unref();
+    releaseAutomations = () => clearInterval(automationTimer);
+    void ownAutomations.kick();
     if (superagentRt === undefined) throw new Error('Super-agent did not start');
     superagentRt.bindInbox({
       createConversation: (input) => cloud.server.createConversation(input),
@@ -719,6 +788,9 @@ export async function startStack(
       },
     });
   } catch (error) {
+    releaseAutomations?.();
+    await automations?.stop();
+    automationStore?.close();
     releaseFollowUp?.();
     await followUp?.stop();
     releaseFeatureTimers?.();
@@ -774,6 +846,12 @@ export async function startStack(
           : {
               [relative(config.dataDir, config.transcriptsDbPath)]: (to) =>
                 transcripts.backupTo(to),
+            }),
+        ...(automationStore === undefined
+          ? {}
+          : {
+              [relative(config.dataDir, config.automationsDbPath)]: (to) =>
+                (automationStore as AutomationStore).backupTo(to),
             }),
       },
     });
@@ -856,6 +934,7 @@ export async function startStack(
     ...(duties === undefined ? {} : { duties }),
     ...(cards === undefined ? {} : { cards }),
     followUp: followUp as PrFollowUp,
+    automations: automations as Automations,
     superagent: superagentRt as HostSuperagent,
     backup,
     checkSpendAlert: () => alerts?.tick() ?? Promise.resolve(),
@@ -871,6 +950,8 @@ export async function startStack(
           try {
             // The timer and the launches stop first; the database closes once the server no
             // longer answers webhook requests.
+            releaseAutomations?.();
+            await automations?.stop();
             releaseFollowUp?.();
             await followUp?.stop();
             await cards?.stop();
@@ -882,6 +963,7 @@ export async function startStack(
             await cloud.close();
           } finally {
             duties?.close();
+            automationStore?.close();
             superagentRt?.close();
             await boxService?.close();
             transcripts?.close();

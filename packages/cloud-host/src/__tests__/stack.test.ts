@@ -2099,3 +2099,47 @@ test('a HMAC-verified duty delivery is a Super-agent Source; a comment from a no
     'mallory does not spawn a second worker',
   );
 });
+
+test('a wait the conductor registers is listed for its owner and, once it holds, wakes the conversation', async (t) => {
+  const { stack, firstMessage } = await start(t, undefined, {
+    ANTHROPIC_API_KEY: 'sk-master-not-a-key',
+  });
+  const token = stack.cloud.server.invites.create('test').token;
+  const api = (path: string, body?: unknown) =>
+    fetch(`${stack.cloud.server.url}${path}`, {
+      method: body === undefined ? 'GET' : 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+  const { conversationId } = (await (await api('/v1/conversations', {})).json()) as {
+    conversationId: string;
+  };
+  const later = stack.automations.register({
+    conversationId,
+    condition: { kind: 'at', time: new Date(Date.now() + 3_600_000).toISOString() },
+    resumeText: 'An hour has passed.',
+  });
+  const listed = (await (await api(`/v1/conversations/${conversationId}/automations`)).json()) as {
+    automations: Array<{ id: string; state: string }>;
+  };
+  assert.deepEqual(
+    listed.automations.map((a) => [a.id, a.state]),
+    [[later.id, 'watching']],
+  );
+  const cancelled = await api(
+    `/v1/conversations/${conversationId}/automations/${later.id}/cancel`,
+    {},
+  );
+  assert.equal(cancelled.status, 200);
+
+  stack.automations.register({
+    conversationId,
+    condition: { kind: 'at', time: new Date(Date.now() - 1_000).toISOString() },
+    resumeText: 'Time to look again.',
+  });
+  // The wake is a message in the conversation: the conductor takes a turn on it.
+  await firstMessage;
+  await stack.automations.kick();
+  const states = stack.automations.list(conversationId).map((a) => a.state);
+  assert.deepEqual(states, ['cancelled', 'delivered']);
+});

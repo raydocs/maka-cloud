@@ -1048,3 +1048,18 @@ test('the operator’s pause still cancels a task that was kept across a restart
   await reopened.idle();
   await assertNoTasks(h);
 });
+
+test('a user stop is passed on to onStopped once', async (t) => {
+  const stopped: Array<[string, string]> = [];
+  const h = await makeHarness(t, {
+    autoComplete: false,
+    conductor: { onStopped: (conversationId, reason) => stopped.push([conversationId, reason]) },
+  });
+  const held = await startedTaskTurn(h);
+  assert.equal(await h.conductor.stop('cnv_1'), true);
+  await h.conductor.idle();
+  held.release();
+  assert.deepEqual(stopped, [['cnv_1', 'user_stop']]);
+  assert.equal(await h.conductor.stop('cnv_1'), false);
+  assert.deepEqual(stopped, [['cnv_1', 'user_stop']]);
+});

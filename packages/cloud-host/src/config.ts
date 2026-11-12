@@ -70,6 +70,8 @@ export interface StackConfig {
    * reads them here and passes options in; Superagent does not read env.
    */
   superagentFeatures: SuperagentFeatureConfig;
+  /** The conversation-bound waits (`wait_for`), so a restart resumes them. */
+  automationsDbPath: string;
   /** The conversations of Claude tasks, kept off the sandboxes. Made only with `agentChannel`. */
   transcriptsDbPath: string;
   /**
@@ -227,6 +229,7 @@ export function dataPathsOf(
   | 'dutiesDbPath'
   | 'superagentDbPath'
   | 'transcriptsDbPath'
+  | 'automationsDbPath'
 > {
   return {
     dbPath: join(dataDir, 'cloud.db'),
@@ -241,6 +244,7 @@ export function dataPathsOf(
     dutiesDbPath: join(dataDir, 'duties.db'),
     superagentDbPath: join(dataDir, 'superagent.db'),
     transcriptsDbPath: join(dataDir, 'transcripts.db'),
+    automationsDbPath: join(dataDir, 'automations.db'),
   };
 }
 
@@ -258,6 +262,7 @@ export function backupLayoutOf(dataDir: string): BackupLayout {
       rel(paths.dutiesDbPath),
       rel(paths.superagentDbPath),
       rel(paths.transcriptsDbPath),
+      rel(paths.automationsDbPath),
     ],
     files: [
       rel(paths.runnerSessionsPath),

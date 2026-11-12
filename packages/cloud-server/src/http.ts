@@ -154,6 +154,13 @@ interface StreamEnd {
   sessionId?: string;
 }
 
+/** What the automation routes need: the conversation's waits, and cancelling one of them. */
+export interface AutomationRoutesPort {
+  list(conversationId: string): unknown[];
+  /** False when the conversation has no open wait with that id. */
+  cancel(conversationId: string, automationId: string): boolean;
+}
+
 export interface PublicApiDeps {
   db: DatabaseSync;
   memory: MemoryStore;
@@ -194,6 +201,8 @@ export interface PublicApiDeps {
   onAnswer?: (answer: PostedAnswer) => Promise<AnswerOutcome>;
   /** Absent when no supervisor runs; the `/v1/inbox` routes then answer 404. */
   inbox?: InboxRoutes;
+  /** Absent when no automations run; `/v1/conversations/:id/automations` then answers 404. */
+  automations?: AutomationRoutesPort;
   /** Home's cards, in the order the server keeps for each owner. */
   home?: HomeRoutes;
   /** Absent when no sign-in is configured; `/v1/auth` then answers like any unknown path. */
@@ -659,6 +668,27 @@ export class PublicApi {
     if (tasks) {
       if (method !== 'GET') throw new HttpError(405, 'method_not_allowed', { allow: 'GET' });
       return this.listTasks(res, url, invite, decodeURIComponent(tasks[1] ?? ''));
+    }
+    const automations = /^\/v1\/conversations\/([^/]+)\/automations(?:\/([^/]+)\/cancel)?$/u.exec(
+      path,
+    );
+    if (automations && this.deps.automations) {
+      const conversationId = decodeURIComponent(automations[1] ?? '');
+      const automationId =
+        automations[2] === undefined ? undefined : decodeURIComponent(automations[2]);
+      if (automationId === undefined) {
+        if (method !== 'GET') throw new HttpError(405, 'method_not_allowed', { allow: 'GET' });
+        this.ownSession(invite, conversationId);
+        return respond(res, 200, { automations: this.deps.automations.list(conversationId) });
+      }
+      if (method !== 'POST') throw new HttpError(405, 'method_not_allowed', { allow: 'POST' });
+      take(this.deps.controlLimiter, invite);
+      this.reauthenticate(invite);
+      this.ownSession(invite, conversationId);
+      if (!this.deps.automations.cancel(conversationId, automationId)) {
+        throw new HttpError(404, 'not_found');
+      }
+      return respond(res, 200, { cancelled: true });
     }
     const control = /^\/v1\/tasks\/([^/]+)\/(cancel|pause|resume)$/u.exec(path);
     if (control) {

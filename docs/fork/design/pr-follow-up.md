@@ -25,17 +25,17 @@ open_pull_request opens a reviewed change
         └─────────────────────────────────────────────▶│ one "needs you" item   │
                                                        └───────────────────────┘
 merged / closed / time limit while watching: quiet notice, done
-the fixing branch runs only with MAKA_CLOUD_PR_AUTOFIX=1; by default red goes straight to the item
+the fixing branch runs by default; with MAKA_CLOUD_PR_AUTOFIX=0 red goes straight to the item
 ```
 
 - **Green**: the conversation gets "Checks passed on pull request #N in owner/repo." and the
   inbox a `finished` item (never interrupts). The item names no task, so the task's own result
   card keeps its verdict; the line sits in the chat right under the card.
-- **Red, by default** (`MAKA_CLOUD_PR_AUTOFIX` unset or `0`, as at launch): one `decision` item on
+- **Red, with `MAKA_CLOUD_PR_AUTOFIX=0`**: one `decision` item on
   the task, "Checks failed on pull request #N in owner/repo (…). Nothing was pushed; ask the agent
   to fix them?", with "Ask the agent to fix the checks" first. Choosing it posts a message into the
   conversation, so any change it leads to goes through the usual approval gates. Nothing is pushed.
-- **Red, first time, with `MAKA_CLOUD_PR_AUTOFIX=1`**: one fix run of the same task (`ci-fix:<taskId>`, idempotent): a coding
+- **Red, first time, by default** (`MAKA_CLOUD_PR_AUTOFIX` unset or `1`): one fix run of the same task (`ci-fix:<taskId>`, idempotent): a coding
   task in the same conversation, on its root session, with the first task's budget, the same
   repository, test command and first vendor, and `baseRef` set to the pull request's branch. The
   coding runner does to it what it did to the first change: reproduction test, the repository's
@@ -82,15 +82,16 @@ The first task keeps its independent check and its `finished` item as before.
 
 - Watches are one JSON file, `pr-follow-ups.json` in the data directory, in the backup.
 - One fix per pull request, ever. One open item per key.
-- Nothing merges, and nothing is pushed except the one verified fix, onto the branch the owner
-  approved opening.
+- Nothing is pushed except the one verified fix, onto the branch the owner approved opening. On
+  green a reviewed change on the employee's own `maka/` branch is merged (`MAKA_CLOUD_AUTOMERGE=0`
+  turns that off).
 
 ## Open decisions for the owner
 
 1. **Whether the fix may be pushed without approval.** With `MAKA_CLOUD_PR_AUTOFIX=1` the one fix
    commit goes onto the pull request's branch without a new card, gated on the same checks and
-   cross-vendor review. That is a new product rule the owner has not decided on, so it is off by
-   default and at launch: red is then a "needs you" item that offers the fix.
+   cross-vendor review. The owner chose it on by default; `MAKA_CLOUD_PR_AUTOFIX=0` makes red a
+   "needs you" item that offers the fix instead.
 2. **The fix run is not a conductor run.** It is started on the conversation's orchestrator
    session, with the first task's budget as its tree cap; it counts against the invite's and the
    server's caps through the gateway, but not against a conductor run budget.
@@ -99,3 +100,31 @@ The first task keeps its independent check and its `finished` item as before.
 4. **Overlap with the opt-in `ci_failed_own_pr` duty.** A project with that duty on gets both on
    a red `maka/` branch. Turn one off, or decide that the duty stands down for followed PRs.
 5. **The inbox words are English only** (no ask template), like the duty notices.
+
+## Automations: waits bound to a conversation
+
+The follow-up above is one fixed wait. `wait_for` lets the conductor register its own, for its own
+conversation, and end its turn; code checks the condition and wakes the conversation when it holds
+(`packages/cloud-host/src/automations.ts`). Checking costs no model tokens.
+
+- **Conditions**: `pr_checks_finished {repo, pr}` (the same `GitHubChecks` reads: open PR's head
+  checks passed, failed or need approval; a closed or merged PR also ends it),
+  `pr_merged_or_closed {repo, pr}`, `task_finished {taskId}` (a task this conversation delegated),
+  `at {time}`. Checked every `everySeconds` (30 s to 1 day, default 60 s), until `expiresInSeconds`
+  (default 24 h, at most 7 days). At most 8 open waits per conversation.
+- **Stored**: `automations.db` in the data directory, in the backup; a restart resumes every wait.
+- **A match is final**: the wait is written `matched` with its key (for example
+  `checks:<head sha>:failed`) before anything is sent. Delivery posts `resumeText` plus the
+  code-built evidence, fenced and marked as data, as a message with client id
+  `automation:<id>:<key>`, so a repeated wake (a second pass, a webhook hint, a restart between
+  the two writes) posts it once. The message is queued behind a running turn like any message.
+  Evidence from GitHub taints the conversation (T15).
+- **Stop wins**: a person's stop (or the operator's pause) blocks every open wait of the
+  conversation, a matched one included; a conversation or owner that is gone blocks it too.
+- **Ends**: five failed checks in a row → `failed` and one "needs you" item; expiry → `expired` and
+  one quiet item; `POST /v1/conversations/:id/automations/:aid/cancel` → `cancelled`.
+  `GET /v1/conversations/:id/automations` lists them.
+- Webhook workflow runs are only hints: they make the repository's waits due now.
+- The PR follow-up is not rebuilt on top of this; the two share `GitHubChecks` only.
+- **Not built**: recovering capacity, archiving a conversation after its PR merges, a list in the
+  web app, and conditions written as code.
