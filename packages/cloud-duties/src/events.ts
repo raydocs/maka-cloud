@@ -134,6 +134,8 @@ const Review = z.object({
 export interface Parsed {
   repo: string;
   installationId: number;
+  /** A completed CI run: the branch it ran on, for whatever follows that branch's checks. */
+  ci?: { branch: string };
   /** Classifies the event for the project registered for `repo`. */
   classify(project: ProjectView): Classified;
 }
@@ -175,7 +177,13 @@ export function parseEvent(event: AcceptedEvent, payload: unknown): Parsed | und
     case 'workflow_run': {
       const parsed = WorkflowRun.safeParse(payload);
       if (!parsed.success) return undefined;
-      return base(parsed.data, (project) => classifyWorkflowRun(parsed.data, project));
+      const run = parsed.data.workflow_run;
+      return {
+        ...base(parsed.data, (project) => classifyWorkflowRun(parsed.data, project)),
+        ...(parsed.data.action === 'completed' && run.head_branch
+          ? { ci: { branch: run.head_branch } }
+          : {}),
+      };
     }
     case 'issues': {
       const parsed = Issues.safeParse(payload);

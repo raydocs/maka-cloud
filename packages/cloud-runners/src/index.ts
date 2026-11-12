@@ -4,7 +4,6 @@ import { Fleet, type CloudRunnersOptions, type SweepResult } from './fleet.js';
 import { FixedMachineProvider } from './providers.js';
 import { SandboxCliRunner } from './runner.js';
 import { claudeAdapter, codexAdapter } from './vendors.js';
-import { workspaceStoreFromEnv } from './workspace.js';
 
 export { Fleet, type CloudRunnersOptions, type RunnerName, type SweepResult } from './fleet.js';
 export {
@@ -77,20 +76,6 @@ export type {
   SandboxTool,
 } from './types.js';
 export {
-  createWorkspaceStore,
-  GitCloneStore,
-  initLocalRepo,
-  LayerFsDisabledError,
-  LayerFsMountUnsupportedError,
-  LayerFsStore,
-  prepareWorkspace,
-  type SnapshotRef,
-  type WorkspaceHandle,
-  type WorkspaceSpec,
-  type WorkspaceStore,
-  workspaceStoreFromEnv,
-} from './workspace.js';
-export {
   claudeAdapter,
   codexAdapter,
   DEFAULT_PRICES,
@@ -150,7 +135,6 @@ export function createCloudRunnersFromEnv(
     }),
     // Without an INSTABOX_MACHINE_ID the caller's provider is the only one; never an empty fixed one.
     sandboxes: overrides.sandboxes ?? new FixedMachineProvider(machineId as string),
-    workspaces: workspaceStoreFromEnv(env),
     ...overrides,
   });
 }

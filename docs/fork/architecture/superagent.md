@@ -722,8 +722,6 @@ commit id is a pointer in that log.
 Pin a release in `docs/fork/THIRD_PARTY.md` only if gate 0–3 pass and code
 is taken. Android / hi: never.
 
-Flag: `MAKA_CLOUD_LAYERFS=1`. Default unset.
-
 ## 11. Sandbox (Instabox, not boat.dev)
 
 ```ts
@@ -842,11 +840,10 @@ from a non-allowed actor does not spawn.
 
 ### P3 — WorkspaceStore in runners + LayerFS spike
 
-`@maka-cloud/runners` re-exports `WorkspaceStore`; the fleet defaults to
-`GitCloneStore`. The coding playbook calls `prepareHostWorkspace()` for
-host-side prep; sandbox clones stay `CLONE_SCRIPT`. The four-gate harness
-is `packages/cloud-runners/scripts/layerfs-gates.mjs` (`--local` in CI,
-`--live` only on a disposable Instabox). Not run on Instabox in this PR.
+Removed again: nothing on the coding path called the fleet's
+`WorkspaceStore` or `prepareHostWorkspace()`; sandbox clones are
+`CLONE_SCRIPT`. `WorkspaceStore` stays in `@maka-cloud/superagent`, and
+`@maka-cloud/runners` no longer depends on that package.
 
 ### P4 — paid layer
 
@@ -888,14 +885,10 @@ Filled in by the implementation PR; kept accurate here:
 | Metering hooks | implemented; P4 append-only tenant ledger in `superagent.db` (`usage_events`, schema 2). **No cloud-server migration** |
 | Org Secrets | `OrgSecretPort`; `UnconfiguredOrgSecrets` default; `EnvOrgSecrets` for local/env. Never returns a raw secret |
 | Evidence blocks | `HandlerResult.evidence` → worker output / stuck card |
-| `WorkspaceStore` + `GitCloneStore` | implemented; runners default; coding playbook `prepareHostWorkspace` |
-| `LayerFsStore` | metadata adapter; live mount throws; gate 3 harness `--local` |
+| `WorkspaceStore` + `GitCloneStore` | implemented in `@maka-cloud/superagent` only; runners and the coding playbook do not use it |
+| `LayerFsStore` | metadata adapter; live mount throws; no env flag selects it |
 | `SandboxPort` | interface + `FakeSandbox` + `HttpSandbox` (Instabox HTTP). `createSandboxFromEnv`: fake when no key; throws if key without `INSTABOX_MACHINE_ID`; live when both set. Contract-tested against a mocked HTTP server |
 | Host / duties / conductor wiring | P2: `startStack` creates one in-process Superagent; duties `readDelivery` is the GitHub Source; watchdog escalations are T33 stuck cards. Host passes `instaboxSandboxPort`, `EnvOrgSecrets`, `createJudgeFromEnv` |
-| Local loop | `npm ci` + `npm run build -w @maka-cloud/superagent` + `npm run local-loop -w @maka-cloud/superagent`. CI smoke: `local-loop.test.ts` with fakes |
-| Live Instabox smoke | `npm run live-smoke -w @maka-cloud/superagent` (env `INSTABOX_API_KEY`; template defaults to `universal`). Creates 2 vCPU / 4096 MiB, `echo live-smoke`, always deletes. Not run in CI |
-| Real loop | `CodingLoopHandler`: repo is materialized **in the box** (public `git clone`, or host tarball for private/scratch). Host-side coder files are written in the box; install/test run in the box; `git diff --cached` is pulled back and applied to a clean host checkout before publish. CLI prints per-phase timings, Messages API input/output tokens + estimated USD (ledger), and box exec stdout/stderr/exit. Empty GitHub repos seed `main` when `MAKA_CLOUD_LOOP_SEED=1`. Checks/Statuses with no runs are `no-checks`. Merge approval binds the head SHA; `PUT /pulls/N/merge` sends it; ungreen / empty / all-skipped checks refuse unless `mandate.allowNoCi`. Live GitHub stops at merge-held. `npm run real-loop`. Live only with `MAKA_CLOUD_LOOP_LIVE=1` + keys (never in CI) |
-| Metrics harness | `npm run metrics -w @maka-cloud/superagent -- --n 3 --parallel 2 --out /tmp/sa-metrics`. FakeSandbox only. JSON + markdown: success rate, time-to-green, humans, $/PR, wasted Router wakeups |
 | `#460` follow-up engine | not copied; `FollowUpBridge` only |
 | `#452` InstaboxClient adapter | structural; used when host passes a client |
 | Pricing | not implemented (owner must pick a provider) |

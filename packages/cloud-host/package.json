@@ -31,7 +31,8 @@
     "@maka-cloud/server": "0.1.0",
     "@maka-cloud/superagent": "0.1.0",
     "@maka-cloud/supervisor": "0.1.0",
-    "ai": "7.0.143"
+    "ai": "7.0.143",
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "@maka-cloud/conductor-checks": "0.1.0"

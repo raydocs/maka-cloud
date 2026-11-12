@@ -16,7 +16,15 @@ a heading time is more than five minutes off that SHA's committer date.
 - **Live:** n/a
 - **Migrations / risk:** none.
 
-## 2026-11-02 18:37 MST — cursor/superagent-wiring-51be
+## 2026-11-12 03:50 MST — chore/superagent-drop-offline-tools
+
+- **What:** Remove the stand-alone harnesses nothing in the product calls: `local-loop`, `real-loop`, `live-smoke`, `metrics` (sources, tests, `scripts/*.mjs`, npm scripts), their helpers `loop-coder.ts` and `loop-github.ts`, and the unused `prompt-cache.ts` / `session.ts`. `CiStatus` moves into `loop.ts`, its only remaining user. `status`, BYOM, hi-device and everything `runtime.ts` imports stay. Docs: `real-loop.md` and `p0-checklist.md` removed, `quickstart.md` cut to what still exists.
+- **Why:** The host starts Super-agent with no handler, so none of this ran in production; it was only reachable from the package's own npm scripts and tests.
+- **Tests:** `@maka-cloud/superagent` `test:dist` and `@maka-cloud/host` `test:dist`.
+- **Live:** n/a
+- **Migrations / risk:** none. No `user_version` bump. The previous entry's heading gains its SHA so this one can be the newest.
+
+## 2026-11-02 18:37 MST — cursor/superagent-wiring-51be — 303d685eb
 
 - **What:** merge the updated `cursor/superagent-decisions-policy-51be` tip (`3c7049b04`), which already contains scheduler, intake, BYOM, duplex, lessons, and review-verify. Kept decision-card wiring (`recordFromCardResolution`, must-ask rows on `statusSnapshot.decisions`), host flags default off, and `CodingLoopHandler` on `DuplexLoop`. Speculative still runs only after a cross-source merge misses. sqlite `user_version` stays 2.
 - **Why:** The linearized tip moved after the first merge of #480. Bring that tip in with git merge only.

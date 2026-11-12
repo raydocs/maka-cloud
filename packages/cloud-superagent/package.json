@@ -14,10 +14,6 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test:dist": "node --test --test-concurrency=1 \"dist/**/*.test.js\"",
-    "local-loop": "node ./scripts/local-loop.mjs",
-    "live-smoke": "node ./scripts/live-smoke.mjs",
-    "real-loop": "node ./scripts/real-loop.mjs",
-    "metrics": "node ./scripts/metrics.mjs",
     "status": "node ./scripts/status.mjs"
   },
   "dependencies": {

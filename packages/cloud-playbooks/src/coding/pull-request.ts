@@ -24,6 +24,18 @@ export interface PullRequestToolOptions {
    * so that run may open a kept task of its conversation; it may open no other task it did not delegate.
    */
   ownsConversationTask?(runId: string, taskId: string): boolean;
+  /**
+   * Called once a pull request of a reviewed change is opened (not for a draft of a kept change),
+   * so the host can follow its checks. Its failure does not undo or fail the opening.
+   */
+  onPublished?(input: {
+    taskId: string;
+    conversationId: string;
+    /** The conductor run that opened it, so the host can read the run's authority. */
+    runId: string;
+    repo: string;
+    pr: PublishedPullRequest;
+  }): void | Promise<void>;
 }
 
 const parameters = z.object({
@@ -60,7 +72,13 @@ export function openPullRequestTool(
 ): ConductorToolSpec<typeof parameters> {
   const inFlight = new Map<string, Promise<PublishedPullRequest>>();
 
-  const publish = async (loaded: LoadedChange, title: string, signal: AbortSignal) => {
+  const publish = async (
+    loaded: LoadedChange,
+    title: string,
+    conversationId: string,
+    runId: string,
+    signal: AbortSignal,
+  ) => {
     const { delivery, changeSet, verification } = loaded;
     // A change a second agent reviewed is opened as a pull request. One that was kept for the owner
     // to look at is not pushed at all, unless the owner asked for that as its own action; it then
@@ -84,6 +102,19 @@ export function openPullRequestTool(
       signal,
     );
     await options.deliveries.markPublished(delivery.taskId, pr);
+    if (!kept) {
+      try {
+        await options.onPublished?.({
+          taskId: delivery.taskId,
+          conversationId,
+          runId,
+          repo: delivery.repo,
+          pr,
+        });
+      } catch {
+        // Following the checks is extra: the pull request is open either way.
+      }
+    }
     return pr;
   };
 
@@ -206,9 +237,13 @@ export function openPullRequestTool(
       if (latest?.publishedPr) return { ...latest.publishedPr, alreadyOpen: true };
       let pending = inFlight.get(args.taskId);
       if (!pending) {
-        pending = publish(loaded, args.title, context.signal).finally(() =>
-          inFlight.delete(args.taskId),
-        );
+        pending = publish(
+          loaded,
+          args.title,
+          context.conversationId,
+          context.runId,
+          context.signal,
+        ).finally(() => inFlight.delete(args.taskId));
         inFlight.set(args.taskId, pending);
       }
       return { ...(await pending), repo: delivery.repo };

@@ -173,14 +173,6 @@ export {
   type InstaboxOperation,
   type SandboxPort,
 } from './sandbox.js';
-export {
-  formatLiveSmokeReport,
-  LIVE_SMOKE_CMD,
-  runLiveSmoke,
-  runLiveSmokeCli,
-  type LiveSmokeOptions,
-  type LiveSmokeReport,
-} from './live-smoke.js';
 export { INLINE_MEMORY_CHARS, MAX_SPILLS, recallMemory, spillMemory } from './spill.js';
 export {
   applySkillProposal,
@@ -365,20 +357,6 @@ export {
   type SpeculativeTrigger,
 } from './speculative.js';
 export {
-  formatLocalLoopReport,
-  listenLoop,
-  LOCAL_LOOP_REPO,
-  LOCAL_LOOP_TENANT,
-  LocalLoopHandler,
-  LocalLoopJudge,
-  localLoopFixtures,
-  MERGE_BOUND_TEXT,
-  runLocalLoop,
-  runLocalLoopCli,
-  type LocalLoopOptions,
-  type LocalLoopReport,
-} from './local-loop.js';
-export {
   defaultDoneWorld,
   gitUnpushed,
   readDoneFile,
@@ -512,36 +490,6 @@ export {
   packTar,
   type BoxExecLog,
 } from './loop-box.js';
-export { HttpCoder, createCoderFromEnv, parseCoderJson } from './loop-coder.js';
-export {
-  GITHUB_TOKEN_ENV,
-  LOOP_REPO_ENV,
-  LOOP_SEED_ENV,
-  HttpGitHost,
-  createGitHostFromEnv,
-  evaluateMergeGate,
-  githubTokenProblem,
-  summarizeCi,
-  type CiStatus,
-  type CiVerdict,
-  type MergeGateResult,
-} from './loop-github.js';
-export {
-  formatRealLoopReport,
-  runRealLoop,
-  runRealLoopCli,
-  scratchAddRepo,
-  type RealLoopOptions,
-  type RealLoopReport,
-} from './real-loop.js';
-export {
-  formatMetricsMarkdown,
-  runMetrics,
-  runMetricsCli,
-  type MetricsCase,
-  type MetricsOptions,
-  type MetricsReport,
-} from './metrics.js';
 export {
   BoxCapError,
   BoxPool,
@@ -705,19 +653,6 @@ export {
   observeToolCall,
   observeTurn,
 } from './autonomy.js';
-export {
-  appendMessage,
-  buildRequest,
-  cacheHitShare,
-  diffPrefix,
-  loadTool,
-  recordCacheBreak,
-  setTail,
-  toAnthropicBody,
-  workerCacheHitShare,
-  type WorkerRequest,
-} from './prompt-cache.js';
-export { FakeProvider, runWorkerTurn } from './session.js';
 export {
   createWorkspaceStore,
   GitCloneStore,

@@ -646,3 +646,18 @@ before the fix.
 - **A 404 or 410 stays a 404 or 410.** `fetchText` keeps the status of an error
   answer in its failure result, so the research check reports a gone page as a
   failure instead of as a source that is merely down.
+
+## As built (PR follow-up)
+
+The PR follow-up (`docs/fork/design/pr-follow-up.md`) reports a pull request's checks through the
+inbox, and the rules were checked against it so that only real decisions interrupt:
+
+- `raiseFollowUp` raises its items (subject `follow_up`, one open item per key, true until
+  answered). A quiet one (checks passed, the one automatic fix passed, merged, closed, timed out)
+  is `finished` and names no task, so a task's verdict on its result card stays its own. One that
+  needs the human (the fix was used up or could not be made, a check waits for approval) is a
+  `decision` on the task: "Ask the agent to fix the checks" (message `retry_checks`) or "I'll take
+  it from here".
+- `followedTask` (the follow-up's fix runs) keeps a task to the projection: its end raises no
+  `finished` item and starts no independent check, its failures never pair into "failed twice",
+  and it is never stalled. The follow-up reports how it ended instead.

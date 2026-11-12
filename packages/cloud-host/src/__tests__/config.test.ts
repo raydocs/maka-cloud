@@ -43,6 +43,30 @@ test('the minimal environment gives the data layout and the defaults', () => {
   assert.match(config.githubTokenProblem ?? '', /MAKA_GITHUB_TOKEN is not set/);
 });
 
+test('the automatic fix and merge when green are on unless set to 0', () => {
+  const on = readStackConfig(ENV);
+  assert.equal(on.prAutoFix, true);
+  assert.equal(on.prAutoMerge, true);
+  assert.ok(describeConfig(on).some((line) => /one verified fix is pushed.*is merged/u.test(line)));
+  const off = readStackConfig({ ...ENV, MAKA_CLOUD_PR_AUTOFIX: '0', MAKA_CLOUD_AUTOMERGE: '0' });
+  assert.equal(off.prAutoFix, false);
+  assert.equal(off.prAutoMerge, false);
+  assert.ok(
+    describeConfig(off).some((line) =>
+      /offers the fix \(MAKA_CLOUD_PR_AUTOFIX=0\).*nothing is merged \(MAKA_CLOUD_AUTOMERGE=0\)/u.test(
+        line,
+      ),
+    ),
+  );
+  assert.equal(readStackConfig({ ...ENV, MAKA_CLOUD_PR_AUTOFIX: '1' }).prAutoFix, true);
+  assert.deepEqual(problemsOf({ ...ENV, MAKA_CLOUD_PR_AUTOFIX: 'yes' }), [
+    'MAKA_CLOUD_PR_AUTOFIX must be 1 or 0',
+  ]);
+  assert.deepEqual(problemsOf({ ...ENV, MAKA_CLOUD_AUTOMERGE: 'yes' }), [
+    'MAKA_CLOUD_AUTOMERGE must be 1 or 0',
+  ]);
+});
+
 test('only a fine-grained MAKA_GITHUB_TOKEN can open pull requests, and GITHUB_TOKEN is ignored', () => {
   assert.equal(
     readStackConfig({ ...ENV, MAKA_GITHUB_TOKEN: 'github_pat_secret' }).githubTokenProblem,

@@ -35,6 +35,20 @@ export interface StackConfig {
   conductorRoot: string;
   runnerSessionsPath: string;
   codingDeliveriesPath: string;
+  /** The pull requests whose checks are followed after their task opened them. */
+  prFollowUpsPath: string;
+  /**
+   * On a red check of a pull request the employee opened, one fix run of the same task is pushed
+   * onto it once it passes the same checks and review. Default on (owner decision, 2026-11-12);
+   * `MAKA_CLOUD_PR_AUTOFIX=0` makes a red check a "needs you" item that offers the fix instead.
+   */
+  prAutoFix: boolean;
+  /**
+   * A green pull request of the employee's own branch whose change passed the cross-vendor review is
+   * merged, for runs the owner started or duties with merge-when-green authority. Default on (owner
+   * decision, 2026-11-12); `MAKA_CLOUD_AUTOMERGE=0` turns it off.
+   */
+  prAutoMerge: boolean;
   /** The supervisor's own database. */
   supervisorDbPath: string;
   /** The model gateway's journal of what tasks spent, read back after a restart. */
@@ -56,6 +70,8 @@ export interface StackConfig {
    * reads them here and passes options in; Superagent does not read env.
    */
   superagentFeatures: SuperagentFeatureConfig;
+  /** The conversation-bound waits (`wait_for`), so a restart resumes them. */
+  automationsDbPath: string;
   /** The conversations of Claude tasks, kept off the sandboxes. Made only with `agentChannel`. */
   transcriptsDbPath: string;
   /**
@@ -207,11 +223,13 @@ export function dataPathsOf(
   | 'conductorRoot'
   | 'runnerSessionsPath'
   | 'codingDeliveriesPath'
+  | 'prFollowUpsPath'
   | 'supervisorDbPath'
   | 'gatewaySpendPath'
   | 'dutiesDbPath'
   | 'superagentDbPath'
   | 'transcriptsDbPath'
+  | 'automationsDbPath'
 > {
   return {
     dbPath: join(dataDir, 'cloud.db'),
@@ -220,11 +238,13 @@ export function dataPathsOf(
     conductorRoot: join(dataDir, 'conductor'),
     runnerSessionsPath: join(dataDir, 'runner-sessions.json'),
     codingDeliveriesPath: join(dataDir, 'coding-deliveries.json'),
+    prFollowUpsPath: join(dataDir, 'pr-follow-ups.json'),
     supervisorDbPath: join(dataDir, 'supervisor.db'),
     gatewaySpendPath: join(dataDir, 'gateway-spend.db'),
     dutiesDbPath: join(dataDir, 'duties.db'),
     superagentDbPath: join(dataDir, 'superagent.db'),
     transcriptsDbPath: join(dataDir, 'transcripts.db'),
+    automationsDbPath: join(dataDir, 'automations.db'),
   };
 }
 
@@ -242,8 +262,13 @@ export function backupLayoutOf(dataDir: string): BackupLayout {
       rel(paths.dutiesDbPath),
       rel(paths.superagentDbPath),
       rel(paths.transcriptsDbPath),
+      rel(paths.automationsDbPath),
     ],
-    files: [rel(paths.runnerSessionsPath), rel(paths.codingDeliveriesPath)],
+    files: [
+      rel(paths.runnerSessionsPath),
+      rel(paths.codingDeliveriesPath),
+      rel(paths.prFollowUpsPath),
+    ],
     trees: [rel(paths.conductorRoot), rel(paths.handoffRoot)],
     redact: {
       // A device's push secret lets whoever holds it read what the server sends that device, so
@@ -577,7 +602,15 @@ export const ENV_VARIABLES = [
   ],
   [
     'MAKA_GITHUB_TOKEN',
-    'fine-grained GitHub token for opening pull requests, read when one is opened',
+    'fine-grained GitHub token for opening pull requests, read when one is opened. The PR follow-up reads the checks of those pull requests and pushes its one fix with it too, so give it Checks: read (or Actions: read, which the job logs need anyway) besides Contents and Pull requests read/write',
+  ],
+  [
+    'MAKA_CLOUD_PR_AUTOFIX',
+    'the one automatic fix of a pull request the employee opened whose checks fail: the fix is pushed onto the same pull request, without a new approval, only after the same checks and review as the first change, and a second red is a "needs you" item. On by default (unset or 1). 0: off, a red check is a "needs you" item that offers the fix and nothing is pushed',
+  ],
+  [
+    'MAKA_CLOUD_AUTOMERGE',
+    'merging a green pull request of the employee’s own branch (maka/…) whose change passed the cross-vendor review, at the head the checks passed on, then deleting the branch; for runs the owner started and duties with merge-when-green authority. A refusal is one "needs you" item, never retried. On by default (unset or 1); needs Contents and Pull requests write on the token. 0: off',
   ],
   [
     'MAKA_GITHUB_WEBHOOK_SECRET',
@@ -777,6 +810,8 @@ export function readStackConfig(
     pushSet: false,
     dutiesSet: false,
     cardsSet: false,
+    prAutoFix: true,
+    prAutoMerge: true,
     dutyLinks: [],
     superagentActors: [],
     superagentFeatures: SUPERAGENT_FEATURES_OFF,
@@ -840,6 +875,9 @@ export function readStackConfig(
       problems.push('MAKA_CLOUD_CARDS needs MAKA_GITHUB_TOKEN, which the scan reads with');
     } else config.cardsSet = true;
   }
+  // On unless set to 0 (owner decision, 2026-11-12): red → one fix → green → merge.
+  config.prAutoFix = value('MAKA_CLOUD_PR_AUTOFIX') === undefined || flag('MAKA_CLOUD_PR_AUTOFIX');
+  config.prAutoMerge = value('MAKA_CLOUD_AUTOMERGE') === undefined || flag('MAKA_CLOUD_AUTOMERGE');
   const backupDir = value('MAKA_CLOUD_BACKUP_DIR');
   if (backupDir !== undefined) {
     const problem = backupDirProblem(dataDir, backupDir);
@@ -1151,6 +1189,7 @@ export function describeConfig(config: StackConfig): string[] {
     `web search key:      ${config.searchKeySet ? 'set' : 'not set (tasks get no web search)'}`,
     `Web Push:            ${config.pushSet ? 'on' : 'off (set the CLOUD_PUSH_* variables to turn it on)'}`,
     `GitHub token:        ${config.githubTokenProblem ?? 'set (fine-grained)'}`,
+    `PR follow-up:        checks of each pull request the employee opens are followed (${config.dutiesSet ? 'webhook, and a poll every 10 min' : 'a poll every 2 min'}, at most 6 h); on red ${config.prAutoFix ? 'one verified fix is pushed, then a second red needs you' : 'it needs you and offers the fix (MAKA_CLOUD_PR_AUTOFIX=0)'}; on green ${config.prAutoMerge ? 'a reviewed change on the employee’s own branch is merged' : 'nothing is merged (MAKA_CLOUD_AUTOMERGE=0)'}`,
     `standing duties:     ${config.dutiesSet ? `on, projects may be registered for ${config.dutyLinks.length === 0 ? 'no repository yet' : config.dutyLinks.map((link) => link.repo).join(', ')}` : 'off (set MAKA_GITHUB_WEBHOOK_SECRET to turn them on)'}`,
     `super-agent:         in-process (${config.superagentDbPath}${config.superagentActors.length === 0 ? '' : `; spawn limited to ${config.superagentActors.join(', ')}`})`,
     `super-agent features: byom ${onOff(config.superagentFeatures.byom)}, peer-review ${onOff(config.superagentFeatures.peerReview)}, release-verify ${onOff(config.superagentFeatures.releaseVerify)}${config.superagentFeatures.releaseVerifyUrl ? '' : ' (no /version endpoint)'}, sweep ${onOff(config.superagentFeatures.sweep)}, learning ${onOff(config.superagentFeatures.learning)}, rules ${config.superagentFeatures.rulesPath ? 'file' : 'off'}`,

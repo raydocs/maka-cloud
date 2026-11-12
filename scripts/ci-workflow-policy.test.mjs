@@ -1084,7 +1084,7 @@ test('every CI run validates the real committed source archive without dependenc
 });
 
 test('fork lanes build superagent before the packages that import it', () => {
-  // Host (P2) and runners (P3) import @maka-cloud/superagent. The root `build`
+  // Host (P2) imports @maka-cloud/superagent. The root `build`
   // chain already names it; these lists are copied by hand and must stay ahead.
   for (const name of ['fork-cloud-web.yml', 'fork-cloud-mobile.yml']) {
     const workflow = readWorkflow(name);

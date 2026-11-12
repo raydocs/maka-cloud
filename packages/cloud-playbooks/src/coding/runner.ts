@@ -22,7 +22,6 @@ import {
   type TaskId,
   type TaskPanel,
 } from '@maka-cloud/orchestrator';
-import type { WorkspaceHandle, WorkspaceStore } from '@maka-cloud/runners';
 import { agentBrief, type CheckProblem, type FailureBrief, repairPrompt } from './briefs.js';
 import type { ChangedFile, ChangeSet, CodingDeliveries } from './deliveries.js';
 import { DEFAULT_LOOP_LIMITS, type LoopLimits, LoopDetector, parseSample } from './loop.js';
@@ -143,12 +142,6 @@ export interface CodingRunnerOptions {
   lastSpendMs?: number;
   /** A cleanup step that failed. Cleanup goes on; this is how it is seen. */
   onCleanupError?(failure: { taskId: TaskId; step: string; error: unknown }): void;
-  /**
-   * Host-side WorkspaceStore (GitCloneStore default from the T6 fleet).
-   * Sandbox clones still use `CLONE_SCRIPT`. Tests and Super-agent call
-   * `prepareHostWorkspace`.
-   */
-  workspaces?: WorkspaceStore;
 }
 
 /** What is held right now, for tests: everything is back to zero when no task runs. */
@@ -264,28 +257,6 @@ export class CodingRunner implements Runner {
     options: { signal?: AbortSignal; epoch?: number } = {},
   ): Promise<void> {
     await this.options.sandbox.stopTask(taskId, options.signal, options.epoch);
-  }
-
-  /**
-   * Host-side `WorkspaceStore.prepare`. The sandbox clone path stays
-   * `CLONE_SCRIPT` so the control user only runs host text (I1 / I15).
-   */
-  async prepareHostWorkspace(input: {
-    tenantId: string;
-    taskId: string;
-    repoUrl: string;
-    ref?: string;
-    workDir?: string;
-  }): Promise<WorkspaceHandle> {
-    const store = this.options.workspaces;
-    if (!store) throw new Error('No WorkspaceStore on this coding runner.');
-    return store.prepare({
-      tenantId: input.tenantId,
-      workerId: input.taskId,
-      repoUrl: input.repoUrl,
-      ...(input.ref === undefined ? {} : { ref: input.ref }),
-      ...(input.workDir === undefined ? {} : { workDir: input.workDir }),
-    });
   }
 }
 

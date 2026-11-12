@@ -1,5 +1,6 @@
 export * from './config.js';
 export {
+  authorityReaches,
   isRunAuthority,
   RUN_AUTHORITIES,
   type RunAuthority,

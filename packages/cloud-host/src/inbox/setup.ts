@@ -50,6 +50,8 @@ export interface InboxSetup {
   proposals?: SupervisorHost['proposals'];
   /** Where `suggestion` options are delivered: the cards service. Without it no card is shown. */
   suggestions?: SupervisorHost['suggestions'];
+  /** Tasks the PR follow-up reports on itself (its fix runs): the inbox raises nothing of its own for them. */
+  followedTask?: (taskId: string) => boolean;
   /** Called with the running supervisor, so the host can raise items of its own. */
   onStarted?: (supervisor: Supervisor) => void;
   /** Replaces what is built from the config, for tests. */
@@ -126,6 +128,7 @@ export async function startInbox(setup: InboxSetup, context: InboxContext): Prom
     host,
     summary,
     settings: { verifierDailyCapUsd: setup.config.dailyCapUsd },
+    ...(setup.followedTask === undefined ? {} : { followedTask: setup.followedTask }),
     ...(override.now === undefined ? {} : { now: override.now }),
     ...(override.tickMs === undefined ? {} : { tickMs: override.tickMs }),
     verification: {

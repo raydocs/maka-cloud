@@ -114,6 +114,11 @@ export interface ConductorOptions {
   /** Reports what must not stop the conductor: an outbox that threw, a cancel that failed. */
   onWarning?: (message: string, detail?: unknown) => void;
   /**
+   * Told after a person stopped a conversation's run (`user_stop`, or `paused` for the operator's
+   * switch), so what waits to wake it (automations) stops too: a stop wins over any later wake.
+   */
+  onStopped?: (conversationId: string, reason: string) => void;
+  /**
    * Whether the one who approved an irreversible call (`UserAnswer.caller`;
    * null when the answer carried none) may still have it run. Asked right
    * before the approved call runs, in the transaction that uses the approval.
@@ -271,6 +276,7 @@ export class Conductor {
   private readonly prices: ModelPrices;
   private readonly now: () => number;
   private readonly warn: (message: string, detail?: unknown) => void;
+  private readonly onStopped: ConductorOptions['onStopped'];
   private readonly hooks: NonNullable<ConductorOptions['hooks']>;
   private readonly turnContext: ConductorOptions['turnContext'];
   private readonly conversationInstructions: ConductorOptions['conversationInstructions'];
@@ -310,6 +316,7 @@ export class Conductor {
     this.limits = { ...DEFAULT_LIMITS, ...options.limits };
     this.prices = options.prices ?? OPUS_5_5_PRICES;
     this.warn = options.onWarning ?? (() => undefined);
+    this.onStopped = options.onStopped;
     this.hooks = options.hooks ?? {};
     this.turnContext = options.turnContext;
     this.conversationInstructions = options.conversationInstructions;
@@ -1052,6 +1059,13 @@ export class Conductor {
     lane.queue = lane.queue.filter((job) => job.runId !== runId);
     if (lane.current?.runId === runId) this.requestStop(lane.current, 'user');
     else this.enqueue(lane, { kind: 'cancel_tasks', runId });
+    if (reason === 'user_stop' || reason === 'paused') {
+      try {
+        this.onStopped?.(lane.conversationId, reason);
+      } catch (error) {
+        this.warn('A stop could not be passed on', error);
+      }
+    }
     return true;
   }
 
