@@ -20,11 +20,6 @@ with no entry, and a task whose conversation has no owner (a pre-v5 one nobody a
 start tasks. After creating an invite and its machine, add the entry and restart. The old
 `INSTABOX_MACHINE_ID` is refused, since it would put every invite on one machine.
 
-Instead of fixed machines, `MAKA_CLOUD_BOXES=1` with `MAKA_CLOUD_BOX_TEMPLATE` (and optionally
-`MAKA_CLOUD_BOX_MAX`, default 3) lets the server run a pool of boxes per invite: it makes them from
-the template, puts idle ones to sleep, wakes them for the next task and deletes long-idle ones. The
-two ways are never mixed. See `docs/fork/design/boxes.md`.
-
 Starting runs nothing by itself: no model request is made and no task starts until a user posts a
 message. At start the server stops sandbox runs whose task its log does not know, and the
 conductor retries cancels that a shutdown left undone. A task whose run could not be stopped

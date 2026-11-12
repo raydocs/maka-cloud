@@ -18,7 +18,7 @@ already has the dependencies.
 | Our need | Today | With LayerFS |
 |---|---|---|
 | Several tasks on one repository at once (C6) | One fresh clone per task, in its own box | One shared base per repository commit, plus a writable overlay per task. A clash between two tasks is a conflict, not a silent overwrite |
-| Task setup time | Clone plus install inside the check budget (about 9.5 min) | Mount in milliseconds, dependencies included. The setup snapshot (`boxes.md`) becomes a base commit |
+| Task setup time | Clone plus install inside the check budget (about 9.5 min) | Mount in milliseconds, dependencies included. The setup snapshot becomes a base commit |
 | Kept changes and checkpoints | `changes.json` is rewritten in place, so a crash between two writes can wedge a kept change (re-review P2-2) | Every checkpoint is an immutable commit. The delivery record points at a commit id, so a half-written checkpoint cannot exist |
 | Retry from a step | Restart the attempt | Fork the task's branch at the last good commit |
 | Evidence in the PR (C5) | Diff only | Per-line blame: which step of the run wrote each line |

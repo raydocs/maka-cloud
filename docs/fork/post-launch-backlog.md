@@ -1,6 +1,6 @@
 # Post-launch backlog
 
-Findings about anything that is **off at launch** (the box pool, proposed cards, the plan vault; see
+Findings about anything that is **off at launch** (proposed cards, the plan vault; see
 `docs/fork/launch-notes.md`) or that a first user does not touch go here, not into a fix pull
 request. They are taken up after the first live run, one small pull request each, with a test that
 fails on main.
@@ -12,26 +12,11 @@ its source and left alone.
 How to add an item: one line of what is wrong, where, the test that would show it, and where the
 finding came from. Keep the order within a section as the order to do them in.
 
-## Box pool (`MAKA_CLOUD_BOXES`, off)
-
-From the T27 review rounds. The pool is unreachable while `MAKA_CLOUD_BOXES` is unset.
-
-Items 1 to 4 and Snapshots 1 and 2 were fixed in #411, each with a test that fails on
-the main it started from; what is left is below.
-
-1. Pool 4, not done: `SandboxProvider.acquire` takes no abort signal, so a task cancelled while it
-   waits for a box still waits out `waitMs`; passing one needs a change in `packages/cloud-runners`.
-2. Pool 2, not done: a task a running task delegates is its own task and gets its own box; whether it
-   should borrow its parent's box (to read its files) is a design question. A task between runs keeps
-   its box awake only as long as instabox lets it (the sweep sleeps only free boxes).
-3. Scrub A1 to A4: git run as the control user (fsmonitor), the scrub list and content check,
-   unreadable directories, setup descendants.
-
 ## Plan tokens and the plan vault (T27, not wired)
 
 1. Plan-token PRs 9b and 9c (9a, the vault, is merged but imported by no server package).
-2. A per-invite design for the user's own Claude or ChatGPT plan on several boxes; needs the pool
-   first.
+2. A per-invite design for the user's own Claude or ChatGPT plan on several boxes; needs a box pool
+   first (the earlier one was removed with `MAKA_CLOUD_BOXES`).
 
 ## Proposed cards (T30, `MAKA_CLOUD_CARDS`, off)
 

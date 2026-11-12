@@ -253,7 +253,7 @@ box or anywhere.
 - The preview stops when the task ends, the lease lapses, the grant is revoked or the computer
   goes offline, and the card says which.
 
-**Where.** Server (relay and auth), `cloud-instabox` or `cloud-boxes` (the box side), computer
+**Where.** Server (relay and auth), `cloud-instabox` (the box side), computer
 worker (the computer side), T24 (the "Open preview" action and the result card).
 **Tests.** A port another process listens on is refused. A control port is refused. A preview of
 another person's task is a 404. After cancel or revoke, the next preview request fails.

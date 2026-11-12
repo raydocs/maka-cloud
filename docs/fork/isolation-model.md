@@ -638,17 +638,6 @@ the account only after survivors are confirmed gone.
 
 ## 9. Out of scope at launch, kept here so the model is complete
 
-- **Box pool** (`MAKA_CLOUD_BOXES`, off): a box made by the server for one task and slept or
-  deleted after. When it comes on, I13 is enforced by the pool's labels instead of the fixed table,
-  and I6 must hold across sleep/restore (since #344 the guard runs before every task-code exec, so a
-restore the pool does not see is covered too). Two open
-  violations on that path, listed here so they are not lost: the scrub before a snapshot
-  (`cloud-boxes/src/scrub.ts`, `SCRUB_SCRIPT`) runs `git -C $MAKA_REPO_DIR ls-files` as the control
-  user inside the agent's repository, which starts `core.fsmonitor` from that repository's config
-  (batch24 A1; I1; #312's `control.git` did not touch it), and it writes its file list to
-  `${TMPDIR:-/tmp}/maka-scrub-env.$$` by name in a world-writable directory (I4). Both fixes: run the scrub's
-  repository steps as the agent, or against `control.git`, and keep its temporary file in the task
-  directory. The pool's other review items are in `docs/fork/post-launch-backlog.md`.
 - **Snapshots** as anything but a recovery aid: a snapshot holds every task's files on the box; it is
   never a trust boundary. I8 (no raw output on disk) is what keeps secrets out of it.
 - **Proposed cards**, **plan vault**: no sandbox code of their own; the vault would put a user's own
