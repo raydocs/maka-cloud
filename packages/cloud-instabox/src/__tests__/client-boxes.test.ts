@@ -60,6 +60,12 @@ describe('InstaboxClient box lifecycle calls', () => {
     });
   });
 
+  it('leaves the size out of a create, because Instabox sizes are fixed per template', async () => {
+    const { client, seen } = scripted([operation('create')]);
+    await client.createMachine({ templateId: 'agent-browser', vcpus: 2, memMiB: 4096 });
+    assert.deepEqual(seen[0]?.body, { templateId: 'agent-browser' });
+  });
+
   it('sends one key on every transport retry of a create, so a dropped answer makes one sandbox', async () => {
     const { client, seen } = scripted(['drop', operation('create')]);
     await client.createMachine({ templateId: 't_node' });
