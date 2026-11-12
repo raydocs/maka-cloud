@@ -25,6 +25,7 @@ export { type DeliveryOptions, type DeliveryStats } from './deliveries.js';
 export { type ExtensionEvent, type ExtensionKind } from './extension-feed.js';
 export {
   type AnswerOutcome,
+  type AutomationRoutesPort,
   DEFAULT_HTTP_LIMITS,
   type HttpLimits,
   MAX_ANSWER_TEXT_LENGTH,

@@ -81,6 +81,8 @@ const TEMPLATES: Record<string, (context: MessageContext) => string> = {
     `${PREFIX} stop working on ${quoted(c.taskTitle)}. It has failed ${c.count} times.`,
   fix_verification: (c) =>
     `${PREFIX} the independent check of ${quoted(c.taskTitle)} (${c.taskId}) did not pass: ${quoted(c.detail, 300)}. Please fix this and report again.`,
+  retry_checks: (c) =>
+    `${PREFIX} ${quoted(c.detail, 300)} (task ${c.taskId}). Please look at the failing checks of its pull request, fix them, and tell me what you did.`,
   redo_low_confidence: (c) =>
     `${PREFIX} the result of ${quoted(c.taskTitle)} (${c.taskId}) was reported with low confidence. Please redo it more carefully, or tell me exactly what is uncertain.`,
 };

@@ -7,7 +7,7 @@ import {
   pinnedVersions,
   startBoxService,
 } from '@maka-cloud/boxes';
-import { FREE_PLAYBOOK } from '@maka-cloud/conductor';
+import { authorityReaches, FREE_PLAYBOOK } from '@maka-cloud/conductor';
 import { SqliteSpendJournal } from '@maka-cloud/gateway';
 import { DEFAULT_INSTABOX_BASE_URL, InstaboxClient } from '@maka-cloud/instabox';
 import {
@@ -19,11 +19,15 @@ import {
 import { researchPlaybook } from '@maka-cloud/playbooks';
 import {
   type CodingRunner,
+  CODING_RUNNER,
   codingPlaybook,
   createCodingRunner,
+  GitHubChecks,
   GitHubPublisher,
   JsonFileCodingDeliveries,
+  JsonFileFollowUpStore,
   openPullRequestTool,
+  PrFollowUp,
 } from '@maka-cloud/playbooks/coding';
 import { citeCheckSandboxTool, webSearchSandboxTool } from '@maka-cloud/playbooks/sandbox-tool';
 import {
@@ -88,6 +92,13 @@ import { SpendAlertWatcher } from './spend-alert.js';
 import { BackupScheduler } from './backup-schedule.js';
 import { BackupError, backupAll, type BackupResult, listBackups } from './backup.js';
 import { accountLedgerOf } from './spend.js';
+import {
+  AutomationStore,
+  Automations,
+  automationView,
+  type Condition,
+  waitForTool,
+} from './automations.js';
 
 /** What a user is told when the operator's pause switch stopped their work. */
 export const PAUSED_NOTICE =
@@ -113,6 +124,13 @@ export interface StackDependencies {
   cards?: Pick<NonNullable<Parameters<typeof createCards>[0]>, 'reader' | 'schedule'>;
   /** How often schedules are looked at and finished duty runs settled, in milliseconds. Default 60000. */
   dutyTickMs?: number;
+  /** How often due automations are checked; tests shorten it. */
+  automationTickMs?: number;
+  /**
+   * Replaces GitHub's base URL for the PR follow-up's reads and its fix push, and how often it
+   * looks, for tests. The product reads api.github.com every 2 minutes (10 with the webhook).
+   */
+  followUp?: { githubUrl?: string; pollMs?: number; fetch?: typeof fetch };
   /** How often the pause switch is read while the stack runs, in milliseconds. Default 1000. */
   pausePollMs?: number;
   /** Timing of the daily backup, for tests. */
@@ -159,6 +177,10 @@ export interface Stack {
   duties?: DutiesRuntime;
   /** Proposed cards; absent while `MAKA_CLOUD_CARDS` is not set. */
   cards?: CardsRuntime;
+  /** Follows the checks of every pull request a coding task opens. */
+  followUp: PrFollowUp;
+  /** The conversation-bound waits the conductor registers with `wait_for`. */
+  automations: Automations;
   /** In-process Super-agent: event intake, workers, watchdog. Always present. */
   superagent: HostSuperagent;
   /** Writes a backup now, as the daily one does. Throws when `MAKA_CLOUD_BACKUP_DIR` is not set. */
@@ -203,6 +225,7 @@ export async function startStack(
         raiseProposal(input: Parameters<Supervisor['raiseProposal']>[0]): boolean;
         raiseStuck(input: Parameters<Supervisor['raiseStuck']>[0]): boolean;
         raiseSuggestion(input: Parameters<Supervisor['raiseSuggestion']>[0]): boolean;
+        raiseFollowUp(input: Parameters<Supervisor['raiseFollowUp']>[0]): boolean;
         raiseSuggestionOffer(input: Parameters<Supervisor['raiseSuggestionOffer']>[0]): boolean;
         closeSuggestion(lineage: string): boolean;
       }
@@ -288,6 +311,13 @@ export async function startStack(
   // The conversations of Claude tasks, kept off the sandboxes. Made only when Claude runs through
   // the Agent SDK, which needs the agent's account.
   let transcripts: SqliteTranscriptStore | undefined;
+  // The pull requests coding tasks open, followed until their checks have spoken (see PrFollowUp).
+  let followUp: PrFollowUp | undefined;
+  let releaseFollowUp: (() => void) | undefined;
+  // What the conductor waits on with `wait_for`, checked in code until it wakes the conversation.
+  let automations: Automations | undefined;
+  let automationStore: AutomationStore | undefined;
+  let releaseAutomations: (() => void) | undefined;
   let superagentRt: HostSuperagent | undefined;
   let releaseSuperagentTick: (() => void) | undefined;
   let releaseFeatureTimers: (() => void) | undefined;
@@ -296,6 +326,85 @@ export async function startStack(
       await mkdir(dirname(config.transcriptsDbPath), { recursive: true });
       transcripts = SqliteTranscriptStore.open(config.transcriptsDbPath);
     }
+    const github = {
+      env,
+      ...(dependencies.followUp?.githubUrl === undefined
+        ? {}
+        : { baseUrl: dependencies.followUp.githubUrl }),
+      ...(dependencies.followUp?.fetch === undefined ? {} : { fetch: dependencies.followUp.fetch }),
+    };
+    // One store for the runner, the pull request tool and the follow-up: it serializes its writes.
+    const deliveries = new JsonFileCodingDeliveries(config.codingDeliveriesPath);
+    // The fix run is a coding task of the same conversation, started on its root session like the
+    // conductor's own delegations, with the first task's budget. Idempotent on the key.
+    const rootOf = (conversationTaskId: string) => {
+      const sessionId = orchestrator?.rootSessionOfTask(conversationTaskId);
+      if (orchestrator === undefined || sessionId === undefined) return undefined;
+      return { orchestrator, session: { sessionId } };
+    };
+    const ownFollowUp = await PrFollowUp.create({
+      store: new JsonFileFollowUpStore(config.prFollowUpsPath),
+      checks: new GitHubChecks(github),
+      publisher: new GitHubPublisher(github),
+      deliveries,
+      autoFix: config.prAutoFix,
+      autoMerge: config.prAutoMerge,
+      startFix: async (input) => {
+        const root = rootOf(input.taskId);
+        if (root === undefined) throw new Error(`Task ${input.taskId} has no conversation`);
+        const first = root.orchestrator.status(root.session, input.taskId);
+        const task = await root.orchestrator.delegate(root.session, {
+          runner: CODING_RUNNER,
+          brief: input.brief,
+          title: input.title,
+          idempotencyKey: input.key,
+          ...(first.budgetUsd === undefined ? {} : { budgetUsd: first.budgetUsd }),
+        });
+        return { taskId: task.taskId };
+      },
+      taskOf: (_conversationId, taskId) => {
+        const root = rootOf(taskId);
+        if (root === undefined) return undefined;
+        const view = root.orchestrator.status(root.session, taskId);
+        return {
+          state: view.state,
+          ...(view.failureReason === undefined ? {} : { failureReason: view.failureReason }),
+        };
+      },
+      notice: async (conversationId, text) => {
+        if (conductor === undefined) throw new Error('The conductor is not running');
+        await conductor.postNotice({ conversationId, text });
+      },
+      report: (item) => supervisorRef?.raiseFollowUp(item) ?? false,
+      onWarning: warn,
+    });
+    followUp = ownFollowUp;
+    await mkdir(dirname(config.automationsDbPath), { recursive: true });
+    const ownAutomationStore = new AutomationStore(config.automationsDbPath);
+    automationStore = ownAutomationStore;
+    const ownAutomations = new Automations(ownAutomationStore, {
+      checks: new GitHubChecks(github),
+      taskState: (conversationId, taskId) =>
+        conversationOfTask?.(taskId) === conversationId
+          ? orchestrator?.taskStateOf(taskId)
+          : undefined,
+      // Bound once the server runs; until then a match stays matched and is posted on a later pass.
+      deliver: (input) => cloud.server.postToConversation(input),
+      report: (item) => {
+        supervisorRef?.raiseFollowUp({
+          conversationId: item.conversationId,
+          taskId: item.automationId,
+          key: `automation:${item.automationId}`,
+          needsYou: item.needsYou,
+          ask: item.ask,
+        });
+      },
+      onWarning: warn,
+    });
+    automations = ownAutomations;
+    const isPullRequestOf = (repo: string) => (condition: Condition) =>
+      (condition.kind === 'pr_checks_finished' || condition.kind === 'pr_merged_or_closed') &&
+      condition.repo.toLowerCase() === repo.toLowerCase();
     duties =
       webhookSecret === undefined
         ? undefined
@@ -304,6 +413,13 @@ export async function startStack(
             webhookSecret,
             links: config.dutyLinks,
             cards: config.cardsSet,
+            // A signed CI completion makes the follow-up look at that branch now.
+            engine: {
+              onWorkflowRun: (event) => {
+                ownFollowUp.nudge(event.repo, event.branch);
+                ownAutomations.nudge(isPullRequestOf(event.repo));
+              },
+            },
             ...(dependencies.dutyInspector === undefined
               ? {}
               : { inspector: dependencies.dutyInspector }),
@@ -429,7 +545,6 @@ export async function startStack(
       attachDutySource(duties.service, webhookSecret, config.dutyLinks, superagentRt);
     }
 
-    const deliveries = new JsonFileCodingDeliveries(config.codingDeliveriesPath);
     coding = createCodingRunner(runners, {
       deliveries,
       modes: config.modes,
@@ -442,6 +557,20 @@ export async function startStack(
       ownsTask: (runId, taskId) => conductor?.state.tasksOf(runId).includes(taskId) ?? false,
       ownsConversationTask: (runId, taskId) =>
         conductor?.state.conversationOwnsTask(runId, taskId) ?? false,
+      onPublished: ({ taskId, conversationId, runId, repo, pr }) => {
+        // A run the owner started carries no authority and may merge; a standing duty's run
+        // only when its authority is merge-when-green.
+        const authority = conductor?.state.run(runId)?.authority ?? null;
+        return ownFollowUp.watch({
+          taskId,
+          conversationId,
+          repo,
+          number: pr.number,
+          url: pr.url,
+          branch: pr.branch,
+          autoMerge: authority === null || authorityReaches(authority, 'merge-when-green'),
+        });
+      },
     });
 
     // Web Push is on when all three VAPID settings are set. The private key is read here from the
@@ -497,6 +626,10 @@ export async function startStack(
       ...(push === undefined ? {} : { push }),
       ...(signInOn ? { auth } : {}),
       ...(duties === undefined ? {} : { duties: duties.service }),
+      automations: {
+        list: (conversationId) => ownAutomations.list(conversationId).map(automationView),
+        cancel: (conversationId, id) => ownAutomations.cancel(conversationId, id),
+      },
       dbPath: config.dbPath,
       invitesPath: config.invitesPath,
       handoffRoot: config.handoffRoot,
@@ -524,7 +657,18 @@ export async function startStack(
         playbooks: STACK_PLAYBOOKS,
         modes: config.modes,
         deepMode: config.deepMode,
-        tools: [pullRequests],
+        tools: [
+          pullRequests,
+          waitForTool({
+            automations: ownAutomations,
+            ownsConversationTask: (conversationId, taskId) =>
+              conversationOfTask?.(taskId) === conversationId,
+          }),
+        ],
+        // A person's stop wins: nothing the conversation waits on wakes it afterwards.
+        onStopped: (conversationId) => {
+          ownAutomations.onUserStop(conversationId);
+        },
         // The orchestrator resumes its tasks after a restart, so the conductor follows them
         // instead of cancelling what it delegated.
         tasksSurviveRestart: true,
@@ -545,6 +689,7 @@ export async function startStack(
             },
             ...(duties === undefined ? {} : { proposals: duties.proposals }),
             ...(cards === undefined ? {} : { suggestions: cards.suggestions }),
+            followedTask: (taskId) => ownFollowUp.isFixTask(taskId),
             onStarted: (supervisor) => {
               supervisorRef = supervisor;
               raiseCapHit = (input) => supervisor.raiseCapHit(input);
@@ -593,6 +738,21 @@ export async function startStack(
       raiseOffer: (input) => supervisorRef?.raiseSuggestionOffer(input) ?? false,
       closeSuggestion: (lineage) => supervisorRef?.closeSuggestion(lineage) ?? false,
     });
+    // Polled: without the webhook every 2 minutes, with it every 10 (it wakes the follow-up
+    // itself). Looks once at start, so watches a restart left go on.
+    const pollMs = dependencies.followUp?.pollMs ?? (duties === undefined ? 120_000 : 600_000);
+    const followTimer = setInterval(() => ownFollowUp.kick(), pollMs);
+    followTimer.unref();
+    releaseFollowUp = () => clearInterval(followTimer);
+    ownFollowUp.kick();
+    // Waits are due every 30 seconds at the most often; a pass looks only at the due ones.
+    const automationTimer = setInterval(
+      () => void ownAutomations.kick(),
+      dependencies.automationTickMs ?? 15_000,
+    );
+    automationTimer.unref();
+    releaseAutomations = () => clearInterval(automationTimer);
+    void ownAutomations.kick();
     if (superagentRt === undefined) throw new Error('Super-agent did not start');
     superagentRt.bindInbox({
       createConversation: (input) => cloud.server.createConversation(input),
@@ -628,6 +788,11 @@ export async function startStack(
       },
     });
   } catch (error) {
+    releaseAutomations?.();
+    await automations?.stop();
+    automationStore?.close();
+    releaseFollowUp?.();
+    await followUp?.stop();
     releaseFeatureTimers?.();
     releaseSuperagentTick?.();
     superagentRt?.close();
@@ -681,6 +846,12 @@ export async function startStack(
           : {
               [relative(config.dataDir, config.transcriptsDbPath)]: (to) =>
                 transcripts.backupTo(to),
+            }),
+        ...(automationStore === undefined
+          ? {}
+          : {
+              [relative(config.dataDir, config.automationsDbPath)]: (to) =>
+                (automationStore as AutomationStore).backupTo(to),
             }),
       },
     });
@@ -762,6 +933,8 @@ export async function startStack(
     pause,
     ...(duties === undefined ? {} : { duties }),
     ...(cards === undefined ? {} : { cards }),
+    followUp: followUp as PrFollowUp,
+    automations: automations as Automations,
     superagent: superagentRt as HostSuperagent,
     backup,
     checkSpendAlert: () => alerts?.tick() ?? Promise.resolve(),
@@ -777,6 +950,10 @@ export async function startStack(
           try {
             // The timer and the launches stop first; the database closes once the server no
             // longer answers webhook requests.
+            releaseAutomations?.();
+            await automations?.stop();
+            releaseFollowUp?.();
+            await followUp?.stop();
             await cards?.stop();
             await duties?.stop();
             releaseFeatureTimers?.();
@@ -786,6 +963,7 @@ export async function startStack(
             await cloud.close();
           } finally {
             duties?.close();
+            automationStore?.close();
             superagentRt?.close();
             await boxService?.close();
             transcripts?.close();

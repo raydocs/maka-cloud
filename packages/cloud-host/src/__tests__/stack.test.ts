@@ -111,6 +111,8 @@ async function start(
             name === 'MAKA_CLOUD_INVITE_MONTHLY_USD' ||
             name === 'MAKA_GITHUB_WEBHOOK_SECRET' ||
             name === 'MAKA_GITHUB_TOKEN' ||
+            name === 'MAKA_CLOUD_PR_AUTOFIX' ||
+            name === 'MAKA_CLOUD_AUTOMERGE' ||
             name === 'MAKA_CLOUD_CARDS' ||
             name === 'MAKA_CLOUD_DUTY_REPOS' ||
             name === 'MAKA_CLOUD_APPLE_CLIENT_IDS' ||
@@ -1888,6 +1890,93 @@ test('sign-in limits trust X-Forwarded-For only from the configured proxy', asyn
   assert.ok(!(await tries('127.0.0.1,::1')).includes(429));
 });
 
+test('a pull request a task opened is followed: green is a quiet update in its conversation, red with the fix off needs the owner once and pushes nothing', async (t) => {
+  // A GitHub that knows two pull requests: #1 with green checks, #2 with a failing one.
+  const heads: Record<string, { sha: string; conclusion: string }> = {
+    '1': { sha: '1'.repeat(40), conclusion: 'success' },
+    '2': { sha: '2'.repeat(40), conclusion: 'failure' },
+  };
+  const github = createServer((req, res) => {
+    const url = new URL(req.url ?? '/', 'http://x');
+    const pull = /^\/repos\/acme\/calc\/pulls\/(\d)$/u.exec(url.pathname);
+    const checks = /^\/repos\/acme\/calc\/commits\/([0-9a-f]{40})\/check-runs$/u.exec(url.pathname);
+    res.setHeader('content-type', 'application/json');
+    if (pull && heads[pull[1] as string]) {
+      res.end(
+        JSON.stringify({
+          state: 'open',
+          merged: false,
+          head: { sha: heads[pull[1] as string]?.sha },
+        }),
+      );
+    } else if (checks) {
+      const head = Object.values(heads).find((h) => h.sha === checks[1]);
+      res.end(
+        JSON.stringify({
+          check_runs: [{ id: 9, name: 'test', status: 'completed', conclusion: head?.conclusion }],
+        }),
+      );
+    } else res.writeHead(404).end('{"message":"Not Found"}');
+  });
+  await new Promise<void>((resolve) => github.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => github.close(() => resolve())));
+  const githubUrl = `http://127.0.0.1:${(github.address() as AddressInfo).port}`;
+  const { stack, inviteId, warnings } = await start(
+    t,
+    undefined,
+    {
+      MAKA_GITHUB_TOKEN: 'github_pat_11TEST_notarealtokennotarealtoken',
+      MAKA_CLOUD_PR_AUTOFIX: '0',
+      MAKA_CLOUD_AUTOMERGE: '0',
+    },
+    true,
+    { followUp: { githubUrl, pollMs: 3_600_000 } },
+  );
+  const token = stack.cloud.server.invites.create('owner').token;
+  const api = (path: string, body?: unknown): Promise<Response> =>
+    fetch(`${stack.cloud.server.url}${path}`, {
+      method: body === undefined ? 'GET' : 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+  assert.ok(inviteId);
+  const { conversationId } = (await (await api('/v1/conversations', {})).json()) as {
+    conversationId: string;
+  };
+  for (const number of [1, 2]) {
+    await stack.followUp.watch({
+      taskId: `tsk_${number}`,
+      conversationId,
+      repo: 'acme/calc',
+      number,
+      url: `https://github.com/acme/calc/pull/${number}`,
+      branch: `maka/tsk_${number}`,
+    });
+  }
+  await stack.followUp.settled();
+  const { items } = (await (await api('/v1/inbox/items')).json()) as {
+    items: Array<{ kind: string; interrupts: boolean; taskId: string | null; ask: string }>;
+  };
+  assert.deepEqual(items.map((item) => [item.kind, item.interrupts, item.taskId]).sort(), [
+    ['decision', true, 'tsk_2'],
+    ['finished', false, null],
+  ]);
+  assert.match(
+    items.find((item) => item.kind === 'finished')?.ask ?? '',
+    /Checks passed on pull request #1 in acme\/calc\./,
+  );
+  assert.match(
+    items.find((item) => item.kind === 'decision')?.ask ?? '',
+    /Checks failed on pull request #2 .*Nothing was pushed; ask the agent to fix them\?/,
+  );
+  assert.deepEqual(
+    stack.followUp.list().map((watch) => watch.outcome),
+    ['passed', 'needs_you'],
+  );
+  // The quiet update's line reached the conversation through the conductor without a hitch.
+  assert.deepEqual(warnings, []);
+});
+
 test('the stack always starts Super-agent in process and a stalled worker is a stuck card', async (t) => {
   let now = 1_700_000_000_000;
   const { stack, inviteId } = await start(t, undefined, {}, true, {
@@ -2009,4 +2098,48 @@ test('a HMAC-verified duty delivery is a Super-agent Source; a comment from a no
     1,
     'mallory does not spawn a second worker',
   );
+});
+
+test('a wait the conductor registers is listed for its owner and, once it holds, wakes the conversation', async (t) => {
+  const { stack, firstMessage } = await start(t, undefined, {
+    ANTHROPIC_API_KEY: 'sk-master-not-a-key',
+  });
+  const token = stack.cloud.server.invites.create('test').token;
+  const api = (path: string, body?: unknown) =>
+    fetch(`${stack.cloud.server.url}${path}`, {
+      method: body === undefined ? 'GET' : 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+  const { conversationId } = (await (await api('/v1/conversations', {})).json()) as {
+    conversationId: string;
+  };
+  const later = stack.automations.register({
+    conversationId,
+    condition: { kind: 'at', time: new Date(Date.now() + 3_600_000).toISOString() },
+    resumeText: 'An hour has passed.',
+  });
+  const listed = (await (await api(`/v1/conversations/${conversationId}/automations`)).json()) as {
+    automations: Array<{ id: string; state: string }>;
+  };
+  assert.deepEqual(
+    listed.automations.map((a) => [a.id, a.state]),
+    [[later.id, 'watching']],
+  );
+  const cancelled = await api(
+    `/v1/conversations/${conversationId}/automations/${later.id}/cancel`,
+    {},
+  );
+  assert.equal(cancelled.status, 200);
+
+  stack.automations.register({
+    conversationId,
+    condition: { kind: 'at', time: new Date(Date.now() - 1_000).toISOString() },
+    resumeText: 'Time to look again.',
+  });
+  // The wake is a message in the conversation: the conductor takes a turn on it.
+  await firstMessage;
+  await stack.automations.kick();
+  const states = stack.automations.list(conversationId).map((a) => a.state);
+  assert.deepEqual(states, ['cancelled', 'delivered']);
 });
