@@ -88,6 +88,13 @@ test('optional settings are read', () => {
   assert.equal(config.openAiKeySet, true);
 });
 
+test('the conductor model is read when the gateway prices it, and refused otherwise', () => {
+  const config = readStackConfig({ ...ENV, MAKA_CLOUD_CONDUCTOR_MODEL: 'claude-haiku-5-5' });
+  assert.deepEqual(config.conductor, { model: 'claude-haiku-5-5' });
+  const problems = problemsOf({ ...ENV, MAKA_CLOUD_CONDUCTOR_MODEL: 'claude-unknown-1' });
+  assert.ok(problems.some((problem) => problem.startsWith('MAKA_CLOUD_CONDUCTOR_MODEL names')));
+});
+
 test('the config the stack passes on carries no key, so only the gateway reads one', () => {
   const env = {
     ...ENV,

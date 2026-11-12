@@ -16,7 +16,7 @@ import {
   CONNECTION_SLUG,
   conductorConnection,
   connectionIdOf,
-  MODEL_ID,
+  modelOf,
   type ModelAccess,
   type ModelCharge,
   providerStateIdentity,
@@ -92,7 +92,7 @@ export class MakaHost {
       cwd: this.options.root,
       llmConnectionId: connectionIdOf(this.options.access),
       llmConnectionSlug: CONNECTION_SLUG,
-      model: MODEL_ID,
+      model: modelOf(this.options.access),
       thinkingLevel: input.thinkingLevel,
       permissionMode: 'bypass',
     });
@@ -154,18 +154,18 @@ export class MakaHost {
     const { access } = this.options;
     const providerOptions = buildProviderOptions(
       this.connection,
-      MODEL_ID,
+      modelOf(access),
       ctx.header.thinkingLevel,
     );
     return new AiSdkBackend({
       sessionId: ctx.sessionId,
-      header: { ...ctx.header, model: MODEL_ID },
+      header: { ...ctx.header, model: modelOf(access) },
       readExecutionBoundary: () => ctx.store.readExecutionBoundary(ctx.sessionId),
       readPermissionMode: async () => (await ctx.store.readHeader(ctx.sessionId)).permissionMode,
       connection: this.connection,
       providerStateIdentity: this.identity,
       apiKey: access.apiKey,
-      modelId: MODEL_ID,
+      modelId: modelOf(access),
       modelFactory: (modelInput) => {
         const send: typeof fetch = access.gateway
           ? (input, init) => this.gatewayFetch(ctx.sessionId)(input, init)

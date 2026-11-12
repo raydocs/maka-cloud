@@ -85,6 +85,8 @@ export interface StackConfig {
   /** The conductor reaches the model through the gateway, which alone holds the vendor key. */
   conductor: {
     connectionId?: string;
+    /** The conductor's Anthropic model; unset is the conductor's default (Opus 5.5). */
+    model?: string;
   };
   instabox: {
     apiUrl?: string;
@@ -558,6 +560,10 @@ export const ENV_VARIABLES = [
     'MAKA_CLOUD_VERIFIER_DAILY_CAP_USD',
     'daily cap on model checks, default 5; changeable in the inbox settings',
   ],
+  [
+    'MAKA_CLOUD_CONDUCTOR_MODEL',
+    'Anthropic model the conductor talks with (default claude-opus-5-5); must have a gateway price',
+  ],
   ['MAKA_CLOUD_SUMMARY_MODEL', 'model that writes the digest summary (default claude-haiku-5-5)'],
   [
     'MAKA_CLOUD_INVITE_DAILY_USD',
@@ -900,6 +906,16 @@ export function readStackConfig(
   }
   const connectionId = value('MAKA_CLOUD_LLM_CONNECTION_ID');
   if (connectionId !== undefined) config.conductor.connectionId = connectionId;
+  const conductorModel = value('MAKA_CLOUD_CONDUCTOR_MODEL');
+  if (conductorModel !== undefined) {
+    if (modelTable(config.gateway.models).has(`anthropic:${conductorModel}`)) {
+      config.conductor.model = conductorModel;
+    } else {
+      problems.push(
+        `MAKA_CLOUD_CONDUCTOR_MODEL names "${conductorModel}", which the gateway has no Anthropic price for: add it to MAKA_CLOUD_GATEWAY_MODELS`,
+      );
+    }
+  }
   required('INSTABOX_API_KEY');
   if (options.sandboxes === 'single-machine') {
     required('INSTABOX_MACHINE_ID');
@@ -1139,6 +1155,7 @@ export function describeConfig(config: StackConfig): string[] {
     `MCP URL for tasks:   ${config.mcp.publicUrl ?? '(not set: tasks get the local URL)'}`,
     `model API base URL:  ${config.gateway.anthropicBaseUrl ?? '(default)'}`,
     `model connection id: ${config.conductor.connectionId ?? '(default)'}`,
+    `conductor model:     ${config.conductor.model ?? '(default)'}`,
     config.boxes === undefined
       ? `sandbox machines:    ${Object.keys(config.sandboxes).length} (one per invite)`
       : `sandbox boxes:       up to ${config.boxes.maxPerInvite} per invite, from template ${config.boxes.templateId}`,
