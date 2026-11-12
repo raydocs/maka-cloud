@@ -804,6 +804,33 @@ test('a running stack backs itself up: the copy restores, holds no key and no pu
   invites.close();
 });
 
+test('with Super-agent off a backup leaves superagent.db out, and one left by an earlier version is still copied and restored', async (t) => {
+  const backupDir = await mkdtemp(join(tmpdir(), 'cloud-host-backups-'));
+  t.after(() => rm(backupDir, { recursive: true, force: true }));
+  const { stack, dataDir } = await start(t, undefined, { MAKA_CLOUD_BACKUP_DIR: backupDir });
+  assert.equal(stack.superagent, undefined);
+  const layout = backupLayoutOf(dataDir);
+
+  const fresh = await stack.backup();
+  const freshFiles = (await verifyBackup(fresh.path, layout)).files.map((file) => file.path);
+  assert.ok(freshFiles.includes('cloud.db'));
+  assert.ok(!freshFiles.includes('superagent.db'));
+
+  const left = new DatabaseSync(join(dataDir, 'superagent.db'));
+  left.exec("CREATE TABLE kept (name TEXT); INSERT INTO kept VALUES ('worker')");
+  left.close();
+  const upgraded = await stack.backup();
+  const upgradedFiles = (await verifyBackup(upgraded.path, layout)).files.map((file) => file.path);
+  assert.ok(upgradedFiles.includes('superagent.db'));
+
+  await stack.close();
+  await rm(join(dataDir, 'superagent.db'));
+  await restoreBackup({ dataDir, backupDir, stamp: upgraded.stamp, layout });
+  const back = new DatabaseSync(join(dataDir, 'superagent.db'), { readOnly: true });
+  assert.equal(back.prepare('SELECT name FROM kept').get()?.name, 'worker');
+  back.close();
+});
+
 test('the stack writes the day’s backup by itself once it is running, and says so', async (t) => {
   const backupDir = await mkdtemp(join(tmpdir(), 'cloud-host-backups-'));
   t.after(() => rm(backupDir, { recursive: true, force: true }));
