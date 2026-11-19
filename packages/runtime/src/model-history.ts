@@ -87,6 +87,7 @@ export interface PriorUnknownToolOutcome {
   readonly toolCallId: string;
   readonly toolName: string;
   readonly operationId: string;
+  readonly requiresUserAttention: boolean;
 }
 
 export type PriorUnknownToolOutcomeProjection =
@@ -95,6 +96,7 @@ export type PriorUnknownToolOutcomeProjection =
   | {
       readonly kind: 'projected';
       readonly outcomes: readonly PriorUnknownToolOutcome[];
+      readonly requiresUserAttention: boolean;
     };
 
 /**
@@ -108,8 +110,9 @@ function lineageIsEmpty(lineage: RuntimeInvocationLineage | undefined): boolean 
 }
 
 /**
- * Retire an unknown only after the conversation demonstrably moved on with the
- * model informed. While an unknown is active this gate admits explicit user
+ * Relax the automated-turn gate only after the conversation demonstrably moved
+ * on with the model informed. The unknown result remains in the projection.
+ * While an unknown is active this gate admits explicit user
  * turns alone, so a later user-rooted, fresh, lineage-free invocation that
  * completed is exactly the turn the unknown was projected into. Retried,
  * regenerated, branched, and sub-agent turns carry lineage; continuations and
@@ -117,7 +120,7 @@ function lineageIsEmpty(lineage: RuntimeInvocationLineage | undefined): boolean 
  * their own authority kinds; every other automated turn fails at this gate
  * before it could complete.
  */
-function unknownOutcomeRetired(
+function unknownOutcomeAcknowledged(
   invocation: RuntimeInvocationRecord,
   invocations: readonly RuntimeInvocationRecord[] | undefined,
 ): boolean {
@@ -135,9 +138,9 @@ function unknownOutcomeRetired(
 }
 
 /**
- * Admit only sealed T1-without-T2 facts for a manual fresh message. The
- * synthetic tool response is request-local; it is never appended to the event
- * ledger and must not be mistaken for evidence that the tool settled.
+ * Project sealed T1-without-T2 facts whenever history is built. The synthetic
+ * response is derived from the ledger and must never be mistaken for real T2.
+ * An unacknowledged unknown additionally gates automated turns.
  */
 export function inspectPriorUnknownToolOutcomes(
   events: readonly RuntimeEvent[],
@@ -159,12 +162,6 @@ export function inspectPriorUnknownToolOutcomes(
       invocation?.terminalEvent &&
       invocation.terminalEvent.status === 'failed' &&
       runtimeInvocationFailureClass(invocation) === 'outcome_unknown';
-    if (sealedUnknown && invocation && unknownOutcomeRetired(invocation, invocations)) {
-      // The explicit turn this unknown was projected into completed with the
-      // model informed; the conversation moved on. Without this the sealed
-      // invocation would re-fire on every later turn forever.
-      continue;
-    }
     const recovery = resolveRuntimeRecovery(invocationEvents);
     if (recovery.hasCorruption) {
       // Strict per-invocation framing is authoritative only for an invocation
@@ -200,6 +197,7 @@ export function inspectPriorUnknownToolOutcomes(
 
   const eventsById = new Map(events.map((event) => [event.id, event] as const));
   const outcomes: PriorUnknownToolOutcome[] = [];
+  let requiresUserAttention = false;
   for (const decision of dispatchedUnknown) {
     const callEvent = eventsById.get(decision.callRuntimeEventId!);
     const dispatchEvent = eventsById.get(decision.dispatchRuntimeEventId!);
@@ -233,7 +231,10 @@ export function inspectPriorUnknownToolOutcomes(
     // tool. Validate their durable boundary above, but never surface their
     // names or operation identities in model-visible request context.
     if (callEvent.modelVisibility === 'hidden') continue;
+    const outcomeRequiresUserAttention = !unknownOutcomeAcknowledged(invocation, invocations);
+    if (outcomeRequiresUserAttention) requiresUserAttention = true;
     outcomes.push({
+      requiresUserAttention: outcomeRequiresUserAttention,
       callEventId: callEvent.id,
       toolCallId: call.id,
       toolName: call.name,
@@ -245,7 +246,7 @@ export function inspectPriorUnknownToolOutcomes(
   // The unknown is carried only by the request-local tool responses below
   // (appendPriorUnknownToolResponses): the system prompt stays byte-stable,
   // so the provider's cached request prefix is never churned per event.
-  return { kind: 'projected', outcomes };
+  return { kind: 'projected', outcomes, requiresUserAttention };
 }
 
 /** Insert request-only tool responses beside their calls so provider history stays well-formed. */
