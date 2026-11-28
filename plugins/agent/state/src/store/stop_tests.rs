@@ -35,6 +35,117 @@ use maka_sandbox::workspace::{BindingStamp, PermissionBasis};
 use std::{path::Path, sync::Arc};
 use uuid::Uuid;
 
+#[tokio::test]
+async fn committed_agent_changes_wake_only_their_session() {
+    use maka_agent_facts::interaction::{
+        InteractionQuestion, InteractionRecord, InteractionRequest, QuestionOption,
+    };
+    use std::{
+        future::Future,
+        pin::pin,
+        task::{Context, Poll, Waker},
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let (root, store) = open(directory.path(), true).await;
+    let mut changes = Vec::new();
+    for session in ["watch-a", "watch-b"] {
+        let created = root
+            .create_session(session, session, &serde_json::json!({"title": session}), 1)
+            .await
+            .unwrap();
+        changes.push(created.subscribe_commits().unwrap());
+    }
+    let mut deployments = root.subscribe_topic(CommitTopic::Deployments);
+    let mut context = Context::from_waker(Waker::noop());
+
+    for (index, session) in ["watch-a", "watch-b"].into_iter().enumerate() {
+        let mut check = |state| {
+            assert!(
+                matches!(
+                    pin!(changes[index].changed()).poll(&mut context),
+                    Poll::Ready(Ok(()))
+                ),
+                "{session}: missing wake after {state}",
+            );
+            assert!(
+                pin!(changes[1 - index].changed())
+                    .poll(&mut context)
+                    .is_pending(),
+                "{session}: {state} woke another Session",
+            );
+        };
+        let (mut spec, contents) = spec();
+        spec.session_id = session.into();
+        let admission = Admission::new(spec.clone(), UnixMillis(10), contents);
+        let run = admission.run();
+        store.admit(admission).await.unwrap();
+        check("Run admission fact");
+
+        enqueue(&store, &spec, "followup", None).await;
+        check("queue-only commit");
+
+        let claim = store.claim(run).await.unwrap();
+        let view = store.frontier(run).await.unwrap();
+        store
+            .interactions()
+            .establish(
+                &claim,
+                Head::from(&view),
+                InteractionRecord {
+                    request_id: format!("question-{session}"),
+                    execution: ExecutionIdentity {
+                        session_id: session.into(),
+                        turn_id: spec.turn_id,
+                        run_id: run,
+                    },
+                    created_at: 11,
+                    request: InteractionRequest::Question {
+                        tool_use_id: maka_agent_facts::tool_call::tool_use_id(run, "question"),
+                        questions: vec![InteractionQuestion {
+                            question: "Proceed?".into(),
+                            options: ["Yes", "No"]
+                                .map(|label| QuestionOption {
+                                    label: label.into(),
+                                    description: None,
+                                })
+                                .into(),
+                        }],
+                    },
+                    outcome: None,
+                },
+                None,
+                vec![],
+            )
+            .await
+            .unwrap();
+        check("interaction-only commit");
+    }
+    assert!(pin!(deployments.changed()).poll(&mut context).is_pending());
+
+    let owner = root.owned_root().unwrap();
+    owner.capability_source_changed();
+    for change in &mut changes {
+        assert!(pin!(change.changed()).poll(&mut context).is_pending());
+    }
+    owner.control_source_changed();
+    for change in &mut changes {
+        assert!(matches!(
+            pin!(change.changed()).poll(&mut context),
+            Poll::Ready(Ok(()))
+        ));
+    }
+
+    root.set_session_archived::<serde_json::Value>("watch-a", true, 12)
+        .await
+        .unwrap();
+    assert!(matches!(
+        pin!(changes[0].changed()).poll(&mut context),
+        Poll::Ready(Ok(()))
+    ));
+    assert!(pin!(changes[1].changed()).poll(&mut context).is_pending());
+}
+
 pub(super) async fn open(base: &Path, initialize: bool) -> (RootStore, Store) {
     open_through(base, initialize, i64::MAX).await
 }

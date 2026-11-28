@@ -20,7 +20,7 @@
 use crate::{
     Engine, RunError,
     ports::*,
-    reconcile::{self, Action, Live, WorkKey},
+    reconcile::{self, Action, Live, PreparedStepPrompt, WorkKey},
 };
 use futures_util::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use maka_agent_facts::{
@@ -424,7 +424,7 @@ impl Engine {
             None;
         let mut summary_key = None;
         let mut model_failure_key: Option<(ModelAttemptId, Option<ContentRef>, bool)> = None;
-        let mut changes = self.store.subscribe()?;
+        let mut changes = self.store.subscribe_driver(&claim)?;
         'drive: loop {
             // Subscribe/mark before the authoritative read, so a commit between
             // reading the level and waiting cannot lose its invalidation hint.
@@ -673,6 +673,19 @@ impl Engine {
                 {
                     action = Action::Start(attempt);
                 }
+            }
+            // Carry only the preparation of the Step going directly to admission.
+            let starting_step = match &action {
+                Action::Attempt(step) => Some(*step),
+                Action::Start(attempt) => Some(view.attempts[attempt].step),
+                _ => None,
+            };
+            if live
+                .prepared_prompt
+                .as_ref()
+                .is_some_and(|prepared| Some(prepared.step) != starting_step)
+            {
+                live.prepared_prompt = None;
             }
             let idle = matches!(action, Action::Idle);
             if idle {
@@ -927,12 +940,22 @@ impl Engine {
                             let ports = ports.clone();
                             let witness =
                                 ModelWitness::new(self.store.clone(), claim.clone(), attempt);
+                            let prompt = live.prepared_prompt.take().and_then(|prepared| {
+                                (prepared.step == request.step
+                                    && prepared.request == request.request)
+                                    .then_some(prepared.prompt)
+                            });
+                            let input = AdmittedModelInput {
+                                request,
+                                bytes,
+                                prompt,
+                            };
                             work.push(
                                 async move {
                                     Completion::Connected {
                                         attempt,
                                         result: ports
-                                            .start_model(run, attempt, request, bytes, witness)
+                                            .start_model(run, attempt, input, witness)
                                             .await,
                                     }
                                 }
@@ -1415,7 +1438,14 @@ impl Engine {
                     ));
                 }
                 match publication.submit(&self.store).await {
-                    Ok(_) | Err(StoreError::RevisionConflict { .. }) => {}
+                    Ok(_) => {
+                        live.prepared_prompt = prepared.prompt.map(|prompt| PreparedStepPrompt {
+                            step: prepared.request.step,
+                            request: prepared.request.request,
+                            prompt,
+                        });
+                    }
+                    Err(StoreError::RevisionConflict { .. }) => {}
                     Err(source)
                         if matches!(
                             source.underlying(),
@@ -1596,6 +1626,9 @@ impl Engine {
                 };
                 match validation {
                     ToolValidation::Allowed => {
+                        if live.recovering_tools(&view) {
+                            return Ok(());
+                        }
                         match reconcile::tool_incomplete(&view, &key) {
                             Ok(true) => return Ok(()),
                             Ok(false) => {}
@@ -1694,7 +1727,7 @@ impl Engine {
                         if admitted {
                             live.looked_up.remove(&key);
                             tool.admitted = true;
-                            live.work.insert(WorkKey::Tool(key.clone()));
+                            live.work.insert(WorkKey::Dispatch(key.clone()));
                             let ports = ports.clone();
                             work.push(
                                 async move {
@@ -1732,7 +1765,7 @@ impl Engine {
                 }
             }
             Completion::Dispatched { key, result } => {
-                live.work.remove(&WorkKey::Tool(key.clone()));
+                live.work.remove(&WorkKey::Dispatch(key.clone()));
                 match result {
                     Ok(DispatchOutcome::Original(reply)) => {
                         let (reply, content) =

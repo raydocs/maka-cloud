@@ -17,7 +17,7 @@
  * under the License.
  */
 
-mod catalog;
+pub(crate) mod catalog;
 use crate::{Error, client::Client};
 use maka_agent_api::contract::{MetadataResult, Session, WorkspaceAccess};
 use maka_agent_facts::configuration::ModelSelection;
@@ -80,7 +80,7 @@ pub(crate) async fn resolve(
     client: &Client,
     preferences: &Preferences,
 ) -> Result<ModelSelection, Error> {
-    let models = catalog::read(client).await?;
+    let models = client.models().await?;
     let choice = selected(preferences, &models)?;
     if preferences
         .thinking
@@ -95,7 +95,8 @@ pub async fn options(
     session: &Session,
     preferences: &Preferences,
 ) -> Result<Vec<Select>, Error> {
-    project(session, preferences, &catalog::read(client).await?)
+    let models = client.models().await?;
+    project(session, preferences, &models)
 }
 fn project(
     session: &Session,
@@ -156,7 +157,7 @@ pub async fn set(
     id: &str,
     value: &str,
 ) -> Result<Vec<Select>, Error> {
-    let models = catalog::read(client).await?;
+    let models = client.models().await?;
     let options = project(session, preferences, &models)?;
     let option = options
         .iter()

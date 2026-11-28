@@ -22,7 +22,7 @@
 use crate::{Change, ContentBlob, Head};
 use maka_agent_facts::durable::*;
 use maka_event_log::{
-    StoreError,
+    CommitTopic, StoreError,
     connection::Query,
     root_store::{DataWriter, SessionWorkFence},
     writeback::{Notification, Prepared, Statement},
@@ -435,7 +435,9 @@ impl Statement for RecoverUndeliveredSteering {
             notification: if sessions.is_empty() {
                 Notification::NONE
             } else {
-                Notification::METADATA.with_sessions(sessions)
+                Notification::METADATA
+                    .with_sessions(sessions)
+                    .with_topic(CommitTopic::Queue)
             },
         })
     }
@@ -486,9 +488,15 @@ impl Statement for PreparedEnqueue {
             self.contents,
             self.followup.as_ref(),
         )?;
+        let mut notification = Notification::NONE;
+        if changed {
+            notification = Notification::METADATA
+                .with_sessions([self.session])
+                .with_topic(CommitTopic::Queue);
+        }
         if changed && let Some(Followup::Interrupt { run, stop }) = self.followup {
             // The queue entry and Stop share the same Root receipt transaction.
-            crate::store::StopRun {
+            let stopped = crate::store::StopRun {
                 run,
                 change: Change {
                     id: stop,
@@ -501,15 +509,12 @@ impl Statement for PreparedEnqueue {
                 retract_pending: false,
             }
             .execute(c)?;
+            notification = notification.combine(stopped.notification);
         }
         Ok(Prepared {
             value,
             changed,
-            notification: if changed {
-                Notification::METADATA.with_sessions([self.session])
-            } else {
-                Notification::NONE
-            },
+            notification,
         })
     }
     fn committed(value: Self::Value) -> Self::Output {
@@ -533,7 +538,9 @@ impl Statement for Rebuild {
         Ok(Prepared {
             value: sql::rebuild(c, &self.0)?,
             changed: true,
-            notification: Notification::METADATA.with_sessions([self.0]),
+            notification: Notification::METADATA
+                .with_sessions([self.0])
+                .with_topic(CommitTopic::Queue),
         })
     }
     fn committed(value: Self::Value) -> Self::Output {

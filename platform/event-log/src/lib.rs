@@ -24,7 +24,7 @@ pub mod applications;
 pub mod checkpoints;
 mod commits;
 pub mod content;
-pub use commits::SessionSubscription;
+pub use commits::{CommitTopic, SessionSubscription};
 pub mod connection;
 pub mod effects;
 pub mod migration;

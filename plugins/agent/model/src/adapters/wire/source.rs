@@ -48,6 +48,16 @@ pub(in crate::adapters) enum SourceFragment {
     Base64(SourceBytes),
 }
 impl SourceFragment {
+    fn inline_raw(&self) -> Option<&[u8]> {
+        match self {
+            Self::Literal(bytes) | Self::OwnedLiteral { bytes, .. } => Some(bytes),
+            Self::Raw(source) | Self::OwnedRaw { source, .. } => match source.bytes() {
+                SourceBytes::Inline(bytes) => Some(bytes),
+                SourceBytes::Source(_) => None,
+            },
+            _ => None,
+        }
+    }
     pub(in crate::adapters) fn owned_raw(source: JsonSource, metadata_bytes: usize) -> Self {
         Self::OwnedRaw {
             source,
@@ -75,13 +85,16 @@ pub(in crate::adapters) struct SourceItem {
     pub owned_bytes: usize,
 }
 
-use maka_agent_facts::model::prompt_source::source::{ByteCursor, SourceBudget, TextEncoding};
+use maka_agent_facts::model::prompt_source::source::{
+    ByteCursor, SourceBudget, TextEncoding, json,
+};
 use maka_provider_protocol::json_stream::pull::{
     Base64Encoder, JsonEscape, JsonStringDecoder, Transform, Utf8Lossy,
 };
 use std::{io, sync::Arc};
 
 const INPUT_QUANTUM: usize = 2048;
+const RAW_QUANTUM: usize = 8 * 1024;
 const BASE64_INPUT_QUANTUM: usize = 8 * 1024;
 // Two carried bytes plus final padding, without JSON's sixfold escape envelope.
 const BASE64_OUTPUT_QUANTUM: usize = (BASE64_INPUT_QUANTUM + 2).div_ceil(3) * 4;
@@ -172,23 +185,37 @@ impl FragmentCursor {
         if self.finished {
             return Ok(None);
         }
-        if !matches!((&self.input,&self.conversion),(Input::Inline{bytes,..},Conversion::Raw)if bytes.len()<=INPUT_QUANTUM)
+        if let (Input::Inline { bytes, offset }, Conversion::Escape(_)) =
+            (&mut self.input, &self.conversion)
+        {
+            let end = (*offset + INPUT_QUANTUM).min(bytes.len());
+            if json::plain_prefix(&bytes[*offset..end]) == end - *offset {
+                let part = bytes.slice(*offset..end);
+                *offset = end;
+                self.finished = end == bytes.len();
+                return Ok(Some(part));
+            }
+        }
+        if !matches!((&self.input, &self.conversion), (Input::Inline{bytes, ..}, Conversion::Raw) if bytes.len() <= RAW_QUANTUM)
         {
             tokio::task::yield_now().await;
         }
         if matches!(self.conversion, Conversion::Raw) {
             match &mut self.input {
                 Input::Inline { bytes, offset } => {
-                    let end = (*offset + INPUT_QUANTUM).min(bytes.len());
+                    let end = (*offset + RAW_QUANTUM).min(bytes.len());
                     let part = bytes.slice(*offset..end);
                     *offset = end;
                     self.finished = end == bytes.len();
                     return Ok(Some(part));
                 }
                 Input::Source { factory, cursor } => {
+                    let quantum = factory.len().map_or(INPUT_QUANTUM, |len| {
+                        quantum_for_source(Some(len), RAW_QUANTUM)
+                    });
+                    let mut buffer = budget.allocate(quantum).await?;
+                    buffer.limit(quantum);
                     let source = cursor.get_or_insert_with(|| factory.open(budget.clone()));
-                    let mut buffer = budget.allocate(INPUT_QUANTUM).await?;
-                    buffer.limit(INPUT_QUANTUM);
                     let mut read = source.read_chunk(buffer).await?;
                     read.buffer = read.buffer.retain_owner(self.owner.clone());
                     if read.bytes_read == 0 && !read.eof {
@@ -207,68 +234,72 @@ impl FragmentCursor {
             Conversion::Lossy { .. } => 512,
             _ => INPUT_QUANTUM,
         };
-        let mut input_buffer = budget.allocate(quantum).await?;
-        input_buffer.limit(quantum);
-        let input_len = input_buffer.as_mut().len();
-        let scratch_size = if matches!(self.conversion, Conversion::Lossy { .. }) {
-            input_len * 3 + 8
-        } else {
-            input_len + 8
+        let input_len = match &self.input {
+            Input::Inline { bytes, offset } => quantum.min(bytes.len() - *offset),
+            Input::Source { factory, .. } => quantum_for_source(factory.len(), quantum),
         };
-        let mut scratch = budget.allocate(scratch_size).await?;
-        let output_size = scratch_size * 6 + 16;
-        let mut output = budget.allocate(output_size).await?;
+        let mut input_buffer = match self.input {
+            Input::Source { .. } => Some(budget.allocate(input_len).await?),
+            Input::Inline { .. } => None,
+        };
+        let scratch_len = match self.conversion {
+            Conversion::Lossy { .. } => input_len * 3 + 8,
+            Conversion::DecodeEscape { .. } => input_len + 8,
+            _ => 0,
+        };
+        let mut scratch = if scratch_len > 0 {
+            Some(budget.allocate(scratch_len).await?)
+        } else {
+            None
+        };
+        let mut output = budget.allocate(input_len.max(scratch_len) * 6 + 16).await?;
         let (input, eof) = match &mut self.input {
             Input::Inline { bytes, offset } => {
-                let end = (*offset + input_len).min(bytes.len());
-                let part = bytes.slice(*offset..end);
+                let end = *offset + input_len;
+                let part = &bytes[*offset..end];
                 *offset = end;
                 (part, end == bytes.len())
             }
             Input::Source { factory, cursor } => {
                 let source = cursor.get_or_insert_with(|| factory.open(budget.clone()));
-                let read = source.read_chunk(input_buffer).await?;
+                let mut buffer = input_buffer.take().expect("source input allocation");
+                buffer.limit(input_len);
+                let read = source.read_chunk(buffer).await?;
                 if read.bytes_read == 0 && !read.eof {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         "source made no progress",
                     ));
                 }
-                (read.buffer.into_bytes(read.bytes_read), read.eof)
+                input_buffer = Some(read.buffer);
+                let buffer = input_buffer.as_ref().expect("completed source read");
+                (&buffer.as_ref()[..read.bytes_read], read.eof)
             }
         };
         let (written, finished) = match &mut self.conversion {
-            Conversion::Raw => {
-                self.finished = eof;
-                return Ok(Some(input));
-            }
-            Conversion::Escape(transform) => {
-                let progress = transform.transform(&input, eof, output.as_mut())?;
-                require_consumed(progress.consumed, input.len())?;
-                (progress.written, progress.finished)
-            }
-            Conversion::Base64(_) => unreachable!("dedicated media envelope"),
+            Conversion::Raw | Conversion::Base64(_) => unreachable!("dedicated read path"),
+            Conversion::Escape(escape) => (escape_bytes(escape, input, output.as_mut())?, eof),
             Conversion::Lossy { decoder, escape } => {
-                let decoded = decoder.transform(&input, eof, scratch.as_mut())?;
+                let scratch = scratch.as_mut().expect("lossy decode allocation");
+                let decoded = decoder.transform(input, eof, scratch.as_mut())?;
                 require_consumed(decoded.consumed, input.len())?;
-                let progress = escape.transform(
+                let written = escape_bytes(
+                    escape,
                     &scratch.as_ref()[..decoded.written],
-                    decoded.finished,
                     output.as_mut(),
                 )?;
-                require_consumed(progress.consumed, decoded.written)?;
-                (progress.written, progress.finished)
+                (written, decoded.finished)
             }
             Conversion::DecodeEscape { decoder, escape } => {
-                let decoded = decoder.transform(&input, eof, scratch.as_mut())?;
+                let scratch = scratch.as_mut().expect("JSON decode allocation");
+                let decoded = decoder.transform(input, eof, scratch.as_mut())?;
                 require_consumed(decoded.consumed, input.len())?;
-                let progress = escape.transform(
+                let written = escape_bytes(
+                    escape,
                     &scratch.as_ref()[..decoded.written],
-                    decoded.finished,
                     output.as_mut(),
                 )?;
-                require_consumed(progress.consumed, decoded.written)?;
-                (progress.written, progress.finished)
+                (written, decoded.finished)
             }
         };
         self.finished = finished;
@@ -329,6 +360,30 @@ impl FragmentCursor {
         Ok(Some(output.into_bytes(progress.written)))
     }
 }
+fn quantum_for_source(len: Option<u64>, limit: usize) -> usize {
+    len.map_or(limit, |len| len.clamp(1, limit as u64) as usize)
+}
+
+/// Output covers the full escape envelope, so the codec settles at each escape.
+fn escape_bytes(
+    escape: &mut JsonEscape,
+    mut input: &[u8],
+    mut out: &mut [u8],
+) -> io::Result<usize> {
+    let capacity = out.len();
+    loop {
+        let at = json::plain_prefix(input);
+        let (prefix, tail) = input.split_at(at);
+        out[..at].copy_from_slice(prefix);
+        if tail.is_empty() {
+            return Ok(capacity - out.len() + at);
+        }
+        let progress = escape.transform(&tail[..1], true, &mut out[at..])?;
+        out = &mut out[at + progress.written..];
+        input = &tail[1..];
+    }
+}
+
 fn require_consumed(consumed: usize, expected: usize) -> io::Result<()> {
     if consumed == expected {
         Ok(())
@@ -503,15 +558,25 @@ pub(in crate::adapters) async fn object_with_overlay_and_final(
     };
     object::plan(overlay, fields, finals, true)
 }
-pub(in crate::adapters) struct FragmentSequence {
-    items: Arc<[SourceFragment]>,
+pub(in crate::adapters) trait FragmentList {
+    fn get(&self, index: usize) -> Option<&SourceFragment>;
+}
+
+impl FragmentList for Arc<[SourceFragment]> {
+    fn get(&self, index: usize) -> Option<&SourceFragment> {
+        self.as_ref().get(index)
+    }
+}
+
+pub(in crate::adapters) struct FragmentSequence<T = Arc<[SourceFragment]>> {
+    items: T,
     index: usize,
     current: Option<FragmentCursor>,
     pending: Option<Bytes>,
     offset: usize,
 }
-impl FragmentSequence {
-    pub(in crate::adapters) fn new(items: Arc<[SourceFragment]>) -> Self {
+impl<T: FragmentList> FragmentSequence<T> {
+    pub(in crate::adapters) fn new(items: T) -> Self {
         Self {
             items,
             index: 0,
@@ -528,16 +593,14 @@ impl FragmentSequence {
         let mut written = 0;
         while written < out.len() {
             if let Some(bytes) = &self.pending {
-                let count = (out.len() - written).min(bytes.len() - self.offset);
-                out[written..written + count]
-                    .copy_from_slice(&bytes[self.offset..self.offset + count]);
+                let count = copy_bytes(bytes, &mut self.offset, &mut out[written..]);
                 written += count;
-                self.offset += count;
                 if self.offset < bytes.len() {
                     return Ok((written, false));
                 }
                 self.pending = None;
                 self.offset = 0;
+                continue;
             }
             if let Some(current) = &mut self.current {
                 if let Some(bytes) = current.next(budget.clone()).await? {
@@ -551,11 +614,26 @@ impl FragmentSequence {
             let Some(fragment) = self.items.get(self.index) else {
                 return Ok((written, true));
             };
+            if let Some(bytes) = fragment.inline_raw() {
+                written += copy_bytes(bytes, &mut self.offset, &mut out[written..]);
+                if self.offset < bytes.len() {
+                    return Ok((written, false));
+                }
+                self.offset = 0;
+            } else {
+                self.current = Some(FragmentCursor::new(fragment.clone()));
+            }
             self.index += 1;
-            self.current = Some(FragmentCursor::new(fragment.clone()));
         }
         Ok((written, false))
     }
+}
+
+fn copy_bytes(bytes: &[u8], offset: &mut usize, out: &mut [u8]) -> usize {
+    let count = out.len().min(bytes.len() - *offset);
+    out[..count].copy_from_slice(&bytes[*offset..*offset + count]);
+    *offset += count;
+    count
 }
 
 #[cfg(test)]
@@ -588,6 +666,16 @@ mod tests {
                 limit: self.limit,
             })
         }
+        fn slice(
+            &self,
+            range: std::ops::Range<u64>,
+        ) -> io::Result<Arc<dyn maka_agent_facts::model::prompt_source::source::ByteSource>>
+        {
+            Ok(Arc::new(Self {
+                bytes: self.bytes.slice(range.start as usize..range.end as usize),
+                limit: self.limit,
+            }))
+        }
     }
     impl ByteCursor for ChunkedCursor {
         fn read_chunk(
@@ -609,6 +697,50 @@ mod tests {
             })
         }
     }
+    #[tokio::test]
+    async fn object_overlay_preserves_order_and_canonical_text_across_reads() {
+        let budget: Arc<dyn SourceBudget> = Arc::new(Budget);
+        let opaque = "日本語 🦀 \n \" \\".repeat(4_096);
+        let original = format!(
+            r#"{{"opaque":{},"\u0069d":9,"tail":[1,{{"unchanged":true}}]}}"#,
+            serde_json::to_string(&opaque).unwrap()
+        );
+        let input = JsonSource::new(SourceBytes::Source(Arc::new(Chunked {
+            bytes: Bytes::from(original),
+            limit: 2039,
+        })));
+        let split = TextSource::new(
+            SourceBytes::Source(Arc::new(Chunked {
+                bytes: Bytes::from_static(br#""\u6771\u4eac \ud83e\udd80\n\t\u0000\/\\\"""#),
+                limit: 3,
+            })),
+            TextEncoding::JsonString,
+        );
+        let body = object_with_overlay_and_final(
+            vec![
+                ("id", vec![SourceFragment::literal(b"0")]),
+                ("text", quoted(split)),
+            ],
+            Some(input),
+            vec![("tail", vec![SourceFragment::literal(b"null")])],
+            budget.clone(),
+        )
+        .await
+        .unwrap();
+        let mut cursor = FragmentCursor::new(body.into_iter().next().unwrap());
+        let mut result = Vec::new();
+        while let Some(chunk) = cursor.next(budget.clone()).await.unwrap() {
+            result.extend_from_slice(&chunk);
+        }
+
+        let expected = format!(
+            r#"{{"id":9,"text":{},"opaque":{},"tail":null}}"#,
+            serde_json::to_string("東京 🦀\n\t\0/\\\"").unwrap(),
+            serde_json::to_string(&opaque).unwrap()
+        );
+        assert_eq!(String::from_utf8(result).unwrap(), expected);
+    }
+
     #[tokio::test]
     async fn media_base64_short_reads_preserve_bytes_and_final_slice_custody() {
         use base64::Engine as _;

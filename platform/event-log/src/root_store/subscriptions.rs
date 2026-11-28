@@ -20,6 +20,7 @@
 //! Root observations share one canonical owner's notifications.
 use super::*;
 
+#[derive(Clone)]
 pub struct RootSubscription {
     receiver: tokio::sync::watch::Receiver<()>,
     stop: tokio_util::sync::CancellationToken,
@@ -46,7 +47,35 @@ impl RootStore {
     pub fn subscribe_changes(&self) -> RootSubscription {
         self.subscribe_catalog_changes()
     }
-    pub fn subscribe_control_changes(&self) -> RootSubscription {
-        self.subscribe_catalog_changes()
+    pub fn subscribe_control_changes(&self) -> Result<RootSubscription, StoreError> {
+        self.require_open()?;
+        control(&self.log, &self.gates)
     }
+    pub fn subscribe_session(
+        &self,
+        session: &str,
+    ) -> Result<crate::SessionSubscription, StoreError> {
+        crate::sessions::validate_id(session)?;
+        let control = self.subscribe_control_changes()?;
+        Ok(self
+            .log
+            .subscribe_session_commits(session)
+            .with_control(control))
+    }
+    pub fn subscribe_topic(&self, topic: crate::CommitTopic) -> RootSubscription {
+        RootSubscription {
+            receiver: self.log.commits.subscribe_topic(topic),
+            stop: self.gates.cancellation(),
+        }
+    }
+}
+
+pub(super) fn control(
+    log: &EventLog,
+    gates: &gates::Gates,
+) -> Result<RootSubscription, StoreError> {
+    Ok(RootSubscription {
+        receiver: log.root_owner_ref()?.control_changes(),
+        stop: gates.cancellation(),
+    })
 }

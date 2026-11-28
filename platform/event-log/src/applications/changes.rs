@@ -46,7 +46,9 @@ impl EventLog {
             stop: None,
             observed,
             observed_idle: false,
-            wakes: self.subscribe_commits(),
+            wakes: self
+                .commits
+                .subscribe_topic(crate::CommitTopic::Deployments),
         })
     }
     /// Head identity only. Exact bytes are loaded separately at that immutable
@@ -135,5 +137,64 @@ impl DeploymentChanges {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        ROOT_MIGRATIONS, RootStore,
+        root::{RootNamespaces, RootOwner},
+    };
+    use maka_plugin_core::composition::Input;
+
+    #[tokio::test]
+    async fn deployment_changes_wake_only_for_committed_heads() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path();
+        let owner = RootOwner::create(
+            &path.join("root"),
+            &RootNamespaces {
+                ownership: path.join("owners"),
+                control: path.join("control"),
+            },
+        )
+        .unwrap();
+        let root = Arc::new(
+            RootStore::open(Arc::new(owner), ROOT_MIGRATIONS)
+                .await
+                .unwrap(),
+        );
+        let deployment = uuid::Uuid::new_v4();
+        let input = Input {
+            base: None,
+            instances: Default::default(),
+            ui: None,
+        };
+        let original = root
+            .commit_application(deployment, 0, input.clone(), vec![], vec![])
+            .await
+            .unwrap();
+        let mut changes = root.subscribe_application(original).unwrap();
+        root.create_session("unrelated", "unrelated", &serde_json::json!({}), 1)
+            .await
+            .unwrap();
+        assert!(!changes.wakes.has_changed().unwrap());
+
+        let next = root
+            .commit_application(deployment, 1, input.clone(), vec![], vec![])
+            .await
+            .unwrap();
+        assert!(changes.wakes.has_changed().unwrap());
+        assert_eq!(changes.next().await.unwrap(), next);
+        assert_eq!(next.revision, 2);
+
+        assert!(matches!(
+            root.commit_application(deployment, 1, input, vec![], vec![])
+                .await,
+            Err(StoreError::RevisionConflict { .. })
+        ));
+        assert!(!changes.wakes.has_changed().unwrap());
     }
 }

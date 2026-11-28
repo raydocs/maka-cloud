@@ -85,16 +85,19 @@ pub(super) async fn watch(
     let diagnostics = history::scoped_state(owner, context.scope())?
         .diagnostics(owner.run_owner(), input.session_id.clone())
         .map_err(|_| "agent_diagnostics_unavailable")?;
-    let mut commits = diagnostics.subscribe().map_err(|error| error.to_string())?;
+    let mut commits = owner
+        .store
+        .subscribe_session(&input.session_id)
+        .map_err(|error| error.to_string())?;
     let mut previous = None;
     loop {
         if context.scope().cancellation.is_cancelled() {
             return Err("agent_observation_cancelled".into());
         }
+        commits.borrow_and_update();
         owner
             .scoped_session(context.scope(), &input.session_id)
             .await?;
-        commits.borrow_and_update();
         let revision = diagnostics
             .head()
             .await

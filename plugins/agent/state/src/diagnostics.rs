@@ -106,9 +106,6 @@ impl DiagnosticsStore {
     pub async fn head(&self) -> Result<DiagnosticHead, StoreError> {
         self.data.query_barrier(ReadHead(self.scope.clone())).await
     }
-    pub fn subscribe(&self) -> Result<tokio::sync::watch::Receiver<()>, StoreError> {
-        self.data.subscribe_changes()
-    }
     pub async fn rebuild(&self) -> Result<(), StoreError> {
         self.data.write(Rebuild(self.scope.clone())).await
     }

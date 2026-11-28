@@ -183,14 +183,26 @@ impl Encoder<'_, '_> {
     }
     async fn text(&mut self, source: &TextSource) -> io::Result<()> {
         self.literal(b"\"").await?;
-        self.transformed(
-            text::bytes(source.clone(), self.budget.clone()),
-            JsonEscape::new(),
-        )
-        .await?;
+        match (source.encoding(), source.bytes()) {
+            (TextEncoding::Utf8, SourceBytes::Inline(bytes))
+                if json::plain_prefix(bytes) == bytes.len() =>
+            {
+                self.literal(bytes).await?;
+            }
+            _ => {
+                self.transformed(
+                    text::bytes(source.clone(), self.budget.clone()),
+                    JsonEscape::new(),
+                )
+                .await?;
+            }
+        }
         self.literal(b"\"").await
     }
     async fn json(&mut self, source: &JsonSource) -> io::Result<()> {
+        if let SourceBytes::Inline(bytes) = source.bytes() {
+            return self.literal(bytes).await;
+        }
         let mut cursor = source.bytes().open(self.budget.clone());
         let mut buffer = self.budget.allocate(4096).await?;
         loop {

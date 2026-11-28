@@ -728,7 +728,10 @@ impl Handler for Agent {
             "watchGoal" => json_rpc(&mut args, |owner, input, context| async move {
                 let input: GoalRead = decode(input)?;
                 let mut changes = owner.goal_changes();
-                let mut store_changes = owner.store.subscribe_changes();
+                let mut store_changes = owner
+                    .store
+                    .subscribe_session(&input.session_id)
+                    .map_err(|error| error.to_string())?;
                 let mut previous = None;
                 loop {
                     changes.borrow_and_update();

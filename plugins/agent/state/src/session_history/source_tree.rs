@@ -428,6 +428,29 @@ impl SourceTree {
         };
         rows.first().map(|row| qualify(section, row)).transpose()
     }
+    pub async fn position_after_event(
+        &self,
+        sequence: u64,
+        include_internal: bool,
+    ) -> Result<Option<QualifiedRow>, StoreError> {
+        let section = self
+            .segments
+            .last()
+            .filter(|section| matches!(section.source, HistoryDataSource::Live { .. }))
+            .ok_or_else(|| invalid("event range requires a live history source"))?;
+        let rows = section
+            .source
+            .positions(
+                Some((sequence + 1, 0)),
+                false,
+                include_internal,
+                section.after_admission,
+                1,
+                PositionFilter::Transcript(None),
+            )
+            .await?;
+        rows.first().map(|row| qualify(section, row)).transpose()
+    }
     /// Inclusive anchor; rows follow traversal direction, including DESC for a
     /// reverse window. The caller can exclude its anchor without inventing IDs.
     pub async fn positions(

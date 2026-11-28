@@ -47,17 +47,22 @@ impl EventLog {
     /// Call only after the owned process group/Job and native resources drained.
     pub async fn clean_session_process(&self, id: Uuid) -> Result<(), StoreError> {
         let expected_session = self.expected_session.clone();
+        let commits = self.commits.notice();
         self.connection
             .run(move |connection| {
                 {
                     let tx = rusqlite::Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
-                    let changed = tx.execute("UPDATE session_processes SET cleaned=1 WHERE id=? AND (? IS NULL OR session_id=?)", params![id.to_string(), expected_session.as_deref(), expected_session.as_deref()])
-                        ?
-                        ;
-                    if changed != 1 {
-                        return Err(StoreError::EventConflict);
-                    }
-                    tx.commit().map_err(StoreError::CommitUnknown)
+                    let session: String = tx.query_row(
+                        "UPDATE session_processes SET cleaned=1 WHERE id=? AND (? IS NULL OR session_id=?) RETURNING session_id",
+                        params![id.to_string(), expected_session.as_deref(), expected_session.as_deref()],
+                        |row| row.get(0),
+                    ).map_err(|error| match error {
+                        rusqlite::Error::QueryReturnedNoRows => StoreError::EventConflict,
+                        error => error.into(),
+                    })?;
+                    tx.commit().map_err(StoreError::CommitUnknown)?;
+                    commits.for_sessions([session.as_str()]).metadata();
+                    Ok(())
                 }
             })
             .await

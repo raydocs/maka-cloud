@@ -661,10 +661,16 @@ async fn tree_window(
 ) -> Result<wire::Page, String> {
     use maka_agent_state::session_history::source_tree::RunRows;
     use wire::{Position, SourcePosition};
+    let after_event = matches!(position, Position::AfterEvent { .. });
     if matches!(
         position,
         Position::Message { .. } | Position::BeforeMessage { .. } | Position::AfterMessage { .. }
-    ) {
+    ) || (after_event
+        && !matches!(
+            view,
+            wire::HistoryView::Text | wire::HistoryView::Conversation
+        ))
+    {
         return Err("agent_cursor_invalid".into());
     }
     let page_chunks = if view == wire::HistoryView::Steps {
@@ -685,17 +691,14 @@ async fn tree_window(
             })
         }
         Position::After { cursor } | Position::Before { cursor } => Some(cursor.clone()),
-        Position::Event { sequence } => match tree
-            .event_position(*sequence, include_thinking)
-            .await
-            .map_err(|error| error.to_string())?
-        {
-            Some(row) => Some(wire::Cursor {
-                position: row.address,
-                field: wire::HistoryField::Body,
-                offset: 0,
-            }),
-            None => {
+        Position::Event { sequence } | Position::AfterEvent { sequence } => {
+            let row = if after_event {
+                tree.position_after_event(*sequence, include_thinking).await
+            } else {
+                tree.event_position(*sequence, include_thinking).await
+            }
+            .map_err(|error| error.to_string())?;
+            let Some(row) = row else {
                 return Ok(wire::Page::Ready {
                     through,
                     chunks: Vec::new(),
@@ -704,8 +707,13 @@ async fn tree_window(
                     tail_thought: None,
                     resolved_anchor: None,
                 });
-            }
-        },
+            };
+            Some(wire::Cursor {
+                position: row.address,
+                field: wire::HistoryField::Body,
+                offset: 0,
+            })
+        }
         _ => None,
     };
     let mut cache = source::Cache::default();
@@ -731,7 +739,7 @@ async fn tree_window(
     };
     let mut tail_thought_candidate = None;
     let mut resolved_anchor = None;
-    if let Some(anchor) = &mut anchor {
+    if !after_event && let Some(anchor) = &mut anchor {
         let selected = source::unpaired(tree, &anchor.position, None, &mut cache, stop).await?;
         if view == wire::HistoryView::Turn {
             use maka_agent_state::session_history::source_tree::SourceItem;

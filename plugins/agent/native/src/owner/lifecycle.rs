@@ -168,7 +168,10 @@ impl Owner {
         }, runtime);
     }
     async fn finish_removed_session_inner(&self, session: &str) -> Result<(), String> {
-        let mut changed = self.store.subscribe_changes();
+        let mut changed = self
+            .store
+            .subscribe_session(session)
+            .map_err(|error| error.to_string())?;
         let guard = self
             .durable
             .quiescence_guard(self.run_owner(), session.into())

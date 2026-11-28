@@ -441,7 +441,16 @@ impl DriverModel {
                 Ok(contents)
             }.await;
             let contents=match prompt.close().await{Ok(())=>result,Err(close)=>Err(match result{Ok(_)=>self.cleanup.preparation_failed(close),Err(error)=>preparation::preparation_cleanup_error(error,close)})}?;
-            Ok((PreparedStep{request,contents,notifications:vec![],steering:None}, bound.catalog))
+            Ok((
+                PreparedStep {
+                    request,
+                    contents,
+                    notifications: vec![],
+                    steering: None,
+                    prompt: None,
+                },
+                bound.catalog,
+            ))
         }.await;
         let (prepared, catalog) = match original.close().await {
             Ok(()) => result,

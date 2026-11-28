@@ -82,6 +82,12 @@ pub struct PreparedStep {
     pub request: RequestSpec,
     pub contents: Vec<ContentBlob>,
     pub steering: Option<maka_agent_state::queue::Consume>,
+    pub prompt: Option<Box<crate::prepared_prompt::PreparedPrompt>>,
+}
+pub struct AdmittedModelInput {
+    pub request: RequestSpec,
+    pub bytes: Vec<u8>,
+    pub prompt: Option<Box<crate::prepared_prompt::PreparedPrompt>>,
 }
 pub struct RecoveryEvidence {
     pub recovery: AttemptRecovery,
@@ -178,8 +184,7 @@ pub trait DriverPorts: Send + Sync {
         &self,
         run: RunId,
         attempt: ModelAttemptId,
-        request: RequestSpec,
-        bytes: Vec<u8>,
+        input: AdmittedModelInput,
         witness: crate::ModelWitness,
     ) -> BoxFuture<'_, Result<ModelConnection, RunError>>;
     /// Observe the exact original response/job; never send a new generation request.

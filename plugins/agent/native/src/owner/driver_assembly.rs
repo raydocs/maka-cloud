@@ -436,6 +436,7 @@ impl Owner {
                         workers: workers.clone(),
                         original_cleanup: Default::default(),
                         conversation: Default::default(),
+                        replay_cache: Default::default(),
                         preview: preview_sender,
                         };
                         driver::NativeBackend::Model { model, cells: cells.clone() }

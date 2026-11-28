@@ -20,10 +20,21 @@
 //! Commit hints are scoped to the state they invalidate. SQLite remains authoritative.
 use std::{
     collections::{BTreeSet, HashMap},
-    ops::{Deref, DerefMut},
     sync::{Arc, Mutex, Weak},
 };
 use tokio::sync::watch;
+
+use crate::{StoreError, root_store::RootSubscription};
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CommitTopic {
+    Deployments,
+    Queue,
+    RunScheduling,
+    RunFinished,
+    MessageCompletions,
+    BotWatches,
+}
 
 #[derive(Clone)]
 pub(crate) struct CommitHub(Arc<Hub>);
@@ -31,6 +42,12 @@ struct Hub {
     all: watch::Sender<()>,
     activations: watch::Sender<()>,
     material_releases: watch::Sender<()>,
+    deployments: watch::Sender<()>,
+    queue: watch::Sender<()>,
+    run_scheduling: watch::Sender<()>,
+    run_finished: watch::Sender<()>,
+    message_completions: watch::Sender<()>,
+    bot_watches: watch::Sender<()>,
     sessions: Mutex<HashMap<String, Weak<Registration>>>,
 }
 struct Registration {
@@ -45,36 +62,36 @@ struct Registration {
 pub struct SessionSubscription {
     receiver: watch::Receiver<()>,
     _registration: Arc<Registration>,
-    control: Option<watch::Receiver<()>>,
+    control: Option<RootSubscription>,
 }
 impl SessionSubscription {
-    pub(crate) fn with_control(mut self, control: watch::Receiver<()>) -> Self {
+    pub(crate) fn with_control(mut self, control: RootSubscription) -> Self {
         self.control = Some(control);
         self
     }
 
     /// A Root binding change can invalidate metadata without appending facts in
     /// this partition. Both channels are hints to re-read canonical state.
-    pub async fn changed(&mut self) -> Result<(), watch::error::RecvError> {
+    pub async fn changed(&mut self) -> Result<(), StoreError> {
         if let Some(control) = &mut self.control {
             tokio::select! {
-                changed=self.receiver.changed()=>changed,
                 changed=control.changed()=>changed,
+                changed=self.receiver.changed()=>changed.map_err(|_| StoreError::ConnectionClosed),
             }
         } else {
-            self.receiver.changed().await
+            self.receiver
+                .changed()
+                .await
+                .map_err(|_| StoreError::ConnectionClosed)
         }
     }
-}
-impl Deref for SessionSubscription {
-    type Target = watch::Receiver<()>;
-    fn deref(&self) -> &Self::Target {
-        &self.receiver
-    }
-}
-impl DerefMut for SessionSubscription {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.receiver
+
+    /// Acknowledge both levels before reading the next canonical snapshot.
+    pub fn borrow_and_update(&mut self) {
+        self.receiver.borrow_and_update();
+        if let Some(control) = &mut self.control {
+            control.borrow_and_update();
+        }
     }
 }
 
@@ -89,6 +106,12 @@ impl CommitHub {
             all: watch::channel(()).0,
             activations: watch::channel(()).0,
             material_releases: watch::channel(()).0,
+            deployments: watch::channel(()).0,
+            queue: watch::channel(()).0,
+            run_scheduling: watch::channel(()).0,
+            run_finished: watch::channel(()).0,
+            message_completions: watch::channel(()).0,
+            bot_watches: watch::channel(()).0,
             sessions: Mutex::new(HashMap::new()),
         }))
     }
@@ -100,6 +123,19 @@ impl CommitHub {
     }
     pub(crate) fn subscribe_material_releases(&self) -> watch::Receiver<()> {
         self.0.material_releases.subscribe()
+    }
+    pub(crate) fn subscribe_topic(&self, topic: CommitTopic) -> watch::Receiver<()> {
+        self.topic(topic).subscribe()
+    }
+    fn topic(&self, topic: CommitTopic) -> &watch::Sender<()> {
+        match topic {
+            CommitTopic::Deployments => &self.0.deployments,
+            CommitTopic::Queue => &self.0.queue,
+            CommitTopic::RunScheduling => &self.0.run_scheduling,
+            CommitTopic::RunFinished => &self.0.run_finished,
+            CommitTopic::MessageCompletions => &self.0.message_completions,
+            CommitTopic::BotWatches => &self.0.bot_watches,
+        }
     }
     pub(crate) fn subscribe_session(&self, session: &str) -> SessionSubscription {
         let mut sessions = self.0.sessions.lock().unwrap();
@@ -147,6 +183,9 @@ impl CommitHub {
     }
 }
 impl CommitNotice {
+    pub(crate) fn topic(&self, topic: CommitTopic) {
+        self.hub.topic(topic).send_replace(());
+    }
     /// Preserve statically routed owner sessions and transaction-discovered
     /// domain sessions together. Empty declarations never erase an owner route.
     pub(crate) fn with_sessions(&self, sessions: impl IntoIterator<Item = String>) -> Self {

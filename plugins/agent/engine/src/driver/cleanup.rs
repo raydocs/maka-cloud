@@ -233,7 +233,7 @@ impl Engine {
             }
         };
         let result = async {
-            let mut notices = self.store.subscribe()?;
+            let mut notices = self.store.subscribe_driver(&claim)?;
             loop {
                 notices.borrow_and_update();
                 if cancellation.is_cancelled() || retirement.is_cancelled() { return Ok(DriverExit::Retired { run }); }
@@ -308,7 +308,7 @@ impl Engine {
             },
             at,
         );
-        let mut notices = self.store.subscribe()?;
+        let mut notices = self.store.subscribe_driver(claim)?;
         let retirement = claim.retirement();
         loop {
             notices.borrow_and_update();

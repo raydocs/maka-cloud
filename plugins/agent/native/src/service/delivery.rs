@@ -280,6 +280,10 @@ pub(super) async fn watch(
     input: Watch,
     context: &Context,
 ) -> Result<serde_json::Value, String> {
+    let mut changes = owner
+        .store
+        .subscribe_session(&input.session_id)
+        .map_err(|error| error.to_string())?;
     history::authorize(owner, context.scope(), &input.session_id).await?;
     let rooms = history::scoped_state(owner, context.scope())?.rooms(owner.run_owner());
     if rooms
@@ -287,11 +291,9 @@ pub(super) async fn watch(
         .await
         .map_err(|error| error.to_string())?
     {
-        return watch_room(owner, &rooms, input, context).await;
+        return watch_room(owner, &rooms, changes, input, context).await;
     }
     let history = history::open(owner, context.scope(), &input.session_id).await?;
-    // Subscribe before the initial query: a racing commit remains a pending level.
-    let mut changes = owner.durable.subscribe().map_err(|e| e.to_string())?;
     let mut preview = preview::Delivery::new(owner.preview_epoch());
     let mut after = input.after;
     let mut queue_delivered = None;
@@ -320,11 +322,11 @@ pub(super) async fn watch(
                 return Err("agent_cursor_invalid".into());
             }
             if let Some(current) = current.as_ref().filter(|_| new_attempt) {
-                let view = history
-                    .view_at(&cut, current.binding.execution.run_id)
+                let committed = history
+                    .preview_evidence(&cut, &current.binding)
                     .await
                     .map_err(|e| e.to_string())?;
-                preview.seed(&view)?;
+                preview.committed(&committed);
             }
             let queue = encode(owner.queue(&input.session_id).await?)?;
             if queue_delivered.as_ref() != Some(&queue) {
@@ -349,29 +351,32 @@ pub(super) async fn watch(
                     .await?;
                 apps_delivered = Some(apps);
             }
-            let page = history
-                .page(&cut, after, 32)
-                .await
-                .map_err(|e| e.to_string())?;
-            preview.committed(&page.items);
-            let mut events = Vec::with_capacity(page.items.len());
-            for item in page.items {
-                let source = history
-                    .run_source(item.recorded.run)
+            stale = false;
+            if after < cut.through_sequence {
+                let page = history
+                    .page(&cut, after, 32)
                     .await
                     .map_err(|e| e.to_string())?;
-                events.push(project(&item, source.spec.turn_id)?);
+                preview.committed(&page.items);
+                let mut events = Vec::with_capacity(page.items.len());
+                for item in page.items {
+                    let source = history
+                        .run_source(item.recorded.run)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    events.push(project(&item, source.spec.turn_id)?);
+                }
+                after = page.next.unwrap_or(cut.through_sequence);
+                stale = page.next.is_some();
+                history::authorize(owner, context.scope(), &input.session_id).await?;
+                context
+                    .emit(encode(DeliveryPage::Events {
+                        through: cut.through_sequence,
+                        next_after: after,
+                        events,
+                    })?)
+                    .await?;
             }
-            after = page.next.unwrap_or(cut.through_sequence);
-            stale = page.next.is_some();
-            history::authorize(owner, context.scope(), &input.session_id).await?;
-            context
-                .emit(encode(DeliveryPage::Events {
-                    through: cut.through_sequence,
-                    next_after: after,
-                    events,
-                })?)
-                .await?;
         }
         let mut ready = stale;
         if let Some(page) = preview.next(after)? {
@@ -399,17 +404,36 @@ pub(super) async fn watch(
 async fn watch_room(
     owner: &Owner,
     rooms: &maka_agent_state::room::RoomStore,
+    mut changes: maka_event_log::SessionSubscription,
     input: Watch,
     context: &Context,
 ) -> Result<serde_json::Value, String> {
-    let mut changes = owner
-        .durable
-        .subscribe()
-        .map_err(|error| error.to_string())?;
+    use futures_util::{StreamExt, stream::FuturesUnordered};
+
     let mut delivered: Option<(u64, u64)> = None;
+    let mut roster_changed = true;
+    let mut members = Vec::new();
     loop {
-        changes.borrow_and_update();
+        if roster_changed {
+            changes.borrow_and_update();
+        }
         history::authorize(owner, context.scope(), &input.session_id).await?;
+        if roster_changed {
+            members = rooms
+                .watch_members(&input.session_id)
+                .await
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .map(|id| owner.store.subscribe_session(&id))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?;
+            roster_changed = false;
+        }
+        // A new member can commit while the roster is being installed. Read the
+        // watermark only after every member's receiver is in place.
+        for member in &mut members {
+            member.borrow_and_update();
+        }
         let watermark = rooms
             .watch_watermark(&input.session_id)
             .await
@@ -425,10 +449,20 @@ async fn watch_room(
                 .await?;
             delivered = Some(watermark);
         }
+        let mut member_changes: FuturesUnordered<_> = members
+            .iter_mut()
+            .map(maka_event_log::SessionSubscription::changed)
+            .collect();
         tokio::select! {
             biased;
             _ = context.scope().cancellation.cancelled() => return Err("agent_observation_cancelled".into()),
-            changed = changes.changed() => { changed.map_err(|_| "agent_observation_closed")?; },
+            changed = changes.changed() => {
+                changed.map_err(|_| "agent_observation_closed")?;
+                roster_changed = true;
+            },
+            changed = member_changes.next(), if !member_changes.is_empty() => {
+                changed.expect("room has watched members").map_err(|_| "agent_observation_closed")?;
+            },
         }
     }
 }

@@ -83,9 +83,11 @@ impl Goals {
         self.storage.finish().await
     }
     pub fn execution_changed(&self) {
-        self.wake.notify_one();
+        if self.keeps_host_awake() {
+            self.wake.notify_one();
+        }
     }
-    fn written(&self) {
+    pub(super) fn written(&self) {
         self.awake.store(true, Ordering::Release);
         self.changed.send_modify(|_| {});
         self.wake.notify_one();

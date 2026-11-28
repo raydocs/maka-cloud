@@ -470,6 +470,8 @@ impl Foreground {
         Ok(())
     }
     async fn finish(&mut self) -> Result<Completion, Error> {
+        // Work can settle before watch reaches the final commit. Publish the
+        // remaining durable history before responding to the prompt.
         let observation: Observation = self
             .client
             .query("agent", "observe", json!({"sessionId":self.session.id}))

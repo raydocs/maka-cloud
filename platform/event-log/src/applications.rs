@@ -270,6 +270,7 @@ impl EventLog {
                 tx.execute("INSERT INTO application_source_packages VALUES (?, ?, ?, ?)", params![&id, revision as i64, &reference.id, &reference.revision])?;
             }
             tx.commit().map_err(StoreError::CommitUnknown)?;
+            commits.topic(crate::CommitTopic::Deployments);
             commits.metadata();
             let reference = DeploymentRef { state_domain: domain, deployment, revision };
             let snapshot = SourceSnapshot::new(owner, reference.clone(), &plan);

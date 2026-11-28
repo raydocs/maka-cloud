@@ -2970,13 +2970,14 @@ async fn named_cell_tools_survive_receipt_only_pages_and_frozen_history() {
                 text: "background progress".into(),
             },
         })?;
+        let notice_ref = notice.reference().clone();
         rig.append(
             (0..40)
                 .map(|_| Fact::Cell {
                     event: CellEvent::NotificationQueued {
                         cell,
                         notification: FactId::new(),
-                        content: notice.reference().clone(),
+                        content: notice_ref.clone(),
                     },
                 })
                 .collect(),
@@ -3023,11 +3024,12 @@ async fn named_cell_tools_survive_receipt_only_pages_and_frozen_history() {
                 CancellationToken::new(),
             )
             .await?;
+        let large_result = "No receipt yet. ".repeat(3_000);
         let unknown = ContentBlob::json(&ToolReturn {
             schema_version: SCHEMA_VERSION,
             artifacts: vec![],
             body: CellReturnedResult {
-                output: ToolOutput::Text("No receipt yet".into()),
+                output: ToolOutput::Text(large_result.clone()),
                 projection: None,
                 is_error: true,
             },
@@ -3048,6 +3050,34 @@ async fn named_cell_tools_survive_receipt_only_pages_and_frozen_history() {
         let uncertain = live(&rig, &session, wire::Position::Tail).await?;
         let uncertain_child = tools(&uncertain).into_iter().find(|tool| tool.call.as_ref().is_some_and(|call| call.name == "Recall")).ok_or("uncertain child disappeared")?;
         assert_eq!(uncertain_child.result.as_ref().map(|result| result.settlement),Some(Some(ToolSettlement::Unknown)),"unknown outcomes remain visible until evidence arrives");
+        rig.append(
+            vec![Fact::Cell {
+                event: CellEvent::NotificationQueued {
+                    cell,
+                    notification: FactId::new(),
+                    content: notice_ref,
+                },
+            }],
+            vec![],
+        )
+        .await?;
+        let through = history.capture().await?.through_sequence;
+        let after_result = uncertain["through"].as_u64().unwrap();
+        let navigation = query(&rig, "history", json!({
+            "sessionId":session, "through":through, "position":{"kind":"event","sequence":through},
+        })).await?;
+        let tail = &navigation["chunks"][0];
+        assert_eq!(tail["position"]["sequence"], after_result);
+        let offset = tail["offset"].as_u64().unwrap() as usize;
+        assert!(offset > 0, "the large result spans history pages");
+        assert_eq!(tail["text"], &large_result[offset..]);
+
+        let incremental = query(&rig, "history", json!({
+            "sessionId":session, "through":through, "position":{"kind":"after_event","sequence":after_result},
+        })).await?;
+        assert_eq!(incremental["chunks"], json!([]), "Cell bookkeeping must never replay the previous result's suffix");
+        assert_eq!(incremental["after"], Value::Null);
+
         let returned = ContentBlob::json(&ToolReturn {
             schema_version: SCHEMA_VERSION,
             artifacts: vec![],

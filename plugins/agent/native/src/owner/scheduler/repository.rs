@@ -634,7 +634,6 @@ mod wake_tests {
                 (1500, ["pending".into(), "a-rearmed".into()].into()),
                 (2000, ["future".into()].into()),
             ]),
-            ..Default::default()
         };
         assert_eq!(
             ready

@@ -156,7 +156,7 @@ impl MediaCapture {
         // Stream and hash once into the append-serialized media arena; rewind on dedup hit or error.
         let arena = self.ensure_arena().await?;
         let append = arena.begin_append().await;
-        let start = append.with_writer(|w| Ok(w.position())).await?;
+        let start = append.position().await?;
         let mut cursor = source.open(budget.clone());
         let mut buffer = budget.allocate(32 * 1024).await?;
         let mut hash = Sha256::new();
@@ -199,7 +199,7 @@ impl MediaCapture {
                 .await;
             return Err(error);
         }
-        let end = append.with_writer(|w| Ok(w.position())).await?;
+        let end = append.position().await?;
         if end.checked_sub(start) != Some(total) {
             let _ = append
                 .with_writer(move |w| w.truncate_unsealed(start))
@@ -375,7 +375,7 @@ impl Store {
     }
     async fn write(&self, record: Record) -> io::Result<u64> {
         self.arena
-            .with_writer(move |writer| {
+            .with_bounded_writer(RECORD_BYTES, RECORD_BYTES, move |writer| {
                 let bytes: [u8; RECORD_BYTES] =
                     std::array::from_fn(|i| record[i / 8].to_le_bytes()[i % 8]);
                 Ok(writer.append_bytes(&bytes)?.start)
@@ -384,15 +384,18 @@ impl Store {
     }
     async fn table(&self, len: usize) -> io::Result<List> {
         let bytes = (len as u64).checked_mul(8).ok_or_else(overflow)?;
+        let growth = usize::try_from(bytes).map_err(|_| overflow())?;
         let offset = self
             .arena
-            .with_writer(move |w| Ok(w.reserve_zeroed(bytes)?.start))
+            .with_bounded_writer(growth, growth, move |w| Ok(w.reserve_zeroed(bytes)?.start))
             .await?;
         Ok(List { offset, len })
     }
     async fn put(&self, list: List, index: usize, offset: u64) -> io::Result<()> {
         self.arena
-            .with_writer(move |w| w.write_at(list.offset + index as u64 * 8, &offset.to_le_bytes()))
+            .with_bounded_writer(0, 8, move |w| {
+                w.write_at(list.offset + index as u64 * 8, &offset.to_le_bytes())
+            })
             .await
     }
     async fn get(&self, list: List, index: usize) -> io::Result<Option<Record>> {
@@ -493,7 +496,7 @@ pub(crate) struct Builder {
     breakdown: PreparedContextBreakdown,
 }
 impl Builder {
-    pub async fn new(
+    pub fn new(
         arena: CaptureArena,
         resources: ModelPreparationResources,
         preparation: Arc<RequestPreparation>,
@@ -506,9 +509,8 @@ impl Builder {
             preparation,
             cancellation,
         )
-        .await
     }
-    pub async fn new_external_media(
+    pub fn new_external_media(
         arena: CaptureArena,
         media: Arc<MediaCapture>,
         resources: ModelPreparationResources,
@@ -522,18 +524,14 @@ impl Builder {
             preparation,
             cancellation,
         )
-        .await
     }
-    async fn new_with_media(
+    fn new_with_media(
         arena: CaptureArena,
         media: MediaBacking,
         resources: ModelPreparationResources,
         preparation: Arc<RequestPreparation>,
         cancellation: CancellationToken,
     ) -> io::Result<Self> {
-        // No total length is known at this boundary; file backing keeps both
-        // the append-only payload and its directory independent of heap limits.
-        arena.promote_to_file().await?;
         let owner: Arc<dyn Send + Sync> =
             Arc::new(preparation.plan_directory(Self::resident_bytes())?);
         let mut prefix = Sha256::new();
@@ -700,13 +698,27 @@ impl Builder {
     }
     pub async fn finish_captured(self) -> io::Result<CapturedPrompt> {
         self.check()?;
-        let table = self.store.table(self.count).await?;
+        let count = self.count;
         let mut tail = self.tail;
-        for index in (0..self.count).rev() {
-            self.store.put(table, index, tail).await?;
-            tail = self.store.read(tail).await?[19];
-        }
-        let byte_len = self.store.arena.with_writer(|w| Ok(w.position())).await?;
+        let cancellation = self.cancellation.clone();
+        let (index_offset, byte_len) = self
+            .store
+            .arena
+            .with_writer(move |writer| {
+                let bytes = (count as u64).checked_mul(8).ok_or_else(overflow)?;
+                let table = writer.reserve_zeroed(bytes)?.start;
+                for index in (0..count).rev() {
+                    if cancellation.is_cancelled() {
+                        return Err(crate::preparation_cancelled("prompt indexing cancelled"));
+                    }
+                    writer.write_at(table + index as u64 * 8, &tail.to_le_bytes())?;
+                    let mut previous = [0; 8];
+                    writer.read_exact_at(tail + 19 * 8, &mut previous)?;
+                    tail = u64::from_le_bytes(previous);
+                }
+                Ok((table, writer.position()))
+            })
+            .await?;
         self.store.arena.seal().await?;
         let (version, media_arena, media_entries, media_dir_bytes) = match &self.store.media {
             MediaBacking::Capture(capture) => {
@@ -723,7 +735,7 @@ impl Builder {
         let layout = Layout {
             version,
             message_count: self.count,
-            index_offset: table.offset,
+            index_offset,
             byte_len,
             identity: hex::encode(self.prefix.finalize()),
             breakdown: self.breakdown,
@@ -731,9 +743,11 @@ impl Builder {
         let mut store = self.store;
         store.inspection = false;
         let bytes = store.bytes(0..byte_len);
+        let arena_bytes = store.arena.resident_capacity().await?;
         let prompt = make_prompt(store, &layout);
         let resident_bytes = Self::resident_bytes()
             .checked_add(media_dir_bytes)
+            .and_then(|bytes| bytes.checked_add(arena_bytes))
             .ok_or_else(overflow)?;
         Ok(CapturedPrompt {
             prompt,
@@ -948,7 +962,7 @@ pub(crate) async fn restore(
     {
         return Err(invalid());
     }
-    let available = arena.with_writer(|writer| Ok(writer.position())).await?;
+    let available = arena.position().await?;
     if layout.byte_len > available {
         return Err(invalid());
     }

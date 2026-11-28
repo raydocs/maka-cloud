@@ -48,6 +48,7 @@ pub(crate) enum WorkKey {
     Model(ModelAttemptId),
     Assess(ModelAttemptId),
     Tool(ToolKey),
+    Dispatch(ToolKey),
 }
 pub(crate) struct ModelLevel {
     pub handoff: Option<maka_agent_facts::configuration::ModelSelection>,
@@ -195,6 +196,7 @@ fn summary_effects_for(view: &RunView, id: ModelAttemptId) -> Option<Action> {
 pub(crate) struct Live {
     pub work: BTreeSet<WorkKey>,
     pub preparation_failure: Option<String>,
+    pub prepared_prompt: Option<PreparedStepPrompt>,
     pub proactive_preparation_failed: bool,
     pub rejected_summaries: Vec<SummaryOrigin>,
     /// At most one read per physical activation. Further observations are due waits.
@@ -210,6 +212,11 @@ pub(crate) struct Live {
     pub publication_observed: BTreeSet<ExternalPublicationKey>,
     /// Local calls whose dispatch recorded an unknown return in this activation.
     pub ended_unknown: BTreeSet<ToolKey>,
+}
+pub(crate) struct PreparedStepPrompt {
+    pub step: StepId,
+    pub request: ContentRef,
+    pub prompt: Box<crate::prepared_prompt::PreparedPrompt>,
 }
 pub(crate) enum Action {
     Prepare(Preparation),
@@ -384,7 +391,7 @@ fn unknown_outcome(
     if view.cancelled_by_risk
         || tool.accepted.is_some()
         || tool.call.provider_executed
-        || live.work.contains(&WorkKey::Tool(tool.key.clone()))
+        || live.tool_busy(&tool.key)
     {
         return None;
     }
@@ -471,6 +478,27 @@ fn outcome(tool: &maka_agent_state::fold::Tool) -> Option<AcceptedResult> {
     }
 }
 impl Live {
+    fn tool_busy(&self, key: &ToolKey) -> bool {
+        self.work.contains(&WorkKey::Tool(key.clone()))
+            || self.work.contains(&WorkKey::Dispatch(key.clone()))
+    }
+
+    pub(crate) fn recovering_tools(&self, view: &RunView) -> bool {
+        view.tools.values().any(|tool| {
+            tool.admitted
+                && !tool.outcome_unknown_accepted()
+                && !cell_context_recovered(tool)
+                && (if tool.original.is_some() {
+                    !known(&tool.receipt)
+                } else {
+                    outcome(tool).is_none()
+                })
+                && (tool.receipt.is_some()
+                    || tool.local_returned.is_some()
+                    || !self.work.contains(&WorkKey::Dispatch(tool.key.clone())))
+        })
+    }
+
     pub(crate) fn only_cleanup(&self, view: &RunView) -> bool {
         self.work.iter().all(|key| match key {
             WorkKey::Model(id) => view.attempts.get(id).is_some_and(|a| a.closed.is_some()),
@@ -478,7 +506,7 @@ impl Live {
                 .external
                 .as_ref()
                 .is_some_and(|task| task.closed.is_some()),
-            WorkKey::Tool(key) => view
+            WorkKey::Tool(key) | WorkKey::Dispatch(key) => view
                 .tools
                 .get(&maka_agent_state::fold::tool_key(key))
                 .is_some_and(|tool| tool.accepted.is_some() && outcome(tool).is_some()),
@@ -566,7 +594,7 @@ fn cell_action(view: &RunView, live: &Live, fenced: bool) -> Option<Action> {
         let synchronous_pending = match &cell.owner {
             CellOwner::Agent { link, .. } => view.tools.values().any(|tool| {
                 tool.key.attempt == link.attempt
-                    && (live.work.contains(&WorkKey::Tool(tool.key.clone()))
+                    && (live.tool_busy(&tool.key)
                         || (tool.accepted.is_none() && tool.local_returned.is_some()))
             }),
             CellOwner::Standalone { .. } | CellOwner::External { .. } => false,
@@ -828,9 +856,7 @@ pub(crate) fn next(
                 })
             )
     }) {
-        if !live.observed.contains(&tool.key)
-            && !live.work.contains(&WorkKey::Tool(tool.key.clone()))
-        {
+        if !live.observed.contains(&tool.key) && !live.tool_busy(&tool.key) {
             return Action::Observe(tool.key.clone());
         }
         return wait(
@@ -930,7 +956,7 @@ fn next_action(
         }
         // A live callback owns the result, even after its Cell finishes.
         if let Some(cell) = recovered_cell(view, tool)
-            && !live.work.contains(&WorkKey::Tool(tool.key.clone()))
+            && !live.tool_busy(&tool.key)
         {
             return Action::Accept(tool.key.clone(), AcceptedResult::CellRecovered { cell });
         }
@@ -992,9 +1018,7 @@ fn next_action(
             }
         }
         for tool in view.tools.values() {
-            if live.work.contains(&WorkKey::Tool(tool.key.clone()))
-                || tool.outcome_unknown_accepted()
-            {
+            if live.tool_busy(&tool.key) || tool.outcome_unknown_accepted() {
                 continue;
             }
             if tool.original.is_some()
@@ -1163,9 +1187,9 @@ fn next_action(
     if let Some(action) = cell_action(view, live, false) {
         return action;
     }
-    let mut pending_effect = false;
+    let recovering_tools = live.recovering_tools(view);
     for tool in view.tools.values() {
-        if live.work.contains(&WorkKey::Tool(tool.key.clone())) || tool.outcome_unknown_accepted() {
+        if live.tool_busy(&tool.key) || tool.outcome_unknown_accepted() {
             continue;
         }
         if tool.accepted.is_none()
@@ -1176,7 +1200,6 @@ fn next_action(
         if let Some(reference) = &tool.original
             && !known(&tool.receipt)
         {
-            pending_effect = true;
             let reason = BlockerKind::OperationUnknown {
                 tool: tool.key.clone(),
                 reference: reference.clone(),
@@ -1273,7 +1296,7 @@ fn next_action(
                 continue;
             }
         }
-        if unresolved(view) {
+        if recovering_tools || unresolved(view) {
             continue;
         }
         if model.is_some_and(|model| {
@@ -1339,7 +1362,7 @@ fn next_action(
             Some(ToolDecision::Rejected { .. }) => unreachable!(),
         }
     }
-    if pending_effect {
+    if recovering_tools {
         return Action::Idle;
     }
     if let Some(action) = summary_effects(view) {

@@ -71,6 +71,7 @@ impl DriverModel {
         request.compaction_recovery = Some(summary);
         request.adjudications.clear();
         Ok(PreparedStep {
+            prompt: None,
             request,
             contents: vec![],
             notifications: vec![],
@@ -377,6 +378,7 @@ impl DriverModel {
             contents.extend([body, recovery]);
             contents.extend(texts);
             Ok(PreparedStep {
+                prompt: None,
                 request,
                 contents,
                 notifications: vec![],

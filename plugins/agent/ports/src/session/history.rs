@@ -226,6 +226,12 @@ pub enum Position {
         #[schemars(range(min = 1, max = 9_007_199_254_740_991u64))]
         sequence: u64,
     },
+    /// Start a live Text or Conversation window strictly after a raw-event fence.
+    /// The fence need not identify an event in this session.
+    AfterEvent {
+        #[schemars(range(max = 9_007_199_254_740_991u64))]
+        sequence: u64,
+    },
 }
 
 /// A stable raw-event fence prevents a window from chasing appended messages.
@@ -273,6 +279,7 @@ impl Read {
             {
                 return Err(invalid());
             }
+            Position::AfterEvent { sequence } if *sequence > MAX => return Err(invalid()),
             _ => {}
         }
         Ok(())

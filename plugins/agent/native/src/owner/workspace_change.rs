@@ -220,7 +220,7 @@ impl Statement for WorkspaceChange {
     }
 
     fn committed(root: Self::Value) {
-        root.capability_source_changed();
+        root.control_source_changed();
     }
 
     fn isolated_rejection(error: &StoreError) -> bool {

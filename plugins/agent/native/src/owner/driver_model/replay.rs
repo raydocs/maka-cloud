@@ -17,6 +17,7 @@
  * under the License.
  */
 
+use super::replay_cache::ReplayedTool;
 use super::{
     DriverModel, FrozenCellKnowledge, HistorySource, ReplayedTail, extend_observation,
     flush_assistant, merge_skill, recovered::RecordedInputs,
@@ -226,12 +227,12 @@ impl<'a, 'source> TailReplay<'a, 'source> {
         let work: BoxFuture<'b, Result<(), RunError>> = match &fact.fact {
             Fact::StepPrepared { step, .. } => Box::pin(async move {
                 assistant.flush(view, prefix_attempt, messages).await?;
-                let request = reader.request(view.run, *step).await?;
-                step_purposes.insert(*step, request.accounting.purpose);
-                if request.accounting.purpose == ModelPurpose::Summary {
+                let replay = driver.replay_step(reader, view.run, *step).await?;
+                step_purposes.insert(*step, replay.purpose);
+                if replay.purpose == ModelPurpose::Summary {
                     return Ok(());
                 }
-                for reference in &request.steering {
+                for reference in &replay.steering {
                     let source: maka_agent_facts::message::RootSourceMessage =
                         reader.decode(view.run, reference).await?;
                     if !steering_messages.insert((view.run, source.message.message_id.clone())) {
@@ -260,8 +261,7 @@ impl<'a, 'source> TailReplay<'a, 'source> {
                         .await?;
                     merge_skill(system, &source.message.content)?;
                 }
-                let frozen = driver.frozen_input(reader, view.run, &request).await?;
-                for notice in frozen.notifications {
+                for notice in replay.notifications {
                     if !notification_facts.insert((view.run, notice.id)) {
                         continue;
                     }
@@ -458,54 +458,74 @@ impl<'a, 'source> TailReplay<'a, 'source> {
                 result,
                 outcome,
             } => Box::pin(async move {
-                let call = reader.tool_call(view.run, tool).await?;
-                if call.provider_executed {
+                let key = (driver.live_replay(reader, view.run)
+                    && restriction.is_none()
+                    && matches!(outcome, AcceptedResult::Succeeded | AcceptedResult::Failed))
+                .then_some((fact.id, vision));
+                let projected = driver
+                    .replay_cache
+                    .tool_result(key, async {
+                        let call = reader.tool_call(view.run, tool).await?;
+                        if call.provider_executed {
+                            return Ok(None);
+                        }
+                        let output = if restriction.is_some()
+                            || (view.run != driver.execution.run_id
+                                && sensitive_tool(
+                                    view,
+                                    view.tools
+                                        .get(&maka_agent_state::fold::tool_key(tool))
+                                        .ok_or_else(|| {
+                                            RunError::ReconciliationRequired(
+                                                "historical result lost its tool call".into(),
+                                            )
+                                        })?,
+                                    aliases,
+                                    restricted_cells,
+                                    after,
+                                )) {
+                            ToolOutput::Json(json!({"gap": FRESH_READ}))
+                        } else if let Some(output) = driver
+                            .archived_tool_result(
+                                reader, view, after, fact.id, &fact.fact, &call, vision,
+                            )
+                            .await?
+                        {
+                            output
+                        } else {
+                            let evidence = reader.decode(view.run, result).await?;
+                            driver
+                                .project_accepted(
+                                    reader,
+                                    view,
+                                    after,
+                                    original_cells,
+                                    evidence,
+                                    vision,
+                                    view.spec.language,
+                                )
+                                .await?
+                        };
+                        Ok(Some(ReplayedTool {
+                            message: tool_message(&call, output),
+                            requests_compaction: call.name == crate::owner::compaction::TOOL
+                                && *outcome == AcceptedResult::Succeeded,
+                        }))
+                    })
+                    .await?;
+                let Some(projected) = projected else {
                     return Ok(());
-                }
+                };
                 if !assistant.is_attempt(tool.attempt) {
                     assistant.flush(view, prefix_attempt, messages).await?;
                 }
-                if call.name == crate::owner::compaction::TOOL
-                    && *outcome == AcceptedResult::Succeeded
-                {
+                if projected.requests_compaction {
                     *compaction_request = Some(tool.clone());
                 }
-                let output = if restriction.is_some()
-                    || (view.run != driver.execution.run_id
-                        && sensitive_tool(
-                            view,
-                            view.tools
-                                .get(&maka_agent_state::fold::tool_key(tool))
-                                .ok_or_else(|| {
-                                    RunError::ReconciliationRequired(
-                                        "historical result lost its tool call".into(),
-                                    )
-                                })?,
-                            aliases,
-                            restricted_cells,
-                            after,
-                        )) {
-                    ToolOutput::Json(json!({"gap": FRESH_READ}))
-                } else if let Some(output) = driver
-                    .archived_tool_result(reader, view, after, fact.id, &fact.fact, &call, vision)
-                    .await?
-                {
-                    output
-                } else {
-                    let evidence = reader.decode(view.run, result).await?;
-                    driver
-                        .project_accepted(
-                            reader,
-                            view,
-                            after,
-                            original_cells,
-                            evidence,
-                            vision,
-                            view.spec.language,
-                        )
-                        .await?
+                let message = match std::sync::Arc::try_unwrap(projected) {
+                    Ok(projected) => projected.message,
+                    Err(shared) => shared.message.clone(),
                 };
-                let message = tool_message(&call, output);
                 if assistant.is_attempt(tool.attempt) {
                     // More calls may still arrive from this attempt.
                     assistant.tool_outputs.push(message);

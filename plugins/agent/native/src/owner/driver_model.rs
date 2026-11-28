@@ -23,7 +23,10 @@ use futures_util::{FutureExt, future::BoxFuture, stream};
 use maka_agent_engine::{
     ModelSource, RunError,
     cleanup::Evidence,
-    ports::{ModelConnection, ModelObservation, Preparation, PreparedStep, RecoveryEvidence},
+    ports::{
+        AdmittedModelInput, ModelConnection, ModelObservation, Preparation, PreparedStep,
+        RecoveryEvidence,
+    },
     preparation::{self, PromptSettings, RequestSource},
 };
 use maka_agent_facts::{
@@ -53,6 +56,7 @@ mod original;
 mod recovered;
 mod replay;
 mod replay_admission;
+mod replay_cache;
 pub(super) use replay_admission::{ReplayTarget, append_observed, current_context};
 mod summary_repair;
 mod tool_projection;
@@ -89,8 +93,15 @@ pub(super) struct DriverModel {
     pub workers: TaskTracker,
     pub original_cleanup: original::OriginalModelCleanup,
     pub conversation: Arc<std::sync::Mutex<Option<maka_model::Conversation>>>,
+    pub replay_cache: replay_cache::ReplayCache,
     pub preview:
         tokio::sync::watch::Sender<Option<Arc<maka_agent_facts::model::assembly::AttemptCut>>>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum PrepareStepFor {
+    Publication,
+    Dispatch,
 }
 
 #[derive(Default)]
@@ -493,6 +504,7 @@ impl DriverModel {
         view: &'a RunView,
         mode: Preparation,
         driver: &'a super::driver::NativeDriver,
+        target: PrepareStepFor,
     ) -> BoxFuture<'a, Result<PreparedStep, RunError>> {
         if self.execution.run_id != view.run || self.log.id() != view.spec.session_id {
             return futures_util::future::ready(Err(RunError::InvalidInput(
@@ -534,15 +546,20 @@ impl DriverModel {
                 let evidence: maka_agent_facts::context::RequestContextEvidence =
                     self.decode(view.run, &request.provenance).await?;
                 if evidence.codex_preflight.is_some() {
-                    self.prepare_main_step(view, Preparation::AfterCompaction { attempt }, driver)
-                        .await
+                    self.prepare_main_step(
+                        view,
+                        Preparation::AfterCompaction { attempt },
+                        driver,
+                        target,
+                    )
+                    .await
                 } else {
                     self.prepare_compacted_main(view, attempt, None, driver)
                         .await
                 }
             }
             .boxed(),
-            mode => self.prepare_main_step(view, mode, driver).boxed(),
+            mode => self.prepare_main_step(view, mode, driver, target).boxed(),
         }
     }
 
@@ -551,6 +568,7 @@ impl DriverModel {
         view: &RunView,
         mode: Preparation,
         driver: &super::driver::NativeDriver,
+        target: PrepareStepFor,
     ) -> Result<PreparedStep, RunError> {
         let input: RunInput = self.decode(view.run, &view.spec.input).await?;
         if matches!(input, RunInput::HistorySource { .. }) {
@@ -870,6 +888,13 @@ impl DriverModel {
             RunInput::Continuation { claim, .. } if view.steps.is_empty() => Some(claim),
             _ => None,
         };
+        let mut retain_prompt = matches!(target, PrepareStepFor::Dispatch)
+            && purpose == ModelPurpose::Main
+            && matches!(
+                model.provider.kind,
+                maka_model::ProviderKind::OpenaiChatCompletions
+                    | maka_model::ProviderKind::OpenaiCompatible { .. }
+            );
         let prepared = Box::pin(async {
             // The replay digest covers the logical prompt before tool-dependent wire preparation.
             let logical_prompt_digest = continuation
@@ -936,6 +961,7 @@ impl DriverModel {
             )
             .await?;
             let (prompt_content, chunks, media, layout, cleanup) = snapshot.into_parts();
+            retain_prompt &= media.is_empty();
             let cleanup_evidence = self.cleanup.clone();
             self.workers.spawn(async move {
                 if let Err(error) = cleanup.await {
@@ -1075,6 +1101,7 @@ impl DriverModel {
                 protocol_version: VERSION,
             };
             Ok(PreparedStep {
+                prompt: None,
                 notifications,
                 request: spec,
                 contents: {
@@ -1099,15 +1126,28 @@ impl DriverModel {
             })
         })
         .await;
-        let prepared = match prompt.close().await {
-            Ok(()) => prepared,
-            Err(close) => Err(match prepared {
-                Ok(_) => self.cleanup.preparation_failed(close),
-                Err(error) => preparation::preparation_cleanup_error(error, close),
-            }),
+        let mut prepared = if retain_prompt && prepared.is_ok() {
+            prepared
+        } else {
+            match prompt.close().await {
+                Ok(()) => prepared,
+                Err(close) => Err(match prepared {
+                    Ok(_) => self.cleanup.preparation_failed(close),
+                    Err(error) => preparation::preparation_cleanup_error(error, close),
+                }),
+            }
         }?;
-        if let Some(catalog) = catalog {
-            driver.install_step_tools(prepared.request.step, catalog)?;
+        if let Some(catalog) = catalog
+            && let Err(error) = driver.install_step_tools(prepared.request.step, catalog)
+        {
+            return Err(if retain_prompt && let Err(close) = prompt.close().await {
+                preparation::preparation_cleanup_error(error, close)
+            } else {
+                error
+            });
+        }
+        if retain_prompt {
+            prepared.prompt = Some(Box::new(prompt));
         }
         Ok(prepared)
     }
@@ -1696,25 +1736,29 @@ impl DriverModel {
     ) -> Result<Option<(u64, RequestSpec)>, RunError> {
         let mut after = 0;
         let mut latest = None;
-        while after < view.revision {
-            let page = reader.history(view.run, after, 256).await?;
-            if page.is_empty() {
+        loop {
+            let page = self.replay_history(reader, view, after).await?;
+            let Some(last) = page.last() else {
                 break;
-            }
+            };
+            after = last.revision;
             for item in page {
-                if item.revision > view.revision {
-                    break;
-                }
-                after = item.revision;
-                if let Fact::StepPrepared { step, .. } = item.fact {
-                    let request = reader.request(view.run, step).await?;
-                    if !request.adjudications.is_empty() {
-                        latest = Some((after, request));
-                    }
+                if let Fact::StepPrepared {
+                    step,
+                    adjudications,
+                    ..
+                } = &item.fact
+                    && !adjudications.is_empty()
+                {
+                    // Admission binds the request's adjudications to this fact.
+                    latest = Some((item.revision, *step));
                 }
             }
         }
-        Ok(latest)
+        match latest {
+            Some((revision, step)) => Ok(Some((revision, reader.request(view.run, step).await?))),
+            None => Ok(None),
+        }
     }
     async fn frozen_input(
         &self,
@@ -2582,14 +2626,13 @@ impl DriverModel {
             );
             let mut after = after_revision;
             loop {
-                let page = reader.history(view.run, after, 256).await?;
+                let page = self.replay_history(reader, view, after).await?;
                 if page.is_empty() {
                     break;
                 }
                 let restricted = if view.run != self.execution.run_id {
                     let results = page
                         .iter()
-                        .take_while(|f| f.revision <= view.revision)
                         .filter(|f| {
                             matches!(
                                 f.fact,
@@ -2610,9 +2653,6 @@ impl DriverModel {
                     Default::default()
                 };
                 for fact in &page {
-                    if fact.revision > view.revision {
-                        return replay.finish().await;
-                    }
                     after = fact.revision;
                     if let Some(work) = replay.apply(fact, restricted.get(&fact.id).copied())? {
                         work.await?;
@@ -2877,8 +2917,7 @@ impl DriverModel {
         &self,
         view: &RunView,
         attempt: ModelAttemptId,
-        request: RequestSpec,
-        bytes: Vec<u8>,
+        input: AdmittedModelInput,
         witness: maka_agent_engine::ModelWitness,
         driver: &super::driver::NativeDriver,
     ) -> Result<ModelConnection, RunError> {
@@ -2891,8 +2930,8 @@ impl DriverModel {
         let _activation = work.activate()?;
         self.original_cleanup.own(attempt, witness.clone());
         let result = async {
-            driver.catalog_for_request(view, &request).await?;
-            self.start_admitted_model(attempt, request, bytes, witness, &driver.access, &work)
+            driver.catalog_for_request(view, &input.request).await?;
+            self.start_admitted_model(attempt, input, witness, &driver.access, &work)
                 .await
         }
         .await;
@@ -2927,12 +2966,16 @@ impl DriverModel {
     async fn start_admitted_model(
         &self,
         attempt: ModelAttemptId,
-        request: RequestSpec,
-        bytes: Vec<u8>,
+        input: AdmittedModelInput,
         witness: maka_agent_engine::ModelWitness,
         access: &Arc<super::access::RunAccess>,
         work: &original::ModelWork,
     ) -> Result<Option<ModelConnection>, RunError> {
+        let AdmittedModelInput {
+            request,
+            bytes,
+            prompt,
+        } = input;
         let run = self.execution.run_id;
         if request.protocol != PROTOCOL || request.protocol_version != VERSION {
             return Err(unsupported(&request.protocol));
@@ -3102,7 +3145,7 @@ impl DriverModel {
                     budget: expected_breakdown,
                     memory,
                 });
-                let (prompt, input) = factory.build(&cancellation).await?;
+                let (prompt, input) = factory.build(&cancellation, prompt).await?;
                 let source = maka_agent_ports::model::RequestSource {
                     cleanup: prompt.cleanup(),
                     frozen: factory,

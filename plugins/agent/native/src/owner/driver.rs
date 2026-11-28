@@ -924,7 +924,17 @@ impl DriverPorts for NativeDriver {
             let worker = self.clone();
             let mut handle = AbortOnDrop(self.workers.spawn(async move {
                 worker.access.live_configuration().await?;
-                worker.model()?.prepare_step(&view, mode, &worker).await
+                use super::driver_model::PrepareStepFor;
+                let target = match mode {
+                    Preparation::Initial | Preparation::ToolContinuation { .. } => {
+                        PrepareStepFor::Dispatch
+                    }
+                    _ => PrepareStepFor::Publication,
+                };
+                worker
+                    .model()?
+                    .prepare_step(&view, mode, &worker, target)
+                    .await
             }));
             (&mut handle.0).await.map_err(|error| {
                 if error.is_cancelled() {
@@ -982,8 +992,7 @@ impl DriverPorts for NativeDriver {
         &self,
         run: RunId,
         attempt: ModelAttemptId,
-        request: RequestSpec,
-        bytes: Vec<u8>,
+        input: AdmittedModelInput,
         witness: maka_agent_engine::ModelWitness,
     ) -> BoxFuture<'_, Result<ModelConnection, RunError>> {
         Box::pin(async move {
@@ -992,7 +1001,7 @@ impl DriverPorts for NativeDriver {
                 &self.owner,
                 &view,
                 attempt,
-                &request,
+                &input.request,
             )?;
             let writer = self.owner.store.data_writer_for_work(
                 self.access.custody().as_ref(),
@@ -1000,7 +1009,7 @@ impl DriverPorts for NativeDriver {
             )?;
             let witness = witness.with_data_writer(writer)?;
             self.model()?
-                .start_model(&view, attempt, request, bytes, witness, self)
+                .start_model(&view, attempt, input, witness, self)
                 .await
         })
     }

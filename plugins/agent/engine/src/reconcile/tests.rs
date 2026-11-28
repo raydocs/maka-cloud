@@ -1151,10 +1151,11 @@ fn admitted_side_effecting_call() -> (RunView, ToolKey) {
     (view, tool)
 }
 
-fn bind_host_operation(view: &mut RunView, tool: &ToolKey, cleanup: OperationCleanupState) {
-    use maka_plugin_core::operation::{
-        OperationOutcome, OperationReply, Receipt, RecoveryContract, RecoveryProtocol, RecoveryRef,
-    };
+fn bind_original_host_operation(
+    view: &mut RunView,
+    tool: &ToolKey,
+) -> maka_plugin_core::operation::RecoveryRef {
+    use maka_plugin_core::operation::{RecoveryContract, RecoveryProtocol, RecoveryRef};
     let digest = format!(
         "sha256-{}",
         view.spec.input.digest.strip_prefix("sha256:").unwrap()
@@ -1185,6 +1186,12 @@ fn bind_host_operation(view: &mut RunView, tool: &ToolKey, cleanup: OperationCle
             reference: reference.clone(),
         },
     );
+    reference
+}
+
+fn bind_host_operation(view: &mut RunView, tool: &ToolKey, cleanup: OperationCleanupState) {
+    use maka_plugin_core::operation::OperationReply;
+    let reference = bind_original_host_operation(view, tool);
     apply_policy_fact(
         view,
         Fact::OperationObserved {
@@ -1200,6 +1207,49 @@ fn bind_host_operation(view: &mut RunView, tool: &ToolKey, cleanup: OperationCle
             },
         },
     );
+}
+
+#[test]
+fn bound_tool_allows_sibling_admission_only_during_live_dispatch() {
+    use maka_agent_state::fold::tool_key;
+
+    let (mut view, original) = admitted_side_effecting_call();
+    bind_original_host_operation(&mut view, &original);
+    // The fresh sibling sorts before the original. Recovery must still win.
+    let sibling = ToolKey {
+        attempt: original.attempt,
+        call: "a-sibling".into(),
+    };
+    let mut tool = view.tools[&tool_key(&original)].clone();
+    tool.key = sibling.clone();
+    tool.call.id = sibling.call.clone();
+    tool.admitted = false;
+    tool.original = None;
+    view.tools.insert(tool_key(&sibling), tool);
+
+    let mut live = Live::default();
+    assert!(
+        matches!(next(&view, &live, UnixMillis(1), None, false), Action::Observe(key) if key == original)
+    );
+    live.work.insert(WorkKey::Tool(original.clone()));
+    assert!(matches!(
+        next(&view, &live, UnixMillis(1), None, false),
+        Action::Idle
+    ));
+
+    live.work.clear();
+    live.work.insert(WorkKey::Dispatch(original));
+    assert!(
+        matches!(next(&view, &live, UnixMillis(1), None, false), Action::Lookup(key) if key == sibling)
+    );
+    apply_policy_fact(
+        &mut view,
+        Fact::ToolAdmitted {
+            tool: sibling.clone(),
+        },
+    );
+    assert!(view.tools[&tool_key(&sibling)].admitted);
+    assert!(view.recovery_failure().is_none());
 }
 
 type OperationCleanupState = maka_plugin_core::operation::OperationCleanup;

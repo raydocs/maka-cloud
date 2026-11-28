@@ -21,12 +21,7 @@
 use super::AsyncEmit;
 use crate::history::capture_arena::{ArenaAppend, CaptureArena};
 use maka_agent_facts::model::prompt_source::source::{ChargedBuffer, SourceBudget};
-use std::{
-    future::Future,
-    io::{self, Write},
-    pin::Pin,
-    sync::Arc,
-};
+use std::{future::Future, io, pin::Pin, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
 pub(crate) struct ArenaEmit {
@@ -64,12 +59,7 @@ impl ArenaEmit {
         }
         let buffer = Some(buffer);
         let append = arena.begin_append().await;
-        let position = append
-            .with_writer(move |writer| {
-                let _owner = owner;
-                Ok(writer.position())
-            })
-            .await?;
+        let position = append.position().await?;
         Ok(Self {
             append,
             buffer,
@@ -87,13 +77,7 @@ impl ArenaEmit {
         }
         let buffer = self.buffer.take().expect("arena emission owns its buffer");
         let count = self.filled;
-        let buffer = self
-            .append
-            .with_writer(move |writer| {
-                writer.write_all(&buffer.as_ref()[..count])?;
-                Ok(buffer)
-            })
-            .await?;
+        let buffer = self.append.write_buffer(buffer, count).await?;
         self.buffer = Some(buffer);
         self.filled = 0;
         Ok(())

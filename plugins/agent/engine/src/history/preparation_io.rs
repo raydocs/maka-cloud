@@ -123,16 +123,31 @@ impl PreparationIo {
             }
         }
     }
-    pub(crate) async fn with_local_io<T: Send + 'static>(
+    pub(super) async fn with_root_io<T: Send + 'static>(
         &self,
         operation: impl FnOnce() -> io::Result<T> + Send + 'static,
     ) -> io::Result<T> {
         let owner = self.clone();
         self.work()
-            .with_resource_io(move || {
+            .with_request_file_authority(move || {
                 let _owner = owner;
-                // Preserve I/O error identity rather than wrapping it in a StoreError.
-                Ok(operation())
+                operation()
+            })
+            .await
+            .map_err(io::Error::other)?
+    }
+    /// An anonymous backing owns no Root paths. The dispatched job retains the
+    /// original effect pin, including when its awaiting future is cancelled.
+    pub(crate) async fn with_local_io<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce() -> io::Result<T> + Send + 'static,
+    ) -> io::Result<T> {
+        let owner = self.clone();
+        self.0
+            .runtime
+            .spawn_blocking(move || {
+                let _owner = owner;
+                operation()
             })
             .await
             .map_err(io::Error::other)?

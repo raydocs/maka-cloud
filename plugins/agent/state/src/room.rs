@@ -220,6 +220,12 @@ impl RoomStore {
             .await
     }
 
+    pub async fn watch_members(&self, session: &str) -> Result<Vec<String>, StoreError> {
+        self.data
+            .query(WatchMembers(self.owner.clone(), session.to_owned()))
+            .await
+    }
+
     pub async fn state(&self, session: &str) -> Result<RoomState, StoreError> {
         self.data
             .query(StateQuery {
@@ -891,6 +897,20 @@ impl Query for Capture {
 }
 
 struct WatchWatermark(RunOwner, String);
+
+struct WatchMembers(RunOwner, String);
+impl Query for WatchMembers {
+    type Output = Vec<String>;
+
+    fn execute(self, c: &Connection) -> Result<Self::Output, StoreError> {
+        let owner = serde_json::to_string(&self.0)?;
+        Ok(c.prepare_cached(
+            "SELECT member_session FROM agent_room_members WHERE owner=? AND session=?",
+        )?
+        .query_map(params![owner, self.1], |row| row.get(0))?
+        .collect::<Result<_, _>>()?)
+    }
+}
 
 fn watch_revision(c: &Connection, owner: &str, session: &str) -> Result<u64, StoreError> {
     let room_rev: Option<i64> = c

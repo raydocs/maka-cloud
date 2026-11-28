@@ -18,17 +18,22 @@
  */
 
 use super::*;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, DuplexStream};
 
-type Wire = BufReader<DuplexStream>;
+type Wire<T = DuplexStream> = BufReader<T>;
 
-async fn frame(wire: &mut Wire) -> Value {
+async fn frame(wire: &mut Wire<impl AsyncRead + Unpin>) -> Value {
     let mut line = String::new();
     assert_ne!(wire.read_line(&mut line).await.unwrap(), 0, "ACP EOF");
     serde_json::from_str(&line).unwrap()
 }
 
-async fn rpc(wire: &mut Wire, id: u64, method: &str, params: Value) -> (Value, Vec<Value>) {
+async fn rpc(
+    wire: &mut Wire<impl AsyncRead + AsyncWrite + Unpin>,
+    id: u64,
+    method: &str,
+    params: Value,
+) -> (Value, Vec<Value>) {
     write_frame(
         wire,
         json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}),
@@ -39,13 +44,13 @@ async fn rpc(wire: &mut Wire, id: u64, method: &str, params: Value) -> (Value, V
     (reply, notes)
 }
 
-async fn write_frame(wire: &mut Wire, request: Value) {
+async fn write_frame(wire: &mut (impl AsyncWrite + Unpin), request: Value) {
     wire.write_all(format!("{request}\n").as_bytes())
         .await
         .unwrap();
 }
 
-async fn response(wire: &mut Wire) -> (Value, Vec<Value>) {
+async fn response(wire: &mut Wire<impl AsyncRead + Unpin>) -> (Value, Vec<Value>) {
     let mut notifications = vec![];
     loop {
         let reply = frame(wire).await;
@@ -76,6 +81,10 @@ async fn connect(
 }
 
 async fn configure(client: &Client, connection: &str) {
+    configure_model(client, connection, "gpt-4.1-mini").await;
+}
+
+async fn configure_model(client: &Client, connection: &str, model: &str) {
     host_load_stress::save_credential(client, connection).await;
     let catalog = call(
         client,
@@ -90,11 +99,310 @@ async fn configure(client: &Client, connection: &str) {
         "settings",
         "setDefault",
         json!({"expectedCatalogRevision":catalog["revision"],
-                    "target":{"connectionId":connection,"modelId":"gpt-4.1-mini"}}),
+                    "target":{"connectionId":connection,"modelId":model}}),
         Attachments::new(),
     )
     .await;
     assert_eq!(saved["kind"], "committed", "{saved}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn acp_mixed_tool_burst_completes_in_both_calling_modes() {
+    for code_mode in [false, true] {
+        tokio::time::timeout(Duration::from_secs(60), mixed_tool_burst(code_mode))
+            .await
+            .unwrap_or_else(|_| panic!("tool burst timed out, code_mode={code_mode}"));
+    }
+}
+
+#[cfg(unix)]
+async fn mixed_tool_burst(code_mode: bool) {
+    let sandbox = Sandbox::new().await.unwrap();
+    tokio::fs::write(sandbox.workspace.join("large.txt"), vec![b'x'; 512 * 1024])
+        .await
+        .unwrap();
+    tokio::fs::write(sandbox.workspace.join("seed.txt"), "burst input\n")
+        .await
+        .unwrap();
+    let batch: Vec<_> = (0..16).map(|slot| match slot {
+        0 => ("Shell", json!({"command":"printf 'burst-output-start\n'; cat large.txt; printf '\nburst-output-end\n'","title":"large output"})),
+        1 | 5 | 9 | 13 => ("Read", json!({"path":"seed.txt"})),
+        2 | 6 | 10 | 14 => ("ApplyPatch", json!({"patch":format!(
+            "*** Begin Patch\n*** Add File: patched-{slot}.txt\n+patched-{slot}\n*** End Patch"
+        )})),
+        _ => ("Shell", json!({"command":format!("printf 'probe-{slot}'"),"title":format!("probe-{slot}")})),
+    }).collect();
+    let model = if code_mode { "gpt-4.1" } else { "gpt-4.1-mini" };
+    let server = MockAiBuilder::new()
+        .control(ControlPlaneConfig {
+            models: vec![ModelEntry::simple(model)],
+            ..Default::default()
+        })
+        .handler_fn(move |request: &NormalizedRequest, _: &TurnContext| {
+            let results: Vec<_> = request.messages.iter().filter(|m| m.tool_call_id.is_some()).collect();
+            let plan = TurnPlan::new().with_usage(Usage::new(80, 20));
+            if results.is_empty() {
+                let plan = if code_mode {
+                    let calls = batch.iter().map(|(name, input)| format!("tools.{name}({input})"))
+                        .collect::<Vec<_>>().join(",\n");
+                    plan.push_tool_call("burst_exec", "exec", json!({
+                        "code":format!("await Promise.all([\n{calls}\n]); text('burst cell complete');"),
+                        "yield_time_ms": 1000,
+                    }))
+                } else {
+                    batch.iter().enumerate().fold(plan, |plan, (slot, (name, input))| {
+                        plan.push_tool_call(format!("burst_{slot}"), *name, input.clone())
+                    })
+                };
+                return plan.finish(FinishReason::ToolCalls);
+            }
+            if code_mode {
+                let last = results.last().unwrap();
+                if let Ok(value) = serde_json::from_str::<Value>(&last.text)
+                    && value["state"] == "running"
+                {
+                    return plan.push_tool_call(format!("burst_wait_{}", request.sequence), "wait", json!({
+                        "cell_id": value["cell_id"], "yield_time_ms": 1000
+                    })).finish(FinishReason::ToolCalls);
+                }
+                assert!(last.text.contains("burst cell complete"), "{}", last.text);
+            } else {
+                assert_eq!(results.len(), 16);
+                let read = results.iter().find(|m| m.tool_call_id.as_deref() == Some("burst_1")).unwrap();
+                assert!(read.text.contains("burst input"), "{}", read.text);
+                let shell = results.iter().find(|m| m.tool_call_id.as_deref() == Some("burst_0")).unwrap();
+                assert!(shell.text.contains("burst-output-end"));
+            }
+            plan.push_text("Burst verified.").finish(FinishReason::Stop)
+        })
+        .start().await.unwrap();
+    let connection = if code_mode {
+        host_nightmare_stress::seed_codemode_connection(
+            &sandbox.root,
+            &server.base_url(),
+            "javascript",
+        )
+        .await
+    } else {
+        host_load_stress::seed_connections(&sandbox.root, &server.base_url())
+            .await
+            .2
+    };
+    let mut host = Host::spawn(&sandbox).unwrap();
+    let (mut client, address) = host.ready().await.unwrap();
+    configure_model(&client, &connection, model).await;
+    let stop = CancellationToken::new();
+    let (mut wire, facade) = connect(
+        Client::connect(&address, Some(client.epoch()))
+            .await
+            .unwrap(),
+        &stop,
+    )
+    .await;
+    let (created, _) = rpc(
+        &mut wire,
+        2,
+        "session/new",
+        json!({"cwd":sandbox.workspace}),
+    )
+    .await;
+    let session = created["result"]["sessionId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{created}"));
+    let observation = call(
+        &client,
+        "agent",
+        "observe",
+        json!({"sessionId":session}),
+        Attachments::new(),
+    )
+    .await;
+    let meta = &observation["session"];
+    let updated = call(&client, "agent", "metadata", json!({
+        "sessionId": session, "expectedRevision":meta["revision"], "title":meta["title"], "labels":meta["labels"],
+        "permissions":{"settings":{"access":"danger_full_access","requestPermissions":false},"revokeGrants":false}
+    }), Attachments::new()).await;
+    assert_eq!(updated["kind"], "committed", "{updated}");
+    let (reply, mut updates) = rpc(
+        &mut wire,
+        3,
+        "session/prompt",
+        json!({
+            "sessionId":session, "prompt":[{"type":"text","text":"Run the mixed tool burst."}]
+        }),
+    )
+    .await;
+    assert!(
+        reply["result"].is_object(),
+        "code_mode={code_mode}: {reply}"
+    );
+    loop {
+        let note = frame(&mut wire).await;
+        let update = &note["params"]["update"];
+        if update["sessionUpdate"] == "state_update" && update["state"] == "idle" {
+            assert_eq!(
+                update["stopReason"], "end_turn",
+                "code_mode={code_mode}: {note}"
+            );
+            break;
+        }
+        updates.push(note);
+    }
+    stop.cancel();
+    facade.await.unwrap().unwrap();
+    host.quit(&mut client).await.unwrap();
+    for slot in [2, 6, 10, 14] {
+        assert_eq!(
+            tokio::fs::read_to_string(sandbox.workspace.join(format!("patched-{slot}.txt")))
+                .await
+                .unwrap(),
+            format!("patched-{slot}\n")
+        );
+    }
+    let inspection = inspect_session(&sandbox, session).await;
+    let facts: Vec<_> = inspection["facts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| &row["item"]["recorded"]["fact"])
+        .collect();
+    let terminal = facts
+        .iter()
+        .find(|fact| fact["kind"] == "run_terminated")
+        .unwrap();
+    assert_eq!(terminal["terminal"], "completed", "{terminal}");
+    let blockers: Vec<_> = facts
+        .iter()
+        .filter(|fact| fact["kind"] == "blocked")
+        .collect();
+    assert!(blockers.is_empty(), "{blockers:?}");
+    let completed_tools: std::collections::HashSet<_> = updates
+        .iter()
+        .map(|note| &note["params"]["update"])
+        .filter(|update| {
+            update["status"] == "completed"
+                && matches!(
+                    update["name"].as_str(),
+                    Some("Shell" | "Read" | "ApplyPatch")
+                )
+        })
+        .map(|update| update["toolCallId"].as_str().unwrap())
+        .collect();
+    assert_eq!(completed_tools.len(), 16, "code_mode={code_mode}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn acp_v1_delivers_final_text_before_end_turn_across_32_sessions() {
+    use std::process::Stdio;
+
+    const SESSIONS: usize = 32;
+    tokio::time::timeout(Duration::from_secs(90), async {
+        let sandbox = Sandbox::new().await.unwrap();
+        let mut server = MockAiBuilder::new().interactive(SESSIONS)
+            .control(ControlPlaneConfig { models: vec![ModelEntry::simple("gpt-4.1-mini")], ..Default::default() })
+            .start().await.unwrap();
+        let (_, _, connection) = host_load_stress::seed_connections(&sandbox.root, &server.base_url()).await;
+        let mut host = Host::spawn(&sandbox).unwrap();
+        let (mut client, _) = host.ready().await.unwrap();
+        configure(&client, &connection).await;
+
+        let mut acp = host::command(&sandbox).unwrap()
+            .args(["acp", "--root"]).arg(&sandbox.root)
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).kill_on_drop(true)
+            .spawn().unwrap();
+        let mut wire = BufReader::new(tokio::io::join(
+            acp.stdout.take().unwrap(), acp.stdin.take().unwrap(),
+        ));
+        let (init, _) = rpc(&mut wire, 0, "initialize", json!({"protocolVersion":1})).await;
+        assert_eq!(init["result"]["protocolVersion"], 1, "{init}");
+        let mut sessions: [String; SESSIONS] = Default::default();
+        let (read, mut write) = tokio::io::split(wire);
+        let mut read = BufReader::new(read);
+        let send = async {
+            for index in 0..SESSIONS {
+                write_frame(&mut write, json!({
+                    "jsonrpc":"2.0", "id":index + 1, "method":"session/new",
+                    "params":{"cwd":sandbox.workspace,"mcpServers":[]}
+                })).await;
+            }
+        };
+        let receive = async {
+            for _ in 0..SESSIONS {
+                let (created, _) = response(&mut read).await;
+                let lane = created["id"].as_u64().unwrap() as usize - 1;
+                let result = &created["result"];
+                assert!(sessions[lane].is_empty(), "{created}");
+                sessions[lane] = result["sessionId"].as_str()
+                    .unwrap_or_else(|| panic!("lane {lane}: {created}")).to_owned();
+                let model = result["configOptions"].as_array().unwrap().iter()
+                    .find(|option| option["id"] == "model").unwrap();
+                assert_eq!(model["currentValue"], "default", "{created}");
+                let value = json!([connection, "gpt-4.1-mini"]).to_string();
+                assert!(model["options"].as_array().unwrap().iter()
+                    .any(|option| option["value"] == value), "{created}");
+            }
+        };
+        tokio::join!(send, receive);
+        let mut wire = read.into_inner().unsplit(write);
+        let unique: std::collections::HashSet<_> = sessions.iter().collect();
+        assert_eq!(unique.len(), SESSIONS);
+        let prompt = |index: usize| json!({
+            "jsonrpc":"2.0", "id":index + 1, "method":"session/prompt",
+            "params":{"sessionId":sessions[index],"prompt":[{"type":"text","text":format!("Lane {index}")}]}
+        });
+        write_frame(&mut wire, prompt(0)).await;
+        let first = server.next_turn().await.unwrap();
+        let before = call(&client, "agent", "observe", json!({"sessionId":sessions[0]}), Attachments::new()).await;
+        let after = before["through"].as_u64().unwrap();
+        for index in 1..SESSIONS {
+            write_frame(&mut wire, prompt(index)).await;
+        }
+        let release = async {
+            let mut turns = vec![first];
+            for _ in 1..SESSIONS {
+                turns.push(server.next_turn().await.unwrap());
+            }
+            for turn in turns {
+                let answer = format!("Final answer for {}.", turn.request.last_user_text().unwrap());
+                turn.reply_text(answer);
+            }
+        };
+        let verify = async {
+            let mut complete = [false; SESSIONS];
+            let mut answers: [String; SESSIONS] = Default::default();
+            let lane_by_session: std::collections::HashMap<_, _> =
+                sessions.iter().map(String::as_str).zip(0..SESSIONS).collect();
+            while complete.contains(&false) {
+                let message = frame(&mut wire).await;
+                if let Some(id) = message["id"].as_u64() {
+                    let lane = id as usize - 1;
+                    assert_eq!(message["result"]["stopReason"], "end_turn", "lane {lane}: {message}");
+                    assert!(!std::mem::replace(&mut complete[lane], true), "{message}");
+                    assert_eq!(answers[lane], format!("Final answer for Lane {lane}."), "lane {lane} at end_turn");
+                } else if message["params"]["update"]["sessionUpdate"] == "agent_message_chunk" {
+                    let session = message["params"]["sessionId"].as_str().unwrap();
+                    let lane = lane_by_session[session];
+                    assert!(!complete[lane], "lane {lane}: {message}");
+                    answers[lane].push_str(message["params"]["update"]["content"]["text"].as_str().unwrap());
+                }
+            }
+        };
+        tokio::join!(release, verify);
+        let terminal = call(&client, "agent", "observe", json!({"sessionId":sessions[0]}), Attachments::new()).await;
+        let through = &terminal["through"];
+        let read = |position: Value| json!({"sessionId":sessions[0], "through":through, "position":position});
+        // The first lane was held at the provider while other sessions wrote to the log.
+        let exact = call(&client, "agent", "history", read(json!({"kind":"event","sequence":after+1})), Attachments::new()).await;
+        assert_eq!(exact["chunks"], json!([]), "the next global event belongs to another session");
+        let range = call(&client, "agent", "history", read(json!({"kind":"after_event","sequence":after})), Attachments::new()).await;
+        assert_eq!(range["chunks"][0]["text"], "Final answer for Lane 0.");
+        assert_eq!(range["chunks"][0]["offset"], 0);
+
+        drop(wire);
+        assert!(acp.wait().await.unwrap().success());
+        host.quit(&mut client).await.unwrap();
+    }).await.expect("32 concurrent ACP prompts and Host shutdown");
 }
 
 #[tokio::test]

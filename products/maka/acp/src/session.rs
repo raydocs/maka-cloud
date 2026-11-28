@@ -34,7 +34,7 @@ use std::{
     },
     time::Duration,
 };
-use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, RwLock, RwLockWriteGuard};
 use tokio_util::sync::CancellationToken;
 pub(crate) struct Setup {
     pub id: String,
@@ -44,7 +44,7 @@ pub(crate) struct Setup {
 #[derive(Default)]
 pub(crate) struct Registry {
     sessions: Mutex<HashMap<String, Arc<Session>>>,
-    creation: AsyncMutex<()>,
+    lifecycle: RwLock<()>,
 }
 pub(crate) struct Session {
     pub id: String,
@@ -98,7 +98,7 @@ impl Registry {
     }
     /// The caller supplies the shutdown deadline; retain every gate until drained.
     pub async fn drained(&self) -> Result<(), Error> {
-        let _creation = self.creation.lock().await;
+        let _lifecycle = self.lifecycle.write().await;
         let sessions: Vec<_> = self.sessions.lock().unwrap().values().cloned().collect();
         let mut guards = Vec::with_capacity(sessions.len());
         for session in sessions {
@@ -127,7 +127,9 @@ impl Registry {
         servers: Vec<maka_agent_facts::configuration::mcp::ServerConfiguration>,
     ) -> Result<Setup, Error> {
         let cwd = list::directory(cwd)?;
-        let _creation = self.creation.lock().await;
+        // A new Host ID may become visible to resume before it is published
+        // locally. Other creates have independent IDs and can proceed.
+        let _lifecycle = self.lifecycle.read().await;
         if peer.stop.is_cancelled() {
             return Err("ACP transport closed".into());
         }
@@ -148,14 +150,14 @@ impl Registry {
         Ok(Setup { id, options })
     }
     pub async fn resuming(&self, id: String) -> Resume<'_> {
-        let creation = self.creation.lock().await;
+        let lifecycle = self.lifecycle.write().await;
         let existing = self.sessions.lock().unwrap().get(&id).cloned();
         let local = existing.unwrap_or_else(|| Session::new(id));
         let paused = local.pause_following().await;
         Resume {
             registry: self,
             local,
-            _creation: creation,
+            _lifecycle: lifecycle,
             _paused: paused,
         }
     }
@@ -164,7 +166,7 @@ impl Registry {
 pub(crate) struct Resume<'a> {
     registry: &'a Registry,
     local: Arc<Session>,
-    _creation: tokio::sync::MutexGuard<'a, ()>,
+    _lifecycle: RwLockWriteGuard<'a, ()>,
     _paused: Option<OwnedMutexGuard<()>>,
 }
 
@@ -254,7 +256,7 @@ impl Registry {
         list::read(client, cwd, cursor).await
     }
     pub async fn close(&self, id: &str) -> Result<(), Error> {
-        let _creation = self.creation.lock().await;
+        let _lifecycle = self.lifecycle.write().await;
         let id = id.to_owned();
         let session = self
             .sessions

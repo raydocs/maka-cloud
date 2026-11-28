@@ -367,12 +367,14 @@ impl Owner {
         }
         let owner = self.clone();
         self.producers.spawn(async move {
-            let mut changes = owner.store.subscribe_changes();
-            let mut run_changes = match owner.durable.subscribe() {
+            let mut changes = match owner.store.subscribe_control_changes() {
                 Ok(changes) => changes,
                 Err(error) => { eprintln!("Scheduled tasks: {error}"); return; }
             };
+            let mut queue_changes = owner.store.subscribe_topic(maka_event_log::CommitTopic::Queue);
+            let mut physical_changes = owner.physical_changes();
             let mut recover = true;
+            let mut pending = false;
             let mut previous_error = None;
             let mut planned_wake: Option<i64> = None;
             let mut retries = BTreeMap::new();
@@ -383,7 +385,8 @@ impl Owner {
                     return;
                 }
                 changes.borrow_and_update();
-                run_changes.borrow_and_update();
+                queue_changes.borrow_and_update();
+                physical_changes.borrow_and_update();
                 let at = now() as i64;
                 recover |= planned_wake.is_some_and(|due| at.saturating_sub(due) > 60_000);
                 let Some(producer) = owner.producer().await else {
@@ -391,8 +394,9 @@ impl Owner {
                 };
                 if storage_retry.is_none_or(|retry: Retry| retry.ready(Instant::now())) {
                     let error = match owner.tick_schedules(recover, &mut retries, &mut scripts).await {
-                        Ok((next, error)) => {
+                        Ok((next, has_pending, error)) => {
                             planned_wake = next;
+                            pending = has_pending;
                             recover = false;
                             storage_retry = None;
                             error
@@ -419,7 +423,8 @@ impl Owner {
                         scripts.completed = checked;
                     },
                     changed = changes.changed() => if changed.is_err() { return; },
-                    changed = run_changes.changed() => if changed.is_err() { return; },
+                    changed = queue_changes.changed(), if pending => if changed.is_err() { return; },
+                    changed = physical_changes.changed(), if pending => if changed.is_err() { return; },
                     () = async {
                         if let Some(at) = planned_wake.filter(|_| storage_retry.is_none()) {
                             tokio::time::sleep(Duration::from_millis((at as u64).saturating_sub(now()))).await;
@@ -439,7 +444,7 @@ impl Owner {
         recover: bool,
         retries: &mut BTreeMap<String, FireRetry>,
         scripts: &mut ScriptChecks,
-    ) -> Result<(Option<i64>, Option<String>), String> {
+    ) -> Result<(Option<i64>, bool, Option<String>), String> {
         let _gate = self.scheduler.gate.lock().await;
         let loaded_at = now() as i64;
         let mut catalog = self.scheduler.load_ready(loaded_at).await?;
@@ -594,7 +599,11 @@ impl Owner {
             }
         }
         retries.retain(|id, _| catalog.ready.pending.contains(id));
-        Ok((catalog.ready.next_after(loaded_at), dispatch_error))
+        Ok((
+            catalog.ready.next_after(loaded_at),
+            !catalog.ready.pending.is_empty(),
+            dispatch_error,
+        ))
     }
     async fn dispatch_scheduled(
         self: &Arc<Self>,

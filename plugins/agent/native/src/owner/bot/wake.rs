@@ -193,9 +193,16 @@ impl Owner {
         }
         let owner = self.clone();
         self.background(move |stop| async move {
-            let mut commits = owner.store.subscribe_changes();
+            use maka_event_log::CommitTopic;
+
+            let mut commits = owner.store.subscribe_topic(CommitTopic::BotWatches);
+            let mut runs = owner.store.subscribe_topic(CommitTopic::RunFinished);
+            let mut registration = owner.bot_changes();
             let mut previous_error = None;
             loop {
+                commits.borrow_and_update();
+                runs.borrow_and_update();
+                registration.borrow_and_update();
                 if stop.is_cancelled() {
                     return;
                 }
@@ -219,15 +226,16 @@ impl Owner {
                 }
                 tokio::select! {
                     () = stop.cancelled() => return,
-                    () = tokio::time::sleep(POLL) => {},
+                    () = tokio::time::sleep(POLL), if owner.bot.session().is_some() || previous_error.is_some() => {},
                     result = commits.changed() => if result.is_err() { return; },
+                    result = runs.changed(), if owner.bot.session().is_some() => if result.is_err() { return; },
+                    result = registration.changed() => if result.is_err() { return; },
                 }
-                // Coalesce streaming writes into one pass.
+                // Coalesce a burst of completed worker runs.
                 tokio::select! {
                     () = stop.cancelled() => return,
                     () = tokio::time::sleep(Duration::from_millis(250)) => {},
                 }
-                commits.borrow_and_update();
             }
         });
     }

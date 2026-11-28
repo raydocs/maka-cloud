@@ -61,6 +61,7 @@ pub struct Notification {
     material_released: bool,
     sessions: BTreeSet<String>,
     metadata_scopes: BTreeSet<String>,
+    topics: BTreeSet<crate::CommitTopic>,
 }
 impl Notification {
     pub const NONE: Self = Self {
@@ -69,6 +70,7 @@ impl Notification {
         material_released: false,
         sessions: BTreeSet::new(),
         metadata_scopes: BTreeSet::new(),
+        topics: BTreeSet::new(),
     };
     pub const METADATA: Self = Self {
         metadata: true,
@@ -76,6 +78,7 @@ impl Notification {
         material_released: false,
         sessions: BTreeSet::new(),
         metadata_scopes: BTreeSet::new(),
+        topics: BTreeSet::new(),
     };
     pub const MATERIAL_RELEASED: Self = Self {
         metadata: false,
@@ -83,6 +86,7 @@ impl Notification {
         material_released: true,
         sessions: BTreeSet::new(),
         metadata_scopes: BTreeSet::new(),
+        topics: BTreeSet::new(),
     };
     pub fn metadata_scope(scope: String) -> Self {
         Self {
@@ -98,6 +102,10 @@ impl Notification {
         self.sessions.extend(sessions);
         self
     }
+    pub fn with_topic(mut self, topic: crate::CommitTopic) -> Self {
+        self.topics.insert(topic);
+        self
+    }
     /// Union every invalidation channel when pure statements share one receipt.
     pub fn combine(mut self, other: Self) -> Self {
         self.metadata |= other.metadata;
@@ -105,6 +113,7 @@ impl Notification {
         self.material_released |= other.material_released;
         self.sessions.extend(other.sessions);
         self.metadata_scopes.extend(other.metadata_scopes);
+        self.topics.extend(other.topics);
         self
     }
     fn publish(self, notice: &crate::commits::CommitNotice) {
@@ -115,6 +124,9 @@ impl Notification {
         }
         for scope in self.metadata_scopes {
             notice.metadata_scope(&scope);
+        }
+        for topic in self.topics {
+            notice.topic(topic);
         }
         if self.activation {
             notice.activations();

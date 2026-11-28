@@ -75,6 +75,7 @@ type MountedIdentity = (u64, u64);
 /// Owns the durable root lease. It cannot be cloned or fabricated.
 pub struct RootOwner {
     capability_changes: tokio::sync::watch::Sender<()>,
+    control_changes: tokio::sync::watch::Sender<()>,
     pub(crate) operation_live: std::sync::Arc<crate::applications::operations::LiveOperations>,
     canonical_path: PathBuf,
     marker: Marker,
@@ -165,6 +166,15 @@ impl RootOwner {
     pub fn capability_source_changed(&self) {
         self.capability_changes.send_modify(|_| {});
     }
+    pub(crate) fn control_changes(&self) -> tokio::sync::watch::Receiver<()> {
+        self.control_changes.subscribe()
+    }
+    /// Invalidate readers of Root authority and bindings. Physical capacity
+    /// changes use the capability channel alone.
+    pub fn control_source_changed(&self) {
+        self.control_changes.send_replace(());
+        self.capability_source_changed();
+    }
     /// Initialize a nonexistent or empty disposable directory. Never adopt existing state.
     pub fn create(path: &Path, namespaces: &RootNamespaces) -> io::Result<Self> {
         let path = prepare_directory(path)?;
@@ -235,6 +245,7 @@ impl RootOwner {
             open_verified_marker(&marker_path, &marker)?;
         Ok(Self {
             capability_changes: tokio::sync::watch::channel(()).0,
+            control_changes: tokio::sync::watch::channel(()).0,
             operation_live: std::sync::Arc::new(
                 crate::applications::operations::LiveOperations::default(),
             ),
@@ -275,12 +286,18 @@ impl RootOwner {
 
     /// Call before root mutations. Detect path rebinding, marker replacement and lease unlinking.
     pub fn validate_current(&self) -> io::Result<()> {
-        self.check_directory()?;
-        self.check_marker()?;
-        if directory_identity(&self.canonical_path)? != self.mounted_identity {
-            return Err(io::Error::other("root directory identity changed"));
+        let result = (|| {
+            self.check_directory()?;
+            self.check_marker()?;
+            if directory_identity(&self.canonical_path)? != self.mounted_identity {
+                return Err(io::Error::other("root directory identity changed"));
+            }
+            self.validate_leases()
+        })();
+        if result.is_err() {
+            self.control_changes.send_replace(());
         }
-        self.validate_leases()
+        result
     }
 
     /// Verify a captured directory before using it for domain data. Checking

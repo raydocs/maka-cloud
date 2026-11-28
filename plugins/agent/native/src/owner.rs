@@ -785,7 +785,6 @@ impl Owner {
     fn physical_availability_changed_after(&self, probe_authority: bool) {
         self.physical_changes.send_modify(|_| {});
         self.goals.execution_changed();
-        self.scheduler.execution_changed();
         // A retired business probe can unblock cleanup without changing authority.
         self.wake_notify.notify_one();
         if probe_authority && let Ok(root) = self.store.owned_root() {

@@ -33,16 +33,37 @@ use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
 pub(crate) struct CaptureArena(Arc<Inner>);
+// The optional prefix follows the request's own staging and active envelopes.
+const RESIDENT_PREFIX_BYTES: usize = 1024 * 1024;
+const INLINE_COPY_BYTES: usize = 32 * 1024;
+
 pub(crate) struct ArenaAppend {
     arena: CaptureArena,
     _sequence: tokio::sync::OwnedMutexGuard<()>,
 }
 impl ArenaAppend {
+    pub async fn position(&self) -> io::Result<u64> {
+        self.arena.position().await
+    }
+
     pub async fn with_writer<T: Send + 'static>(
         &self,
         write: impl FnOnce(&mut RequestBackingBuilder) -> io::Result<T> + Send + 'static,
     ) -> io::Result<T> {
         self.arena.write_job(write).await
+    }
+
+    pub async fn write_buffer(
+        &self,
+        buffer: ChargedBuffer,
+        used: usize,
+    ) -> io::Result<ChargedBuffer> {
+        self.arena
+            .bounded_job(used, used, move |writer| {
+                writer.write_all(&buffer.as_ref()[..used])?;
+                Ok(buffer)
+            })
+            .await
     }
 }
 pub(crate) fn source_metadata_bytes(count: usize) -> io::Result<usize> {
@@ -64,12 +85,36 @@ impl CaptureArena {
         2 * std::mem::size_of::<usize>()
             + std::mem::size_of::<Inner>()
             + 2 * std::mem::size_of::<usize>()
-            + RequestBackingBuilder::metadata_bytes()
             + PreparationIo::metadata_bytes()
             + 2 * std::mem::size_of::<usize>()
             + std::mem::size_of::<tokio::sync::Mutex<()>>()
             + 2 * std::mem::size_of::<usize>()
             + std::mem::size_of::<tokio::sync::Mutex<()>>()
+    }
+
+    pub(crate) fn reserve_prefix(
+        preparation: &super::preparation::RequestPreparation,
+        resources: &maka_model::ModelPreparationResources,
+    ) -> io::Result<Option<maka_model::DirectoryLease>> {
+        let policy = resources.policy();
+        let capacity = RESIDENT_PREFIX_BYTES
+            .min(policy.staging_bytes / 32)
+            .min(policy.resident_bytes / 32);
+        if capacity == 0 {
+            return Ok(None);
+        }
+        match preparation.plan_directory(capacity) {
+            Ok(lease) => Ok(Some(lease)),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::InvalidInput
+                ) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub async fn new(
@@ -86,17 +131,12 @@ impl CaptureArena {
             access: Arc::new(tokio::sync::Mutex::new(())),
         });
         let worker = inner.clone();
-        io.with_local_io(move || {
-            let builder = match resident {
-                Some(lease) => RequestBackingBuilder::resident(worker.io.clone(), lease)?,
-                None => RequestBackingBuilder::file(
-                    worker.io.clone(),
-                    worker
-                        .io
-                        .reserve_local_resource()
-                        .map_err(io::Error::other)?,
-                )?,
-            };
+        io.with_root_io(move || {
+            let resource = worker
+                .io
+                .reserve_local_resource()
+                .map_err(io::Error::other)?;
+            let builder = RequestBackingBuilder::file(worker.io.clone(), resident, resource)?;
             *worker.builder.lock().expect("capture arena lock poisoned") = Some(builder);
             Ok(())
         })
@@ -145,15 +185,71 @@ impl CaptureArena {
         &self,
         write: impl FnOnce(&mut RequestBackingBuilder) -> io::Result<T> + Send + 'static,
     ) -> io::Result<T> {
+        self.bounded_job(0, usize::MAX, write).await
+    }
+
+    pub(super) async fn with_bounded_writer<T: Send + 'static>(
+        &self,
+        growth: usize,
+        bytes: usize,
+        write: impl FnOnce(&mut RequestBackingBuilder) -> io::Result<T> + Send + 'static,
+    ) -> io::Result<T> {
+        let _serial = self.0.serial.lock().await;
+        self.bounded_job(growth, bytes, write).await
+    }
+
+    async fn bounded_job<T: Send + 'static>(
+        &self,
+        growth: usize,
+        bytes: usize,
+        operation: impl FnOnce(&mut RequestBackingBuilder) -> io::Result<T> + Send + 'static,
+    ) -> io::Result<T> {
         let access = self.0.access.clone().lock_owned().await;
+        if bytes <= INLINE_COPY_BYTES
+            && let Some(builder) = self
+                .0
+                .builder
+                .lock()
+                .expect("capture arena lock poisoned")
+                .as_mut()
+            && builder.fits_resident(growth)
+        {
+            return operation(builder);
+        }
         let arena = self.clone();
         self.0
             .io
             .with_local_io(move || {
                 let _access = access;
-                arena.with_writer_sync(write)
+                arena.with_writer_sync(operation)
             })
             .await
+    }
+
+    pub(crate) async fn position(&self) -> io::Result<u64> {
+        let _access = self.0.access.lock().await;
+        self.0
+            .builder
+            .lock()
+            .expect("capture arena lock poisoned")
+            .as_ref()
+            .map(RequestBackingBuilder::position)
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::BrokenPipe, "capture arena is not writable")
+            })
+    }
+
+    pub(crate) async fn resident_capacity(&self) -> io::Result<usize> {
+        let _access = self.0.access.lock().await;
+        self.0
+            .builder
+            .lock()
+            .expect("capture arena lock poisoned")
+            .as_ref()
+            .map(RequestBackingBuilder::resident_capacity)
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::BrokenPipe, "capture arena is not writable")
+            })
     }
 
     /// Internal fixed metadata reads may run while an append sequence consumes
@@ -163,7 +259,7 @@ impl CaptureArena {
         offset: u64,
         owner: Arc<dyn Send + Sync>,
     ) -> io::Result<[u8; N]> {
-        self.write_job(move |builder| {
+        self.bounded_job(0, N, move |builder| {
             let _owner = owner;
             let mut bytes = [0; N];
             builder.read_exact_at(offset, &mut bytes)?;
@@ -179,7 +275,7 @@ impl CaptureArena {
         cancellation: &CancellationToken,
     ) -> io::Result<Range<u64>> {
         let append = self.begin_append().await;
-        let start = append.with_writer(|builder| Ok(builder.position())).await?;
+        let start = append.position().await?;
         let mut cursor = source.open(budget.clone());
         let mut buffer = budget.allocate(32 * 1024).await?;
         loop {
@@ -191,12 +287,7 @@ impl CaptureArena {
             let read = cursor.read_chunk(buffer).await?;
             let used = read.bytes_read;
             let eof = read.eof;
-            buffer = append
-                .with_writer(move |builder| {
-                    builder.write_all(&read.buffer.as_ref()[..used])?;
-                    Ok(read.buffer)
-                })
-                .await?;
+            buffer = append.write_buffer(read.buffer, used).await?;
             if eof {
                 break;
             }
@@ -207,7 +298,7 @@ impl CaptureArena {
                 ));
             }
         }
-        let end = append.with_writer(|builder| Ok(builder.position())).await?;
+        let end = append.position().await?;
         Ok(start..end)
     }
 
@@ -234,7 +325,7 @@ impl CaptureArena {
         let arena = self.clone();
         self.0
             .io
-            .with_local_io(move || {
+            .with_root_io(move || {
                 let _access = access;
                 let length = arena.with_writer_sync(RequestBackingBuilder::seal_prefix)?;
                 arena.0.published.store(length, Ordering::Release);
@@ -243,26 +334,12 @@ impl CaptureArena {
             .await
     }
 
-    /// Caller has established that this request intrinsically exceeds resident policy.
+    /// Spill a backing explicitly when the caller needs file capacity.
     pub async fn promote_to_file(&self) -> io::Result<()> {
-        let _serial = self.0.serial.lock().await;
-        let access = self.0.access.clone().lock_owned().await;
-        let arena = self.clone();
-        self.0
-            .io
-            .with_local_io(move || {
-                let _access = access;
-                arena.with_writer_sync(|builder| {
-                    let resource = arena
-                        .0
-                        .io
-                        .reserve_local_resource()
-                        .map_err(io::Error::other)?;
-                    builder.promote_to_file(resource)
-                })
-            })
+        self.with_writer(RequestBackingBuilder::promote_to_file)
             .await
     }
+
     pub async fn close(&self) -> io::Result<()> {
         let _serial = self.0.serial.lock().await;
         let access = self.0.access.clone().lock_owned().await;
@@ -351,13 +428,6 @@ struct Cursor {
 impl ByteCursor for Cursor {
     fn read_chunk(&mut self, buffer: ChargedBuffer) -> ReadSource<'_> {
         Box::pin(async move {
-            let access = self.arena.0.access.clone().lock_owned().await;
-            if !self.inspection && self.range.end > self.arena.0.published.load(Ordering::Acquire) {
-                return Err(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "capture arena range is not published",
-                ));
-            }
             let available = usize::try_from(self.range.end - self.range.start - self.position)
                 .unwrap_or(usize::MAX)
                 .min(buffer.as_ref().len());
@@ -369,15 +439,18 @@ impl ByteCursor for Cursor {
             }
             let offset = self.range.start + self.position;
             let arena = self.arena.clone();
+            let end = self.range.end;
+            let inspection = self.inspection;
             let buffer = self
                 .arena
-                .0
-                .io
-                .with_local_io(move || {
-                    let _access = access;
-                    arena.with_writer_sync(|builder| {
-                        builder.read_buffer_at(offset, buffer, available, ())
-                    })
+                .bounded_job(0, available, move |builder| {
+                    if !inspection && end > arena.0.published.load(Ordering::Acquire) {
+                        return Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            "capture arena range is not published",
+                        ));
+                    }
+                    builder.read_buffer_at(offset, buffer, available, ())
                 })
                 .await?;
             self.position += available as u64;

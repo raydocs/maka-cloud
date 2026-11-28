@@ -161,6 +161,7 @@ async fn arm(
             vec![],
         )
         .await?;
+    owner.goals.written();
     Ok(())
 }
 

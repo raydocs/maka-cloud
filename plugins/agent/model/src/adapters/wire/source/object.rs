@@ -18,7 +18,7 @@
  */
 
 //! Provider object fields with finite replacements and a forward opaque-field cursor.
-use super::{FragmentSequence, SourceFragment as F, quoted};
+use super::{FragmentList, FragmentSequence, SourceFragment as F};
 use bytes::Bytes;
 use maka_agent_facts::model::prompt_source::source::{
     ByteCursor, ByteSource, ChargedBuffer, JsonSource, ReadSource, SourceBudget, SourceBytes,
@@ -116,11 +116,11 @@ pub(super) fn plan(
 }
 #[derive(Clone, Copy)]
 enum Phase {
+    Open,
     Base,
     Original,
     Append,
     Finals,
-    Close,
     Done,
 }
 impl ByteSource for Object {
@@ -135,17 +135,12 @@ impl ByteSource for Object {
             overlay: self.overlay,
             budget,
             cursor: None,
-            initialized: false,
-            phase: if self.overlay {
-                Phase::Base
-            } else {
-                Phase::Original
-            },
+            phase: Phase::Open,
             index: 0,
             seen: vec![false; self.fields.len()],
             final_seen: vec![false; self.finals.len()],
             selected: Vec::new(),
-            active: Some(FragmentSequence::new(Arc::from([F::literal(b"{")]))),
+            active: None,
             first: true,
         })
     }
@@ -157,27 +152,80 @@ struct Cursor {
     overlay: bool,
     budget: Arc<dyn SourceBudget>,
     cursor: Option<ObjectCursor>,
-    initialized: bool,
     phase: Phase,
     index: usize,
     seen: Vec<bool>,
     final_seen: Vec<bool>,
     selected: Vec<Option<JsonSource>>,
-    active: Option<FragmentSequence>,
+    active: Option<FragmentSequence<FieldFragments>>,
     first: bool,
 }
-fn key(name: &'static str) -> TextSource {
-    TextSource::new(
-        SourceBytes::Inline(Bytes::from_static(name.as_bytes())),
-        TextEncoding::Utf8,
-    )
+enum FieldKey {
+    Static(&'static str),
+    Original(JsonSource),
+}
+
+enum FieldValue {
+    Planned(Arc<[F]>),
+    Original(F),
+}
+
+struct FieldFragments {
+    key: F,
+    value: FieldValue,
+    comma: bool,
+    quote_key: bool,
+}
+
+static COMMA: F = F::Literal(Bytes::from_static(b","));
+static QUOTE: F = F::Literal(Bytes::from_static(b"\""));
+static COLON: F = F::Literal(Bytes::from_static(b":"));
+static EMPTY: F = F::Literal(Bytes::from_static(b""));
+
+impl FieldFragments {
+    fn new(comma: bool, key: FieldKey, value: FieldValue) -> Self {
+        let (key, quote_key) = match key {
+            FieldKey::Static(name) => {
+                let bytes = name.as_bytes();
+                let key = if json::plain_prefix(bytes) == bytes.len() {
+                    F::literal(bytes)
+                } else {
+                    F::Text(TextSource::new(
+                        SourceBytes::Inline(Bytes::from_static(bytes)),
+                        TextEncoding::Utf8,
+                    ))
+                };
+                (key, true)
+            }
+            FieldKey::Original(source) => (F::Raw(source), false),
+        };
+        Self {
+            key,
+            value,
+            comma,
+            quote_key,
+        }
+    }
+}
+
+impl FragmentList for FieldFragments {
+    fn get(&self, index: usize) -> Option<&F> {
+        Some(match index {
+            0 if self.comma => &COMMA,
+            1 | 3 if self.quote_key => &QUOTE,
+            0 | 1 | 3 => &EMPTY,
+            2 => &self.key,
+            4 => &COLON,
+            index => match &self.value {
+                FieldValue::Planned(fragments) => return fragments.get(index - 5),
+                FieldValue::Original(fragment) if index == 5 => fragment,
+                FieldValue::Original(_) => return None,
+            },
+        })
+    }
 }
 impl Cursor {
     async fn initialize(&mut self) -> io::Result<()> {
-        if self.initialized {
-            return Ok(());
-        }
-        self.initialized = true;
         if let Some(source) = &self.source {
             if self.overlay {
                 let names: Vec<&str> = self.fields.iter().map(|field| field.name).collect();
@@ -191,7 +239,7 @@ impl Cursor {
         }
         Ok(())
     }
-    async fn next_field(&mut self) -> io::Result<Option<(Vec<F>, Arc<[F]>)>> {
+    async fn next_field(&mut self) -> io::Result<Option<(FieldKey, FieldValue)>> {
         loop {
             match self.phase {
                 Phase::Base => {
@@ -205,13 +253,13 @@ impl Cursor {
                             .find(|(_, last)| last.name == field.name);
                         let value = if let Some((index, last)) = final_field {
                             self.final_seen[index] = true;
-                            last.value.clone()
+                            FieldValue::Planned(last.value.clone())
                         } else if let Some(Some(source)) = self.selected.get(index) {
-                            Arc::from([F::Raw(source.clone())])
+                            FieldValue::Original(F::Raw(source.clone()))
                         } else {
-                            field.value.clone()
+                            FieldValue::Planned(field.value.clone())
                         };
-                        return Ok(Some((quoted(key(field.name)), value)));
+                        return Ok(Some((FieldKey::Static(field.name), value)));
                     }
                     self.phase = Phase::Original;
                     self.index = 0;
@@ -232,9 +280,6 @@ impl Cursor {
                     };
                     if let Some((field, matching)) = field {
                         let source = self.source.as_ref().expect("object source cursor");
-                        let key_bytes = source.bytes().slice(field.key_range)?;
-                        let value_source =
-                            JsonSource::new(source.bytes().slice(field.value_range)?);
                         if self.overlay && matching.is_some_and(|index| index < self.fields.len()) {
                             continue;
                         }
@@ -242,15 +287,18 @@ impl Cursor {
                             matching.filter(|index| *index < self.fields.len())
                         {
                             self.seen[index] = true;
-                            self.fields[index].value.clone()
+                            FieldValue::Planned(self.fields[index].value.clone())
                         } else if let Some(index) = matching {
                             let index = index - self.fields.len();
                             self.final_seen[index] = true;
-                            self.finals[index].value.clone()
+                            FieldValue::Planned(self.finals[index].value.clone())
                         } else {
-                            Arc::from([F::Raw(value_source)])
+                            FieldValue::Original(F::Raw(source.slice(field.value_range)?))
                         };
-                        return Ok(Some((vec![F::Raw(JsonSource::new(key_bytes))], value)));
+                        return Ok(Some((
+                            FieldKey::Original(source.slice(field.key_range)?),
+                            value,
+                        )));
                     }
                     self.phase = if self.overlay {
                         Phase::Finals
@@ -264,7 +312,10 @@ impl Cursor {
                         let index = self.index;
                         self.index += 1;
                         if !self.seen[index] {
-                            return Ok(Some((quoted(key(field.name)), field.value.clone())));
+                            return Ok(Some((
+                                FieldKey::Static(field.name),
+                                FieldValue::Planned(field.value.clone()),
+                            )));
                         }
                     }
                     self.phase = Phase::Finals;
@@ -275,13 +326,15 @@ impl Cursor {
                         let index = self.index;
                         self.index += 1;
                         if !self.final_seen[index] {
-                            return Ok(Some((quoted(key(field.name)), field.value.clone())));
+                            return Ok(Some((
+                                FieldKey::Static(field.name),
+                                FieldValue::Planned(field.value.clone()),
+                            )));
                         }
                     }
-                    self.phase = Phase::Close;
                     return Ok(None);
                 }
-                Phase::Close | Phase::Done => return Ok(None),
+                Phase::Open | Phase::Done => unreachable!("only field phases select fields"),
             }
         }
     }
@@ -289,7 +342,6 @@ impl Cursor {
 impl ByteCursor for Cursor {
     fn read_chunk(&mut self, mut buffer: ChargedBuffer) -> ReadSource<'_> {
         Box::pin(async move {
-            self.initialize().await?;
             let mut written = 0;
             while written < buffer.as_mut().len() {
                 if let Some(active) = &mut self.active {
@@ -305,18 +357,25 @@ impl ByteCursor for Cursor {
                 if matches!(self.phase, Phase::Done) {
                     break;
                 }
-                if let Some((name, value)) = self.next_field().await? {
-                    let mut fragments = Vec::with_capacity(6 + value.len());
-                    if !self.first {
-                        fragments.push(F::literal(b","));
-                    }
+                if matches!(self.phase, Phase::Open) {
+                    self.initialize().await?;
+                    buffer.as_mut()[written] = b'{';
+                    written += 1;
+                    self.phase = if self.overlay {
+                        Phase::Base
+                    } else {
+                        Phase::Original
+                    };
+                } else if let Some((key, value)) = self.next_field().await? {
+                    self.active = Some(FragmentSequence::new(FieldFragments::new(
+                        !self.first,
+                        key,
+                        value,
+                    )));
                     self.first = false;
-                    fragments.extend(name);
-                    fragments.push(F::literal(b":"));
-                    fragments.extend(value.iter().cloned());
-                    self.active = Some(FragmentSequence::new(fragments.into()));
                 } else {
-                    self.active = Some(FragmentSequence::new(Arc::from([F::literal(b"}")])));
+                    buffer.as_mut()[written] = b'}';
+                    written += 1;
                     self.phase = Phase::Done;
                 }
             }

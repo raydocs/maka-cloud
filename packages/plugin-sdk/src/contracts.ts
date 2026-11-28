@@ -16247,6 +16247,25 @@ export const contracts: {
                     additionalProperties: false,
                     required: ['kind', 'sequence'],
                   },
+                  {
+                    description:
+                      'Start a live Text or Conversation window strictly after a raw-event fence.\nThe fence need not identify an event in this session.',
+                    type: 'object',
+                    properties: {
+                      kind: {
+                        type: 'string',
+                        const: 'after_event',
+                      },
+                      sequence: {
+                        type: 'integer',
+                        format: 'uint64',
+                        minimum: 0,
+                        maximum: 9007199254740991,
+                      },
+                    },
+                    additionalProperties: false,
+                    required: ['kind', 'sequence'],
+                  },
                 ],
               },
               HistoryRowAddress: {
@@ -26255,6 +26274,25 @@ export const contracts: {
                         type: 'integer',
                         format: 'uint64',
                         minimum: 1,
+                        maximum: 9007199254740991,
+                      },
+                    },
+                    additionalProperties: false,
+                    required: ['kind', 'sequence'],
+                  },
+                  {
+                    description:
+                      'Start a live Text or Conversation window strictly after a raw-event fence.\nThe fence need not identify an event in this session.',
+                    type: 'object',
+                    properties: {
+                      kind: {
+                        type: 'string',
+                        const: 'after_event',
+                      },
+                      sequence: {
+                        type: 'integer',
+                        format: 'uint64',
+                        minimum: 0,
                         maximum: 9007199254740991,
                       },
                     },

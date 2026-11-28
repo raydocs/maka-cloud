@@ -101,6 +101,7 @@ impl RootStore {
                 rusqlite::params![PACKAGE, entry.key, serde_json::to_string(&entry)?],
             )?;
             tx.commit().map_err(StoreError::CommitUnknown)?;
+            commits.topic(crate::CommitTopic::MessageCompletions);
             commits.metadata();
             Ok(())
         }).await
@@ -218,7 +219,10 @@ impl RootStore {
                     rusqlite::params![PACKAGE, key])?
             };
             tx.commit().map_err(StoreError::CommitUnknown)?;
-            if changed != 0 { commits.metadata(); }
+            if changed != 0 {
+                commits.topic(crate::CommitTopic::MessageCompletions);
+                commits.metadata();
+            }
             Ok(())
         }).await
     }
@@ -268,7 +272,12 @@ impl crate::writeback::Statement for RegisterCompletion {
         Ok(crate::writeback::Prepared {
             value: (),
             changed,
-            notification: crate::writeback::Notification::METADATA,
+            notification: if changed {
+                crate::writeback::Notification::METADATA
+                    .with_topic(crate::CommitTopic::MessageCompletions)
+            } else {
+                crate::writeback::Notification::NONE
+            },
         })
     }
     fn committed(_: ()) {}

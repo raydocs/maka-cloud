@@ -668,6 +668,22 @@ impl SessionHistory {
             .query(ViewAt(self.clone(), cut.clone(), run))
             .await
     }
+    /// Recover committed preview state for one attempt at the watch's cut.
+    pub async fn preview_evidence(
+        &self,
+        cut: &HistoryCut,
+        binding: &maka_agent_facts::model::assembly::AttemptBinding,
+    ) -> Result<Vec<HistoryItem>, StoreError> {
+        self.data
+            .query(PreviewEvidence {
+                namespace: self.namespace.clone(),
+                cut: cut.clone(),
+                run: binding.execution.run_id,
+                step: binding.step_id,
+                attempt: binding.attempt_id,
+            })
+            .await
+    }
     pub async fn tool_call(
         &self,
         cut: &HistoryCut,
@@ -1034,6 +1050,19 @@ impl Query for ViewAt {
     type Output = crate::fold::RunView;
     fn execute(self, c: &Connection) -> Result<Self::Output, StoreError> {
         sql::view_at(c, &self.0.namespace, &self.1, self.2, |_, _| {})
+    }
+}
+struct PreviewEvidence {
+    namespace: HistoryNamespace,
+    cut: HistoryCut,
+    run: RunId,
+    step: StepId,
+    attempt: ModelAttemptId,
+}
+impl Query for PreviewEvidence {
+    type Output = Vec<HistoryItem>;
+    fn execute(self, c: &Connection) -> Result<Self::Output, StoreError> {
+        sql::preview_evidence(c, &self)
     }
 }
 struct ExecutorViewAt(SessionHistory, HistoryCut, RunId, bool);

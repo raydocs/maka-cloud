@@ -29,15 +29,17 @@ impl Owner {
     pub(in crate::owner) fn start_goals(self: &Arc<Self>) {
         let owner = self.clone();
         self.producers.spawn(async move {
-            let mut changes = owner.store.subscribe_changes();
-            let mut run_changes = match owner.durable.subscribe() {
+            let mut changes = match owner.store.subscribe_control_changes() {
                 Ok(changes) => changes,
                 Err(error) => { eprintln!("Goal: {error}"); return; }
             };
+            let mut queue = owner.store.subscribe_topic(maka_event_log::CommitTopic::Queue);
+            let mut runs = owner.store.subscribe_topic(maka_event_log::CommitTopic::RunScheduling);
             let mut previous_error = None;
             loop {
                 changes.borrow_and_update();
-                run_changes.borrow_and_update();
+                queue.borrow_and_update();
+                runs.borrow_and_update();
                 let Some(producer) = owner.producer().await else {
                     return;
                 };
@@ -57,7 +59,8 @@ impl Owner {
                     () = owner.stop.cancelled() => return,
                     () = owner.goals.wake.notified() => {},
                     changed = changes.changed() => if changed.is_err() { return; },
-                    changed = run_changes.changed() => if changed.is_err() { return; },
+                    changed = queue.changed(), if owner.goals.keeps_host_awake() => if changed.is_err() { return; },
+                    changed = runs.changed(), if owner.goals.keeps_host_awake() => if changed.is_err() { return; },
                     () = async {
                         if let Some(at) = deadline {
                             tokio::time::sleep(Duration::from_millis(at.saturating_sub(now()))).await;
@@ -71,7 +74,7 @@ impl Owner {
         use maka_goal::goal::Scheduled;
         let _gate = self.goals.gate.lock().await;
         let index = self.goals.repository.schedule().await.map_err(reason)?;
-        let waiting = index
+        let waiting: Vec<_> = index
             .sessions
             .values()
             .filter_map(|entry| match entry {
@@ -79,11 +82,14 @@ impl Owner {
                 _ => None,
             })
             .collect();
-        let finished = self
-            .durable
-            .finished_or_stopped(self.run_owner(), waiting)
-            .await
-            .map_err(reason)?;
+        let finished = if waiting.is_empty() {
+            Default::default()
+        } else {
+            self.durable
+                .finished_or_stopped(self.run_owner(), waiting)
+                .await
+                .map_err(reason)?
+        };
         let mut errors = Vec::new();
         for (session, entry) in index.sessions {
             if self.stop.is_cancelled() {

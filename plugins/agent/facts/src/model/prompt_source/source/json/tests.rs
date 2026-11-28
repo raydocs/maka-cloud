@@ -32,10 +32,11 @@ impl SourceBudget for Budget {
         Box::pin(async move { Ok(ChargedBuffer::new(vec![0; minimum], ())) })
     }
 }
-struct Native(Bytes);
+struct Native(Bytes, usize);
 struct Cursor {
     bytes: Bytes,
     at: usize,
+    limit: usize,
 }
 impl ByteSource for Native {
     fn len(&self) -> Option<u64> {
@@ -45,6 +46,7 @@ impl ByteSource for Native {
         Box::new(Cursor {
             bytes: self.0.clone(),
             at: 0,
+            limit: self.1,
         })
     }
     fn slice(&self, range: Range<u64>) -> io::Result<Arc<dyn ByteSource>> {
@@ -53,18 +55,17 @@ impl ByteSource for Native {
         if start > end || end > self.0.len() {
             return Err(invalid("test range"));
         }
-        Ok(Arc::new(Self(self.0.slice(start..end))))
+        Ok(Arc::new(Self(self.0.slice(start..end), self.1)))
     }
 }
 impl ByteCursor for Cursor {
     fn read_chunk(&mut self, mut buffer: ChargedBuffer) -> ReadSource<'_> {
         Box::pin(async move {
-            // Every lexical token, Unicode sequence and escape crosses reads.
-            let count = usize::from(self.at < self.bytes.len());
-            if count != 0 {
-                buffer.as_mut()[0] = self.bytes[self.at];
-                self.at += 1;
-            }
+            let count = (self.bytes.len() - self.at)
+                .min(buffer.as_ref().len())
+                .min(self.limit);
+            buffer.as_mut()[..count].copy_from_slice(&self.bytes[self.at..self.at + count]);
+            self.at += count;
             Ok(SourceRead {
                 buffer,
                 bytes_read: count,
@@ -74,7 +75,7 @@ impl ByteCursor for Cursor {
     }
 }
 fn source(bytes: impl Into<Bytes>) -> JsonSource {
-    JsonSource::new(SourceBytes::Source(Arc::new(Native(bytes.into()))))
+    JsonSource::new(SourceBytes::Source(Arc::new(Native(bytes.into(), 1))))
 }
 fn run<T>(future: impl Future<Output = T>) -> T {
     let mut context = Context::from_waker(Waker::noop());
@@ -297,5 +298,56 @@ fn structure_walk_visits_nested_giant_leaf_only_once() {
             length,
             "nesting must not rescan the leaf"
         );
+    });
+}
+
+#[test]
+fn large_streamed_object_preserves_ranges_and_decoded_text_across_reads() {
+    run(async {
+        let budget: Arc<dyn SourceBudget> = Arc::new(Budget);
+        let header = r#"{"\u0061rtifact":{"text":""#;
+        let first = "a".repeat(32 * 1024 - header.len() - 2);
+        let second = "b".repeat(32 * 1024 - 4);
+        // The first read ends inside the emoji. The second ends inside the
+        // high surrogate escape. The nested value also spans multiple reads.
+        let raw = format!(
+            r#"{header}{first}🦀{second}\ud83d\ude00\n\",end","size":32768}},"tail":true}}"#
+        );
+        let value = JsonSource::new(SourceBytes::Source(Arc::new(Native(
+            Bytes::from(raw),
+            usize::MAX,
+        ))));
+
+        let found = fields(&value, &["artifact", "tail"], budget.clone())
+            .await
+            .unwrap();
+        let artifact = &found[0].as_ref().unwrap().source;
+        let tail = &found[1].as_ref().unwrap().source;
+        assert!(bool_value(tail, budget.clone()).await.unwrap());
+        let found = fields(artifact, &["text", "size"], budget.clone())
+            .await
+            .unwrap();
+        let text = found[0].as_ref().unwrap().text().unwrap();
+        assert_eq!(
+            u64_value(&found[1].as_ref().unwrap().source, budget.clone())
+                .await
+                .unwrap(),
+            32768
+        );
+
+        let expected = format!("{first}🦀{second}😀\n\",end");
+        assert!(text_eq(&text, &expected, budget.clone()).await.unwrap());
+        let literal = TextSource::new(
+            SourceBytes::Inline(Bytes::from(expected.clone())),
+            TextEncoding::Utf8,
+        );
+        assert!(
+            text_source_eq(&text, &literal, budget.clone())
+                .await
+                .unwrap()
+        );
+        use sha2::{Digest, Sha256};
+        let digest: [u8; 32] = Sha256::digest(expected.as_bytes()).into();
+        assert_eq!(text_digest(&text, budget).await.unwrap(), digest);
     });
 }

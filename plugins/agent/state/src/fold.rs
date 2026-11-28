@@ -799,10 +799,18 @@ impl RunView {
         )
     }
 
-    fn effects_accounted(&self) -> Result<(), StoreError> {
+    fn effects_accounted(
+        &self,
+        admitting_tool_in: Option<ModelAttemptId>,
+    ) -> Result<(), StoreError> {
         require(
             self.tools.values().all(|tool| {
                 !original_effect_unknown(tool)
+                    // A binding can precede the live worker's first receipt.
+                    // The driver recovers unowned originals before admitting siblings.
+                    || (admitting_tool_in == Some(tool.key.attempt)
+                        && tool.receipt.is_none()
+                        && !local_effect_unknown(tool))
                     || tool.outcome_unknown_accepted()
                     || self.blockers.values().any(|blocker| {
                         blocker.decision.as_ref().is_some_and(|decision| {
@@ -825,7 +833,7 @@ impl RunView {
         at: UnixMillis,
         except: Option<ModelAttemptId>,
     ) -> Result<(), StoreError> {
-        self.effects_accounted()?;
+        self.effects_accounted(None)?;
         require(
             self.attempts.iter().all(|(id, attempt)| {
                 Some(*id) == except
@@ -1266,7 +1274,7 @@ impl RunView {
                         }),
                     "transport fallback requires the original closed fresh frontier",
                 )?;
-                self.effects_accounted()?;
+                self.effects_accounted(None)?;
                 self.retry_safe()?;
                 self.retry_phase = *phase;
                 self.retry_streak = RetryStreak::FallbackTransitionPending { attempt: *attempt };
@@ -1679,7 +1687,7 @@ impl RunView {
                     self.current_attempt == Some(tool.attempt),
                     "retired model attempt cannot dispatch a new tool",
                 )?;
-                self.effects_accounted()?;
+                self.effects_accounted(Some(tool.attempt))?;
                 require(
                     !self.model_steered(tool.attempt),
                     "steered model attempt cannot dispatch a new tool",

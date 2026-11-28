@@ -20,7 +20,7 @@
 use crate::{fold::RunView, sql};
 use maka_agent_facts::durable::*;
 use maka_event_log::{
-    StoreError,
+    CommitTopic, StoreError,
     connection::Query,
     root_store::DataWriter,
     writeback::{Notification, Prepared, Statement},
@@ -345,6 +345,7 @@ impl RunSlot {
 }
 struct Ticket {
     run: RunId,
+    session: String,
     slot: Arc<RunSlot>,
     purpose: DriverPurpose,
     retirement: tokio_util::sync::CancellationToken,
@@ -695,6 +696,15 @@ impl Store {
     pub fn subscribe(&self) -> Result<tokio::sync::watch::Receiver<()>, StoreError> {
         self.data.subscribe_changes()
     }
+    pub fn subscribe_driver(
+        &self,
+        claim: &DriverClaim,
+    ) -> Result<maka_event_log::SessionSubscription, StoreError> {
+        if !Arc::ptr_eq(&self.domain.inner, claim.ticket.domain()) {
+            return Err(invalid("foreign driver claim"));
+        }
+        self.data.subscribe_session(&claim.ticket.session)
+    }
     pub async fn driver_frontier(&self, claim: &DriverClaim) -> Result<RunView, StoreError> {
         self.read_driver(claim, DriverRead::Execute).await
     }
@@ -823,6 +833,7 @@ impl Store {
         let slot = self.domain.inner.slot(run)?;
         let ticket = Arc::new(Ticket {
             run,
+            session: view.spec.session_id,
             slot: slot.clone(),
             purpose: DriverPurpose::Business,
             retirement: tokio_util::sync::CancellationToken::new(),
@@ -848,12 +859,13 @@ impl Store {
         {
             return Ok(None);
         }
-        match purpose {
+        let session = match purpose {
             DriverPurpose::Business => {
                 let view = self.frontier(run).await?;
                 if !matches!(view.spec.origin, RunOrigin::Local) || view.terminal.is_some() {
                     return Ok(None);
                 }
+                view.spec.session_id
             }
             DriverPurpose::LateExternalCleanup { task } => {
                 let view = self.data.query(ReadCleanup(run)).await?;
@@ -862,6 +874,7 @@ impl Store {
                 {
                     return Ok(None);
                 }
+                view.session_id
             }
             DriverPurpose::LateModelCleanup => {
                 let view = self.frontier(run).await?;
@@ -870,11 +883,13 @@ impl Store {
                 {
                     return Ok(None);
                 }
+                view.spec.session_id
             }
-        }
+        };
         let slot = self.domain.inner.slot(run)?;
         let ticket = Arc::new(Ticket {
             run,
+            session,
             slot: slot.clone(),
             purpose,
             retirement: retirement.child_token(),
@@ -1194,7 +1209,10 @@ impl Statement for Admit {
     type Output = Commit;
     fn execute(self, connection: &Connection) -> Result<Prepared<Commit>, StoreError> {
         let (value, changed) = sql::admit(connection, self.0)?;
-        let notification = sql::notification(connection, value.facts[0].run, changed)?;
+        let mut notification = sql::notification(connection, value.facts[0].run, changed)?;
+        if changed {
+            notification = notification.with_topic(CommitTopic::Queue);
+        }
         Ok(Prepared {
             value,
             changed,
@@ -1246,6 +1264,7 @@ impl Statement for Append {
             }
             _ => None,
         };
+        let steering = self.steering.is_some();
         let (value, changed) = sql::append(
             connection,
             self.run,
@@ -1258,7 +1277,39 @@ impl Statement for Append {
             &self.mode,
             self.steering.as_ref(),
         )?;
-        let notification = sql::notification(connection, self.run, changed)?;
+        let mut notification = sql::notification(connection, self.run, changed)?;
+        if changed {
+            let finished = value.facts.iter().any(|fact| {
+                matches!(
+                    fact.fact,
+                    Fact::StopRequested { .. } | Fact::RunTerminated { .. }
+                )
+            });
+            if finished {
+                notification = notification.with_topic(CommitTopic::RunFinished);
+            }
+            if finished
+                || steering
+                || value
+                    .facts
+                    .iter()
+                    .any(|fact| matches!(fact.fact, Fact::ExternalSteering { .. }))
+            {
+                notification = notification.with_topic(CommitTopic::Queue);
+            }
+            // Streaming evidence cannot make a parked Run runnable or move a
+            // deadline. Publish other Run transitions for the recovery scheduler.
+            if value.facts.iter().any(|fact| {
+                !matches!(
+                    fact.fact,
+                    Fact::ModelObserved { .. }
+                        | Fact::ModelFirstTokenObserved { .. }
+                        | Fact::ExternalTaskObserved { .. }
+                )
+            }) {
+                notification = notification.with_topic(CommitTopic::RunScheduling);
+            }
+        }
         Ok(Prepared {
             value,
             changed,
@@ -1403,7 +1454,10 @@ impl Statement for Rebuild {
         Ok(Prepared {
             value: sql::rebuild(c, self.0)?,
             changed: true,
-            notification: sql::notification(c, self.0, true)?,
+            notification: sql::notification(c, self.0, true)?
+                .with_topic(CommitTopic::RunFinished)
+                .with_topic(CommitTopic::RunScheduling)
+                .with_topic(CommitTopic::Queue),
         })
     }
     fn committed(value: Head) -> Head {
@@ -1597,7 +1651,9 @@ impl Statement for StopRun {
         Ok(Prepared {
             value: StopOutcome::Requested { latest },
             changed,
-            notification: sql::notification(c, self.run, changed)?,
+            notification: sql::notification(c, self.run, changed)?
+                .with_topic(CommitTopic::RunFinished)
+                .with_topic(CommitTopic::Queue),
         })
     }
     fn committed(value: StopOutcome) -> StopOutcome {

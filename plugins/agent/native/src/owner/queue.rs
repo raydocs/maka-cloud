@@ -57,13 +57,12 @@ impl Owner {
 
     /// The SQL levels choose runnable work. Notices only invalidate that read.
     async fn schedule(self: Arc<Self>) {
-        let mut changes = match self.durable.subscribe() {
-            Ok(changes) => changes,
-            Err(error) => {
-                tracing::error!(%error, "Agent ready subscription failed");
-                return;
-            }
-        };
+        let mut queue = self
+            .store
+            .subscribe_topic(maka_event_log::CommitTopic::Queue);
+        let mut runs = self
+            .store
+            .subscribe_topic(maka_event_log::CommitTopic::RunScheduling);
         let root = match self.store.owned_root() {
             Ok(root) => root,
             Err(_) => return,
@@ -93,7 +92,8 @@ impl Owner {
         let mut cold_probe = true;
         let mut authority_due: Option<UnixMillis> = None;
         loop {
-            changes.borrow_and_update();
+            queue.borrow_and_update();
+            runs.borrow_and_update();
             if self.stop.is_cancelled() {
                 return;
             }
@@ -157,7 +157,8 @@ impl Owner {
                     if changed.is_err() { return; }
                     cause = ReadyCause::CapabilitySourceChanged;
                 },
-                changed = changes.changed() => if changed.is_err() { return; },
+                changed = queue.changed() => if changed.is_err() { return; },
+                changed = runs.changed() => if changed.is_err() { return; },
                 _ = self.wake_notify.notified() => {},
                 _ = admission_waits.next(), if !admission_waits.is_empty() => {},
                 _ = deadline => {

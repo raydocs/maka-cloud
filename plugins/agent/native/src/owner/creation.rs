@@ -316,6 +316,10 @@ where
                     let extra = extra.execute(connection)?;
                     changed |= extra.changed;
                     notification = notification.combine(extra.notification);
+                    if extra.changed {
+                        notification =
+                            notification.with_topic(maka_event_log::CommitTopic::BotWatches);
+                    }
                     if let Some(index) = index {
                         registration =
                             Some(bot::Registration::from_record(extra.value[index].clone())?);

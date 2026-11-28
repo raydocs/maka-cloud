@@ -2157,6 +2157,21 @@ async fn verify_capsule(bin: &Path, capsule_dir: &Path) {
             saw_session_data.load(Ordering::SeqCst),
             "post-upgrade Code Mode cell did not observe pre-upgrade SessionData"
         );
+        let pre_continuation_through = observed["through"].as_u64().unwrap();
+        let continuation_history = call(
+            &client,
+            "agent",
+            "history",
+            json!({"sessionId": manifest.primary_session_id,
+                "position":{"kind":"after_event","sequence":pre_continuation_through}}),
+            Attachments::new(),
+        )
+        .await;
+        let first = &continuation_history["chunks"][0];
+        assert_eq!(first["runId"], continuation_run_id);
+        assert_eq!(first["role"], "user");
+        assert_eq!(first["offset"], 0);
+        assert!(first["position"]["sequence"].as_u64().unwrap() > pre_continuation_through);
 
         let destination = dirs.workspace.join("post-upgrade-workspace");
         fs::create_dir_all(&destination).unwrap();

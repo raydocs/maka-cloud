@@ -94,7 +94,7 @@ impl StructureCursor {
         key_range: Option<Range<u64>>,
     ) -> io::Result<JsonStructureEvent> {
         self.reader.whitespace().await?;
-        let start = self.reader.position;
+        let start = self.reader.position();
         let (kind, state) = self.reader.begin_value().await?;
         let ordinal = self.next_ordinal;
         self.next_ordinal = self
@@ -137,7 +137,7 @@ impl StructureCursor {
             key_range,
             kind,
             start,
-            end: state.is_none().then_some(self.reader.position),
+            end: state.is_none().then_some(self.reader.position()),
         }))
     }
     pub async fn next(&mut self) -> io::Result<Option<JsonStructureEvent>> {
@@ -158,17 +158,17 @@ impl StructureCursor {
             let mut frame = self.frame();
             match frame.state {
                 0 | 1 => {
-                    if frame.state == 0 && self.reader.peek().await? == Some(b'}') {
-                        self.reader.take().await?;
+                    if frame.state == 0 && self.reader.peek() == Some(b'}') {
+                        self.reader.advance(1);
                         self.depth -= 1;
                         return Ok(Some(JsonStructureEvent::End {
                             ordinal: frame.ordinal,
-                            end: self.reader.position,
+                            end: self.reader.position(),
                         }));
                     }
-                    let key_start = self.reader.position;
+                    let key_start = self.reader.position();
                     self.reader.string().await?;
-                    let key_end = self.reader.position;
+                    let key_end = self.reader.position();
                     self.reader.whitespace().await?;
                     self.reader.expect(b':').await?;
                     let member = frame.member;
@@ -183,27 +183,29 @@ impl StructureCursor {
                         .await
                         .map(Some);
                 }
-                4 => match self.reader.byte().await? {
-                    b'}' => {
+                4 => match self.reader.peek() {
+                    Some(b'}') => {
+                        self.reader.advance(1);
                         self.depth -= 1;
                         return Ok(Some(JsonStructureEvent::End {
                             ordinal: frame.ordinal,
-                            end: self.reader.position,
+                            end: self.reader.position(),
                         }));
                     }
-                    b',' => {
+                    Some(b',') => {
+                        self.reader.advance(1);
                         frame.state = 1;
                         self.set_frame(frame);
                     }
                     _ => return Err(syntax("invalid JSON object separator")),
                 },
                 5 | 6 => {
-                    if frame.state == 5 && self.reader.peek().await? == Some(b']') {
-                        self.reader.take().await?;
+                    if frame.state == 5 && self.reader.peek() == Some(b']') {
+                        self.reader.advance(1);
                         self.depth -= 1;
                         return Ok(Some(JsonStructureEvent::End {
                             ordinal: frame.ordinal,
-                            end: self.reader.position,
+                            end: self.reader.position(),
                         }));
                     }
                     let member = frame.member;
@@ -218,15 +220,17 @@ impl StructureCursor {
                         .await
                         .map(Some);
                 }
-                7 => match self.reader.byte().await? {
-                    b']' => {
+                7 => match self.reader.peek() {
+                    Some(b']') => {
+                        self.reader.advance(1);
                         self.depth -= 1;
                         return Ok(Some(JsonStructureEvent::End {
                             ordinal: frame.ordinal,
-                            end: self.reader.position,
+                            end: self.reader.position(),
                         }));
                     }
-                    b',' => {
+                    Some(b',') => {
+                        self.reader.advance(1);
                         frame.state = 6;
                         self.set_frame(frame);
                     }

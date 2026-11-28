@@ -168,7 +168,7 @@ async fn public_init_persists_settings_from_stdin_and_rejects_reconfiguration() 
     let retire_deadline = Instant::now() + Duration::from_secs(15);
     let mut attempt = 0u32;
     loop {
-        if attempt % 8 == 0 {
+        if attempt.is_multiple_of(8) {
             let mut retire = Command::new(crate::maka_executable());
             retire.args(["host", "retire", "--root"]).arg(&root);
             #[cfg(unix)]

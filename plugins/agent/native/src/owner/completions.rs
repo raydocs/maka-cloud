@@ -471,32 +471,44 @@ impl Owner {
     pub(super) fn start_completion_notifications(self: &Arc<Self>) {
         let owner = self.clone();
         self.background(move |stop| async move {
-            let mut changes = owner.store.subscribe_changes();
+            use maka_event_log::CommitTopic;
+
+            let mut changes = owner.store.subscribe_topic(CommitTopic::MessageCompletions);
+            let mut queue = owner.store.subscribe_topic(CommitTopic::Queue);
+            let mut runs = owner.store.subscribe_topic(CommitTopic::RunFinished);
             loop {
+                changes.borrow_and_update();
+                queue.borrow_and_update();
+                runs.borrow_and_update();
                 if stop.is_cancelled() {
                     return;
                 }
                 let Some(producer) = owner.producer().await else {
                     return;
                 };
-                if let Err(error) = owner.deliver_completions().await {
-                    tracing::warn!(%error, "Session completion notification deferred");
-                }
+                let pending = match owner.deliver_completions().await {
+                    Ok(pending) => pending,
+                    Err(error) => {
+                        tracing::warn!(%error, "Session completion notification deferred");
+                        true
+                    }
+                };
                 drop(producer);
                 tokio::select! {
                     () = stop.cancelled() => return,
-                    () = tokio::time::sleep(Duration::from_secs(2)) => {},
+                    () = tokio::time::sleep(Duration::from_secs(2)), if pending => {},
                     result = changes.changed() => if result.is_err() { return; },
+                    result = queue.changed(), if pending => if result.is_err() { return; },
+                    result = runs.changed(), if pending => if result.is_err() { return; },
                 }
                 tokio::select! {
                     () = stop.cancelled() => return,
                     () = tokio::time::sleep(Duration::from_millis(250)) => {},
                 }
-                changes.borrow_and_update();
             }
         });
     }
-    pub(super) async fn deliver_completions(self: &Arc<Self>) -> Result<(), String> {
+    pub(super) async fn deliver_completions(self: &Arc<Self>) -> Result<bool, String> {
         self.deliver_completions_at(now()).await
     }
     /// Settle the completion notice for `(worker_session, run)` when `recipient` has already
@@ -610,7 +622,7 @@ impl Owner {
         Err("agent_queue_revision_conflict".into())
     }
     /// `now` decides which unanswered requests have passed the limit.
-    pub(super) async fn deliver_completions_at(self: &Arc<Self>, now: u64) -> Result<(), String> {
+    pub(super) async fn deliver_completions_at(self: &Arc<Self>, now: u64) -> Result<bool, String> {
         let mut after = None;
         let mut carry: Vec<Completion> = Vec::new();
         loop {
@@ -625,7 +637,7 @@ impl Owner {
             }
             carry.extend(entries);
             if carry.is_empty() {
-                return Ok(());
+                return Ok(after.is_some());
             }
             // Watches for the same (worker, recipient) are contiguous in key order; hold the
             // trailing pair until the next page confirms it is complete so pagination never
@@ -648,7 +660,7 @@ impl Owner {
             let batch: Vec<Completion> = carry.drain(..split).collect();
             self.deliver_completion_batch(batch, now).await?;
             if eof {
-                return Ok(());
+                return Ok(true);
             }
         }
     }

@@ -17,7 +17,7 @@
  * under the License.
  */
 
-use super::super::driver_cells::RunCells;
+use super::super::{driver_cells::RunCells, driver_model::PrepareStepFor};
 use super::*;
 use maka_agent_facts::{
     accounting::ModelEvidence,
@@ -79,6 +79,62 @@ fn at() -> UnixMillis {
             .try_into()
             .expect("Unix milliseconds"),
     )
+}
+
+#[tokio::test]
+async fn preview_evidence_keeps_an_observed_part_visible_at_its_original_cut() -> TestResult<()> {
+    let mut rig = Rig::new()?;
+    let session = rig.start().await?;
+    rig.assemble_model(
+        &session,
+        Budget {
+            tokens: None,
+            retries: 0,
+            deadline: None,
+        },
+        false,
+    )
+    .await?;
+    let driver = rig.driver.as_ref().unwrap();
+    let execution = driver.access.execution().clone();
+    let (request, attempt, _) = rig.record_model_request(Preparation::Initial).await?;
+    let binding = maka_agent_facts::model::assembly::AttemptBinding {
+        execution: execution.clone(),
+        step_id: request.step,
+        attempt_id: attempt,
+        purpose: ModelPurpose::Main,
+    };
+    let owner = &driver.owner;
+    let history = driver
+        .state
+        .session_history(owner.run_owner(), execution.session_id);
+    let before = history.capture().await?;
+    rig.tool(attempt, "exec", "preview-call", json!({"code":"1"}))
+        .await?;
+    let open = history.capture().await?;
+    rig.finish_model_request(attempt, None).await?;
+    let closed = history.capture().await?;
+
+    assert!(
+        history
+            .preview_evidence(&before, &binding)
+            .await?
+            .is_empty()
+    );
+    let parts = history.preview_evidence(&open, &binding).await?;
+    assert!(matches!(&parts[..], [part] if matches!(
+        &part.recorded.fact,
+        Fact::ModelObserved { index: 0, part: ModelPart::ToolCall { call }, .. }
+            if call.id == "preview-call"
+    )));
+    let closed = history.preview_evidence(&closed, &binding).await?;
+    assert!(matches!(
+        &closed[..],
+        [part, end] if part == &parts[0]
+            && matches!(end.recorded.fact, Fact::ModelClosed { attempt: id, .. } if id == attempt)
+    ));
+
+    Ok(())
 }
 
 fn package(
@@ -524,6 +580,7 @@ impl Rig {
                 "source",
                 "models",
                 "observe",
+                "watch",
                 "history",
                 "roomState",
                 "roomSearch",
@@ -983,6 +1040,7 @@ impl Rig {
             workers: workers.clone(),
             original_cleanup: Default::default(),
             conversation: Default::default(),
+            replay_cache: Default::default(),
             preview: tokio::sync::watch::channel(None).0,
         };
         self.ordinary = Some(effects::OriginalEffects::new(
@@ -1102,7 +1160,10 @@ impl Rig {
             .state
             .frontier(driver.access.execution().run_id)
             .await?;
-        let mut prepared = driver.model()?.prepare_step(&view, mode, driver).await?;
+        let mut prepared = driver
+            .model()?
+            .prepare_step(&view, mode, driver, PrepareStepFor::Publication)
+            .await?;
         let request = &prepared.request;
         let body = ContentBlob::json(request)?;
         prepared.contents.push(body.clone());
@@ -2458,7 +2519,12 @@ mod bounded_risk {
             summary_cut.current_step = None;
             let mut summary = driver
                 .model()?
-                .prepare_step(&summary_cut, Preparation::Summary, driver)
+                .prepare_step(
+                    &summary_cut,
+                    Preparation::Summary,
+                    driver,
+                    PrepareStepFor::Publication,
+                )
                 .await?;
             let summary_body = ContentBlob::json(&summary.request)?;
             summary.contents.push(summary_body.clone());
@@ -2533,6 +2599,7 @@ mod bounded_risk {
                     &view,
                     Preparation::ToolContinuation { attempt: later },
                     driver,
+                    PrepareStepFor::Publication,
                 )
                 .await?;
             let pending_body = ContentBlob::json(&pending.request)?;
@@ -5261,7 +5328,12 @@ mod model_recovery {
             let view = driver.state.frontier(run).await?;
             let mut prepared = driver
                 .model()?
-                .prepare_step(&view, Preparation::Initial, driver)
+                .prepare_step(
+                    &view,
+                    Preparation::Initial,
+                    driver,
+                    PrepareStepFor::Publication,
+                )
                 .await?;
             let step = prepared.request.step;
             let body = ContentBlob::json(&prepared.request)?;
@@ -8206,7 +8278,12 @@ async fn compacted_history_checks_the_producing_requests_original_cut() {
         rig.record_model_reply(Preparation::Initial, None).await?;
         let view = driver.state.frontier(run).await?;
         let mut main = model
-            .prepare_step(&view, Preparation::Initial, driver)
+            .prepare_step(
+                &view,
+                Preparation::Initial,
+                driver,
+                PrepareStepFor::Publication,
+            )
             .await?;
         let encoded = ContentBlob::json(&main.request)?;
         main.contents.push(encoded.clone());
@@ -8321,7 +8398,12 @@ async fn compacted_history_checks_the_producing_requests_original_cut() {
                 reader.finish().await?;
                 let view = driver.state.frontier(run).await?;
                 model
-                    .prepare_step(&view, Preparation::Initial, driver)
+                    .prepare_step(
+                        &view,
+                        Preparation::Initial,
+                        driver,
+                        PrepareStepFor::Publication,
+                    )
                     .await?;
             } else {
                 let error = published
@@ -8445,7 +8527,7 @@ async fn compaction_cancels_background_request_when_main_finishes() {
         let run = driver.access.execution().run_id;
         rig.record_model_reply(Preparation::Initial, None).await?;
         let view = driver.state.frontier(run).await?;
-        let mut main = driver.model()?.prepare_step(&view, Preparation::Initial, driver).await?;
+        let mut main = driver.model()?.prepare_step(&view, Preparation::Initial, driver, PrepareStepFor::Publication).await?;
         let body = ContentBlob::json(&main.request)?;
         main.contents.push(body.clone());
         rig.append(vec![Fact::StepPrepared {
@@ -8594,7 +8676,12 @@ async fn failed_background_summary_is_prepared_again_on_the_next_step() {
         let view = driver.state.frontier(run).await?;
         let mut main = driver
             .model()?
-            .prepare_step(&view, Preparation::Initial, driver)
+            .prepare_step(
+                &view,
+                Preparation::Initial,
+                driver,
+                PrepareStepFor::Publication,
+            )
             .await?;
         let body = ContentBlob::json(&main.request)?;
         main.contents.push(body.clone());
@@ -8722,7 +8809,7 @@ async fn interrupted_proactive_summary_with_active_model_wait_falls_back_to_fore
         let view = driver.state.frontier(run).await?;
         let mut main = driver
             .model()?
-            .prepare_step(&view, Preparation::Initial, driver)
+            .prepare_step(&view, Preparation::Initial, driver, PrepareStepFor::Publication)
             .await?;
         let body = ContentBlob::json(&main.request)?;
         main.contents.push(body.clone());
@@ -9029,7 +9116,7 @@ async fn compaction_checkpoint_survives_stop_and_is_used_by_the_next_message() {
         let run = driver.access.execution().run_id;
         rig.record_model_reply(Preparation::Initial, None).await?;
         let view = driver.state.frontier(run).await?;
-        let mut main = driver.model()?.prepare_step(&view, Preparation::Initial, driver).await?;
+        let mut main = driver.model()?.prepare_step(&view, Preparation::Initial, driver, PrepareStepFor::Publication).await?;
         let encoded = ContentBlob::json(&main.request)?;
         main.contents.push(encoded.clone());
         rig.append(vec![Fact::StepPrepared {
@@ -9119,7 +9206,12 @@ async fn setup_superseded_compaction_run(rig: &mut Rig) -> TestResult<Superseded
     let view = driver.state.frontier(run).await?;
     let mut pre_main = driver
         .model()?
-        .prepare_step(&view, Preparation::Initial, driver)
+        .prepare_step(
+            &view,
+            Preparation::Initial,
+            driver,
+            PrepareStepFor::Publication,
+        )
         .await?;
     let pre_main_body = ContentBlob::json(&pre_main.request)?;
     pre_main.contents.push(pre_main_body.clone());
@@ -9264,7 +9356,12 @@ async fn setup_superseded_compaction_run(rig: &mut Rig) -> TestResult<Superseded
     let view = driver.state.frontier(run).await?;
     let mut s2_prepared = driver
         .model()?
-        .prepare_step(&view, Preparation::Summary, driver)
+        .prepare_step(
+            &view,
+            Preparation::Summary,
+            driver,
+            PrepareStepFor::Publication,
+        )
         .await?;
     let s2_body = ContentBlob::json(&s2_prepared.request)?;
     s2_prepared.contents.push(s2_body.clone());
@@ -9582,6 +9679,7 @@ async fn compaction_resumes_with_steering_indexed_at_its_original_delivery() {
                     attempt: first_attempt,
                 },
                 driver,
+                PrepareStepFor::Publication,
             )
             .await?;
         let body = ContentBlob::json(&pending.request)?;

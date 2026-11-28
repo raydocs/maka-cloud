@@ -94,9 +94,16 @@ impl InteractionsStore {
     pub fn new(data: DataWriter) -> Self {
         Self { data }
     }
-    /// Subscribe before reading pending; notifications are hints, SQL is truth.
+    /// Live authority monitors also depend on cross-Session profile revocations.
     pub fn subscribe(&self) -> Result<tokio::sync::watch::Receiver<()>, StoreError> {
         self.data.subscribe_changes()
+    }
+    /// Subscribe before reading pending; notifications are hints, SQL is truth.
+    pub fn subscribe_session(
+        &self,
+        session: &str,
+    ) -> Result<maka_event_log::SessionSubscription, StoreError> {
+        self.data.subscribe_session(session)
     }
     pub async fn read(
         &self,
@@ -276,7 +283,7 @@ where
             outcome,
             self.caller.as_ref(),
         )?;
-        let prepared = prepared(value, changed, session);
+        let prepared = answer_prepared(value, changed, session);
         Ok(Prepared {
             value: (self.result)(prepared.value)?,
             changed: prepared.changed,
@@ -294,7 +301,7 @@ impl Statement for Answer {
     fn execute(self, c: &Connection) -> Result<Prepared<Self::Value>, StoreError> {
         let (value, changed) = sql::answer(c, &self.0, &self.1, self.2)?;
         let session = value.execution.session_id.clone();
-        Ok(prepared(value, changed, session))
+        Ok(answer_prepared(value, changed, session))
     }
     fn committed(value: Self::Value) -> Self::Output {
         value
@@ -311,6 +318,18 @@ fn rejection(error: &StoreError) -> bool {
             | StoreError::EventConflict
     )
 }
+
+fn answer_prepared<T>(value: T, changed: bool, session: String) -> Prepared<T> {
+    let mut answer = prepared(value, changed, session);
+    // An answer can commit the approval fact that makes a parked Run runnable.
+    if changed {
+        answer.notification = answer
+            .notification
+            .with_topic(maka_event_log::CommitTopic::RunScheduling);
+    }
+    answer
+}
+
 fn prepared<T>(value: T, changed: bool, session: String) -> Prepared<T> {
     Prepared {
         value,

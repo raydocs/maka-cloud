@@ -4551,6 +4551,10 @@ export type HistoryPosition =
   | {
       kind: 'event';
       sequence: number;
+    }
+  | {
+      kind: 'after_event';
+      sequence: number;
     };
 /**
  * A readable field in a conversation window, in presentation order.

@@ -33,7 +33,7 @@ pub async fn read(
     Ok(read_pages(
         |through, position| client.query("agent", "history", json!({"sessionId":session,"through":through,"position":position,"includeThinking":true})),
         through,
-        after.map_or(HistoryPosition::Start, |sequence| HistoryPosition::Event { sequence: sequence + 1 }),
+        after.map_or(HistoryPosition::Start, |sequence| HistoryPosition::AfterEvent { sequence }),
         None,
     ).await?.chunks)
 }
@@ -70,9 +70,7 @@ where
     read_pages(
         query,
         Some(through),
-        HistoryPosition::Event {
-            sequence: after + 1,
-        },
+        HistoryPosition::AfterEvent { sequence: after },
         None,
     )
     .await

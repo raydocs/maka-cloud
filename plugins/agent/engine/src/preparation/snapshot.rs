@@ -126,7 +126,8 @@ pub async fn snapshot_prompt(
         RunError::Internal("snapshot requires final source-backed prompt recipes".into())
     })?;
     let staging = staging(&resources, 0, cancellation).await?;
-    let arena = CaptureArena::new(io.clone(), None).await?;
+    let resident = CaptureArena::reserve_prefix(&staging.preparation, &resources)?;
+    let arena = CaptureArena::new(io.clone(), resident).await?;
     let media_capture = MediaCapture::new(io.clone(), staging.preparation.clone());
     let result = async {
         let mut builder = Builder::new_external_media(
@@ -135,8 +136,7 @@ pub async fn snapshot_prompt(
             resources.clone(),
             staging.preparation.clone(),
             cancellation.clone(),
-        )
-        .await?;
+        )?;
         let mut cursor = source.open(0);
         while let Some(message) = cursor.next().await? {
             check(cancellation)?;
@@ -283,6 +283,27 @@ pub enum ContentSource<'a> {
     Snapshot(&'a maka_agent_state::session_history::snapshot::Snapshot),
 }
 
+pub async fn verify_prompt_content(
+    resources: &ModelPreparationResources,
+    source: ContentSource<'_>,
+    run: RunId,
+    reference: &ContentRef,
+    chunks: &[ContentRef],
+    cancellation: &CancellationToken,
+) -> Result<(), RunError> {
+    reference
+        .validate()
+        .map_err(|reason| RunError::InvalidInput(reason.into()))?;
+    let work = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => return Err(RunError::Cancelled),
+        work = resources.acquire_work() => work?,
+    };
+    let buffer = work.budget().allocate(32 * 1024).await?;
+    transfer_prompt(&source, run, reference, chunks, buffer, None, cancellation).await?;
+    Ok(())
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "Restoration requires the original history cut, content identity, chunks, media refs, layout, I/O owner and cancellation as independent inputs"
@@ -361,7 +382,8 @@ pub async fn restore_prompt_from(
             .map_err(|reason| RunError::InvalidInput(reason.into()))?;
         expected_media.push((decode_sha256_ref(&part.digest)?, part.bytes));
     }
-    let arena = CaptureArena::new(io, None).await?;
+    let resident = CaptureArena::reserve_prefix(&staging.preparation, &resources)?;
+    let arena = CaptureArena::new(io, resident).await?;
     let result = async {
         let work = tokio::select! {
             biased;
@@ -369,55 +391,17 @@ pub async fn restore_prompt_from(
             work=resources.acquire_work()=>work?,
         };
         let budget = work.budget();
-        let mut buffer = budget.allocate(32 * 1024).await?;
-        let mut hash = Sha256::new();
-        let mut bytes = 0u64;
-        let parts = if chunks.is_empty() {
-            std::slice::from_ref(reference)
-        } else {
-            chunks
-        };
-        for part in parts {
-            check(cancellation)?;
-            let copy_arena = arena.clone();
-            let expected = part.bytes;
-            let copy_cancellation = cancellation.clone();
-            bytes = bytes.checked_add(expected).ok_or_else(overflow)?;
-            if bytes > reference.bytes {
-                return Err(invalid("frozen prompt chunks exceed the original length").into());
-            }
-            let consume = move |reader: &mut dyn Read| {
-                Ok(copy_arena
-                    .with_writer_sync(|writer| {
-                        copy_content(
-                            reader,
-                            writer,
-                            &mut buffer,
-                            expected,
-                            &mut hash,
-                            &copy_cancellation,
-                        )
-                    })
-                    .map(|()| (buffer, hash)))
-            };
-            let copied = match &source {
-                ContentSource::Live { history, cut } => {
-                    history.with_content(cut, run, part, consume).await?
-                }
-                ContentSource::Snapshot(snapshot) => {
-                    snapshot.with_content(run, part, consume).await?
-                }
-            };
-            (buffer, hash) = copied.map_err(RunError::preparation)?;
-        }
-        if bytes != reference.bytes
-            || format!("sha256:{}", hex::encode(hash.finalize())) != reference.digest
-        {
-            return Err(invalid(
-                "frozen prompt content digest or length differs from its reference",
-            )
-            .into());
-        }
+        let buffer = budget.allocate(32 * 1024).await?;
+        let mut buffer = transfer_prompt(
+            &source,
+            run,
+            reference,
+            chunks,
+            buffer,
+            Some(&arena),
+            cancellation,
+        )
+        .await?;
         // Validate every record's media slot, digest, length, and exact coverage BEFORE
         // copying external media blobs into the arena or returning PreparedPrompt.
         canonical_prompt::validate_external_media_directory(
@@ -430,7 +414,7 @@ pub async fn restore_prompt_from(
         let mut restored_media = Vec::with_capacity(media.len());
         for (part, &(expected_digest, expected)) in media.iter().zip(expected_media.iter()) {
             check(cancellation)?;
-            let start = arena.with_writer(|w| Ok(w.position())).await?;
+            let start = arena.position().await?;
             let copy_arena = arena.clone();
             let copy_cancellation = cancellation.clone();
             let mut media_hash = Sha256::new();
@@ -498,12 +482,16 @@ pub async fn restore_prompt_from(
             body.len(),
             body.breakdown().clone(),
         );
+        let resident_bytes = staging
+            .resident_bytes
+            .checked_add(arena.resident_capacity().await?)
+            .ok_or_else(overflow)?;
         let prompt = PreparedPrompt::from_canonical(
             body,
             arena.clone(),
             resources,
             staging.preparation,
-            staging.resident_bytes,
+            resident_bytes,
         );
         Ok(prompt)
     }
@@ -511,9 +499,69 @@ pub async fn restore_prompt_from(
     close_failed(&arena, result).await
 }
 
+async fn transfer_prompt(
+    source: &ContentSource<'_>,
+    run: RunId,
+    reference: &ContentRef,
+    chunks: &[ContentRef],
+    mut buffer: ChargedBuffer,
+    arena: Option<&CaptureArena>,
+    cancellation: &CancellationToken,
+) -> Result<ChargedBuffer, RunError> {
+    let mut hash = Sha256::new();
+    let mut bytes = 0u64;
+    let parts = if chunks.is_empty() {
+        std::slice::from_ref(reference)
+    } else {
+        chunks
+    };
+    for part in parts {
+        check(cancellation)?;
+        let arena = arena.cloned();
+        let expected = part.bytes;
+        let cancellation = cancellation.clone();
+        bytes = bytes.checked_add(expected).ok_or_else(overflow)?;
+        if bytes > reference.bytes {
+            return Err(invalid("frozen prompt chunks exceed the original length").into());
+        }
+        let consume = move |reader: &mut dyn Read| {
+            let mut copy = |writer: &mut dyn Write| {
+                copy_content(
+                    reader,
+                    writer,
+                    &mut buffer,
+                    expected,
+                    &mut hash,
+                    &cancellation,
+                )
+            };
+            let result = match arena {
+                Some(arena) => arena.with_writer_sync(|writer| copy(writer)),
+                None => copy(&mut io::sink()),
+            };
+            Ok(result.map(|()| (buffer, hash)))
+        };
+        let copied = match source {
+            ContentSource::Live { history, cut } => {
+                history.with_content(cut, run, part, consume).await?
+            }
+            ContentSource::Snapshot(snapshot) => snapshot.with_content(run, part, consume).await?,
+        };
+        (buffer, hash) = copied.map_err(RunError::preparation)?;
+    }
+    if bytes != reference.bytes
+        || format!("sha256:{}", hex::encode(hash.finalize())) != reference.digest
+    {
+        return Err(
+            invalid("frozen prompt content digest or length differs from its reference").into(),
+        );
+    }
+    Ok(buffer)
+}
+
 fn copy_content(
     reader: &mut dyn Read,
-    writer: &mut crate::history::request_backing::RequestBackingBuilder,
+    writer: &mut dyn Write,
     buffer: &mut ChargedBuffer,
     expected: u64,
     hash: &mut Sha256,
@@ -781,6 +829,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn spilled_backing_preserves_an_already_published_prefix() {
+        let (_dir, root, lease, effects) = open_io().await;
+        let resources = ModelPreparationResources::new(PreparationPolicy {
+            staging_bytes: 256 * 1024,
+            ..PreparationPolicy::default()
+        })
+        .unwrap();
+        let staging = RequestPreparation::new(resources.reserve_staging(0).await.unwrap());
+        let resident = CaptureArena::reserve_prefix(&staging, &resources).unwrap();
+        let io = PreparationIo::new(&lease.store()).unwrap();
+        let arena = CaptureArena::new(io, resident).await.unwrap();
+        let prefix = arena
+            .with_writer(|w| w.append_bytes(b"published prefix"))
+            .await
+            .unwrap();
+        arena.seal().await.unwrap();
+        let first = arena.pending(prefix.clone());
+        let suffix = arena
+            .with_writer(|w| w.append_bytes(&vec![b'x'; 16 * 1024]))
+            .await
+            .unwrap();
+        assert_eq!(suffix.start, prefix.end);
+        arena.seal().await.unwrap();
+
+        let work = resources.acquire_work().await.unwrap();
+        let expected = [b"published prefix".as_slice(), &vec![b'x'; 16 * 1024]].concat();
+        assert_eq!(
+            read_source_bytes(&first, &work.budget()).await.unwrap(),
+            b"published prefix"
+        );
+        assert_eq!(
+            read_source_bytes(&arena.pending(0..suffix.end), &work.budget())
+                .await
+                .unwrap(),
+            expected
+        );
+        drop(first);
+        arena.close().await.unwrap();
+        drop(arena);
+        effects.seal().unwrap();
+        effects.settle().await.unwrap();
+        lease.finish();
+        root.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn root_revocation_fences_prompt_publication_but_allows_backing_cleanup() {
+        let (dir, root, lease, effects) = open_io().await;
+        let resources = ModelPreparationResources::new(PreparationPolicy::default()).unwrap();
+        let io = PreparationIo::new(&lease.store()).unwrap();
+        let staging = RequestPreparation::new(resources.reserve_staging(0).await.unwrap());
+        let resident = CaptureArena::reserve_prefix(&staging, &resources).unwrap();
+        let arena = CaptureArena::new(io.clone(), resident).await.unwrap();
+        let range = arena
+            .with_writer(|writer| writer.append_bytes(b"local prompt"))
+            .await
+            .unwrap();
+        arena.seal().await.unwrap();
+
+        let marker = dir
+            .path()
+            .join("root")
+            .join(maka_event_log::root::ROOT_MARKER);
+        let renamed = marker.with_extension("removed");
+        std::fs::rename(&marker, &renamed).unwrap();
+        assert!(CaptureArena::new(io.clone(), None).await.is_err());
+        assert!(arena.seal().await.is_err());
+
+        let work = resources.acquire_work().await.unwrap();
+        assert_eq!(
+            read_source_bytes(&arena.pending(range), &work.budget())
+                .await
+                .unwrap(),
+            b"local prompt",
+        );
+        arena.close().await.unwrap();
+        drop(arena);
+        drop(io);
+        effects.seal().unwrap();
+        effects.settle().await.unwrap();
+        lease.finish();
+        std::fs::rename(renamed, marker).unwrap();
+        root.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn legacy_v2_inline_image_restores_without_media_and_rejects_media_refs() {
         let (_dir, root, lease, _effects) = open_io().await;
         let resources = ModelPreparationResources::new(PreparationPolicy::default()).unwrap();
@@ -797,7 +931,6 @@ mod tests {
             stage.preparation.clone(),
             cancel.clone(),
         )
-        .await
         .unwrap();
         builder
             .append(

@@ -17,21 +17,21 @@
  * under the License.
  */
 
-//! Blocking resource I/O retained by the original accepted work's read actor.
+//! Admission and cleanup for anonymous request files.
 use super::{SessionStore, StoreError};
 
 impl SessionStore {
-    /// The read actor owns the original work pin through completion even if its
-    /// observer disappears. Cleanup does not enter a new Root admission gate.
-    pub async fn with_resource_io<T: Send + 'static>(
+    /// Validate the original Root at anonymous file creation and publication.
+    /// Ordinary I/O on the resulting descriptor belongs to the original effect.
+    pub async fn with_request_file_authority<T: Send + 'static>(
         &self,
-        operation: impl FnOnce() -> Result<T, StoreError> + Send + 'static,
-    ) -> Result<T, StoreError> {
+        operation: impl FnOnce() -> std::io::Result<T> + Send + 'static,
+    ) -> Result<std::io::Result<T>, StoreError> {
         self.work_lifetime()?;
         self.scoped()
             .await?
             .connection
-            .read(move |_| operation())
+            .read(move |_| Ok(operation()))
             .await
     }
 }

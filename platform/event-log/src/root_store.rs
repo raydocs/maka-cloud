@@ -138,7 +138,7 @@ impl SessionStore {
         let owner = self.owner()?;
         Ok(owner
             .subscribe_session_commits(&self.id)
-            .with_control(owner.subscribe_catalog_changes()))
+            .with_control(subscriptions::control(&owner, &self.gates)?))
     }
 }
 

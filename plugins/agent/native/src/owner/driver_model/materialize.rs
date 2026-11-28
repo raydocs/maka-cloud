@@ -104,26 +104,45 @@ impl FrozenMaterializer {
     pub async fn build(
         &self,
         cancellation: &CancellationToken,
+        prepared: Option<Box<PreparedPrompt>>,
     ) -> Result<(PreparedPrompt, ModelRequest), RunError> {
-        self.authorize_current(cancellation).await?;
-        let mut prompt = self
-            .frozen
-            .restore_prompt(
-                self.io.clone(),
-                self.resources.clone(),
-                preparation::ContentSource::Live {
-                    history: &self.history,
-                    cut: &self.cut,
-                },
-                self.run,
-                cancellation,
-            )
-            .await?
-            .with_frozen_transport(
-                self.frozen.instructions.as_deref(),
-                self.frozen.normalization.clone(),
-            );
+        let mut prompt = prepared.map(|prepared| *prepared);
         let result = async {
+            self.authorize_current(cancellation).await?;
+            let source = preparation::ContentSource::Live {
+                history: &self.history,
+                cut: &self.cut,
+            };
+            if prompt.is_some() {
+                // The same publication produced these text-only bytes and the retained
+                // wire. Authenticate them without staging a second prompt under active quota.
+                preparation::verify_prompt_content(
+                    &self.resources,
+                    source,
+                    self.run,
+                    &self.frozen.prompt,
+                    &self.frozen.prompt_chunks,
+                    cancellation,
+                )
+                .await?;
+            } else {
+                prompt = Some(
+                    self.frozen
+                        .restore_prompt(
+                            self.io.clone(),
+                            self.resources.clone(),
+                            source,
+                            self.run,
+                            cancellation,
+                        )
+                        .await?
+                        .with_frozen_transport(
+                            self.frozen.instructions.as_deref(),
+                            self.frozen.normalization.clone(),
+                        ),
+                );
+            }
+            let prompt = prompt.as_mut().expect("materialized model prompt");
             let options = self
                 .request
                 .composition
@@ -141,7 +160,7 @@ impl FrozenMaterializer {
             };
             preparation::prepare_wire(
                 &settings,
-                &mut prompt,
+                prompt,
                 &self.surface.tools,
                 self.request.composition.max_output_tokens,
                 cancellation,
@@ -164,9 +183,11 @@ impl FrozenMaterializer {
         }
         .await;
         match result {
-            Ok(request) => Ok((prompt, request)),
+            Ok(request) => Ok((prompt.expect("materialized model prompt"), request)),
             Err(error) => {
-                if let Err(cleanup) = prompt.close().await {
+                if let Some(prompt) = prompt
+                    && let Err(cleanup) = prompt.close().await
+                {
                     return Err(RunError::PreparationCleanup(std::io::Error::other(
                         FailedCleanup {
                             original: error,
@@ -218,7 +239,7 @@ impl maka_agent_ports::model::FrozenPrompt for FrozenMaterializer {
         Result<maka_agent_ports::model::MaterializedPrompt, maka_model::ModelError>,
     > {
         Box::pin(async move {
-            let (prompt, request) = self.build(&cancellation).await.map_err(|error| {
+            let (prompt, request) = self.build(&cancellation, None).await.map_err(|error| {
                 if matches!(error, RunError::Cancelled) {
                     maka_model::ModelError::Cancelled
                 } else if error.is_cleanup_unconfirmed() {

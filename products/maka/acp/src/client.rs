@@ -19,6 +19,7 @@
 
 //! ACP calls the selected application services; it has no operation-name adapter.
 use crate::Error;
+use crate::configuration::catalog::{Catalog, Reader};
 use maka_capabilities::call::Attachments;
 use maka_host_runtime::application::{
     CallResources,
@@ -38,6 +39,7 @@ pub(crate) struct Client(Arc<Inner>);
 struct Inner {
     host: AsyncMutex<Host>,
     stop: CancellationToken,
+    models: Reader,
     // Original calls, including immutable resources and recovery references.
     // An interrupted observer never discards these or retries confirmation.
     unsettled: Mutex<Vec<LocalCall>>,
@@ -66,8 +68,15 @@ impl Client {
         Self(Arc::new(Inner {
             host: AsyncMutex::new(host),
             stop,
+            models: Reader::default(),
             unsettled: Mutex::default(),
         }))
+    }
+    pub async fn models(&self) -> Result<Arc<Catalog>, Error> {
+        self.0.models.read(self).await
+    }
+    pub fn model_reader(&self) -> &Reader {
+        &self.0.models
     }
     async fn open(
         &self,

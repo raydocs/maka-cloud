@@ -167,6 +167,14 @@ impl DataWriter {
     pub fn subscribe_changes(&self) -> Result<tokio::sync::watch::Receiver<()>, StoreError> {
         Ok(self.scoped()?.connection.subscribe_changes())
     }
+    pub fn subscribe_session(
+        &self,
+        session: &str,
+    ) -> Result<crate::SessionSubscription, StoreError> {
+        let log = self.scoped_enqueued()?;
+        log.check_bound_session(session)?;
+        Ok(log.subscribe_session_commits(session))
+    }
     /// Use the Root's bounded read lanes. Once enqueued, the actual SQL job owns
     /// its Root work pin even if this observing future disappears.
     pub async fn query<Q: Query>(&self, query: Q) -> Result<Q::Output, StoreError> {

@@ -126,7 +126,7 @@ impl ConfigurationStore {
                             if connection.total_changes() != before
                                 && let Some(owner) = owner.upgrade()
                             {
-                                owner.capability_source_changed();
+                                owner.control_source_changed();
                             }
                             Ok(result)
                         }
@@ -137,7 +137,7 @@ impl ConfigurationStore {
                                 && connection.total_changes() != before
                                 && let Some(owner) = owner.upgrade()
                             {
-                                owner.capability_source_changed();
+                                owner.control_source_changed();
                             }
                             rollback?;
                             Ok(Err(error))

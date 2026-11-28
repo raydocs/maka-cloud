@@ -390,11 +390,18 @@ impl Statement for Rebuild {
     type Value = ();
     type Output = ();
     fn execute(self, c: &Connection) -> Result<Prepared<()>, StoreError> {
+        let sessions: Vec<String> = c
+            .prepare_cached(
+                "SELECT r.session FROM agent_computer_activities a JOIN agent_runs r ON r.run=a.run
+             UNION SELECT r.session FROM agent_computer_facts f JOIN agent_runs r ON r.run=f.run",
+            )?
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
         sql::rebuild(c)?;
         Ok(Prepared {
             value: (),
             changed: true,
-            notification: Notification::METADATA,
+            notification: Notification::METADATA.with_sessions(sessions),
         })
     }
     fn committed(_: ()) {}

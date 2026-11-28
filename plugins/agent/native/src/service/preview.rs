@@ -120,21 +120,9 @@ impl Delivery {
         })
     }
 
-    pub(super) fn closed(&mut self, run: RunId, attempt: ModelAttemptId) {
-        if let Some(step) = self
-            .step
-            .as_mut()
-            .filter(|step| step.run == run && step.attempt == attempt)
-        {
-            step.closed = true;
-            self.pending = None;
-            self.present = false;
-            self.empty = false;
-            step.offsets.clear();
-        }
-    }
-
     pub(super) fn committed(&mut self, events: &[HistoryItem]) {
+        use maka_agent_facts::durable::RiskActionScope;
+
         let Some(step) = self.step.as_mut() else {
             return;
         };
@@ -165,7 +153,12 @@ impl Delivery {
                     self.empty = false;
                     step.offsets.clear();
                 }
-                Fact::RunTerminated { .. } | Fact::StopRequested { .. } => {
+                Fact::RunTerminated { .. }
+                | Fact::StopRequested { .. }
+                | Fact::RiskAdjudicated {
+                    scope: RiskActionScope::RunCancellation,
+                    ..
+                } => {
                     step.closed = true;
                     self.pending = None;
                     self.present = false;
@@ -175,36 +168,6 @@ impl Delivery {
                 _ => {}
             }
         }
-    }
-
-    pub(super) fn seed(&mut self, view: &maka_agent_state::fold::RunView) -> Result<(), String> {
-        let Some(step) = self.step.as_mut().filter(|step| step.run == view.run) else {
-            return Ok(());
-        };
-        let attempt = view
-            .attempts
-            .get(&step.attempt)
-            .ok_or("agent_preview_attempt_unavailable")?;
-        if attempt.step != step.step_id {
-            return Err("agent_preview_attempt_mismatch".into());
-        }
-        step.accepted_prefix = attempt.observed;
-        for tool in view
-            .tools
-            .values()
-            .filter(|tool| tool.key.attempt == step.attempt)
-        {
-            step.retired_inputs.insert(tool.key.call.clone());
-        }
-        if view.terminal.is_some()
-            || view.stopped
-            || attempt.closed.is_some()
-            || attempt.interrupted.is_some()
-        {
-            let attempt_id = step.attempt;
-            self.closed(view.run, attempt_id);
-        }
-        Ok(())
     }
 
     pub(super) fn next(&mut self, after: u64) -> Result<Option<PreviewPage>, String> {

@@ -150,6 +150,149 @@ pub fn is_syntax_error(error: &io::Error) -> bool {
         .is_some_and(|error| error.is::<JsonSyntaxError>())
 }
 
+fn validate_utf8(bytes: &[u8]) -> io::Result<&str> {
+    std::str::from_utf8(bytes).map_err(utf8_syntax)
+}
+
+fn utf8_syntax(error: std::str::Utf8Error) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        JsonSyntaxError {
+            reason: "invalid JSON UTF-8",
+            cause: Some(Box::new(error)),
+        },
+    )
+}
+
+fn hex(digits: &[u8]) -> io::Result<u16> {
+    let mut value = 0u16;
+    for &byte in digits {
+        let digit = match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'f' => byte - b'a' + 10,
+            b'A'..=b'F' => byte - b'A' + 10,
+            _ => return Err(syntax("invalid JSON unicode escape")),
+        };
+        value = value * 16 + u16::from(digit);
+    }
+    Ok(value)
+}
+
+/// None means the escape continues in the next read.
+fn decode_escape(bytes: &[u8]) -> io::Result<Option<(char, usize)>> {
+    let Some(&code) = bytes.get(1) else {
+        return Ok(None);
+    };
+    let character = match code {
+        b'"' | b'\\' | b'/' => char::from(code),
+        b'b' => '\u{8}',
+        b'f' => '\u{c}',
+        b'n' => '\n',
+        b'r' => '\r',
+        b't' => '\t',
+        b'u' => {
+            let Some(digits) = bytes.get(2..6) else {
+                return Ok(None);
+            };
+            let first = hex(digits)?;
+            let (scalar, consumed) = if (0xd800..=0xdbff).contains(&first) {
+                let Some(tail) = bytes.get(6..12) else {
+                    return Ok(None);
+                };
+                if !tail.starts_with(b"\\u") {
+                    return Err(syntax("invalid JSON surrogate pair"));
+                }
+                let second = hex(&tail[2..])?;
+                if !(0xdc00..=0xdfff).contains(&second) {
+                    return Err(syntax("invalid JSON surrogate pair"));
+                }
+                (
+                    0x10000 + (u32::from(first) - 0xd800) * 0x400 + u32::from(second) - 0xdc00,
+                    12,
+                )
+            } else {
+                (u32::from(first), 6)
+            };
+            let character =
+                char::from_u32(scalar).ok_or_else(|| syntax("invalid JSON unicode scalar"))?;
+            return Ok(Some((character, consumed)));
+        }
+        _ => return Err(syntax("invalid JSON escape")),
+    };
+    Ok(Some((character, 2)))
+}
+
+enum TextPiece<'a> {
+    Run(&'a str),
+    Escape(char, usize),
+    Close,
+    Refill,
+}
+
+/// Length of the run that can be copied verbatim inside a JSON string.
+#[inline]
+pub fn plain_prefix(bytes: &[u8]) -> usize {
+    const LOW: u64 = u64::from_ne_bytes([1; 8]);
+    const HIGH: u64 = u64::from_ne_bytes([0x80; 8]);
+    const CONTROL: u64 = u64::from_ne_bytes([0xe0; 8]);
+    const QUOTE: u64 = u64::from_ne_bytes([b'"'; 8]);
+    const BACKSLASH: u64 = u64::from_ne_bytes([b'\\'; 8]);
+
+    fn has_zero_byte(word: u64) -> bool {
+        word.wrapping_sub(LOW) & !word & HIGH != 0
+    }
+
+    let (words, _) = bytes.as_chunks::<8>();
+    let words = words.iter().take_while(|word| {
+        let word = u64::from_ne_bytes(**word);
+        !has_zero_byte(word & CONTROL)
+            && !has_zero_byte(word ^ QUOTE)
+            && !has_zero_byte(word ^ BACKSLASH)
+    });
+    let start = words.count() * 8;
+    start
+        + bytes[start..]
+            .iter()
+            .position(|byte| matches!(byte, b'"' | b'\\' | 0..=31))
+            .unwrap_or(bytes.len() - start)
+}
+
+fn text_piece(bytes: &[u8], encoding: TextEncoding) -> io::Result<TextPiece<'_>> {
+    let plain = match encoding {
+        TextEncoding::Utf8 => bytes,
+        TextEncoding::JsonString => {
+            let end = plain_prefix(bytes);
+            if end == 0 {
+                return Ok(match bytes.first() {
+                    Some(b'"') => TextPiece::Close,
+                    Some(b'\\') => match decode_escape(bytes)? {
+                        Some((character, count)) => TextPiece::Escape(character, count),
+                        None => TextPiece::Refill,
+                    },
+                    Some(_) => return Err(syntax("unescaped JSON control character")),
+                    None => TextPiece::Refill,
+                });
+            }
+            &bytes[..end]
+        }
+    };
+    if plain.is_empty() {
+        return Ok(TextPiece::Refill);
+    }
+    match std::str::from_utf8(plain) {
+        Ok(run) => Ok(TextPiece::Run(run)),
+        Err(error) if error.error_len().is_none() && plain.len() == bytes.len() => {
+            let end = error.valid_up_to();
+            if end == 0 {
+                Ok(TextPiece::Refill)
+            } else {
+                Ok(TextPiece::Run(validate_utf8(&plain[..end])?))
+            }
+        }
+        Err(error) => Err(utf8_syntax(error)),
+    }
+}
+
 struct Reader {
     source: SourceBytes,
     cursor: Option<Box<dyn ByteCursor>>,
@@ -158,7 +301,7 @@ struct Reader {
     at: usize,
     used: usize,
     eof: bool,
-    position: u64,
+    chunk_start: u64,
     legacy_value: bool,
 }
 impl Reader {
@@ -188,219 +331,199 @@ impl Reader {
             at: 0,
             used: 0,
             eof: false,
-            position: 0,
+            chunk_start: 0,
             legacy_value: false,
         })
     }
-    async fn peek(&mut self) -> io::Result<Option<u8>> {
-        if let SourceBytes::Inline(bytes) = &self.source {
-            return Ok(usize::try_from(self.position)
-                .ok()
-                .and_then(|at| bytes.get(at))
-                .copied());
-        }
-        if self.at == self.used && !self.eof {
-            let buffer = self
+    fn loaded(&self) -> &[u8] {
+        match &self.source {
+            SourceBytes::Inline(bytes) => bytes,
+            SourceBytes::Source(_) => self
                 .buffer
-                .take()
-                .ok_or_else(|| invalid("JSON reader lost its allocation"))?;
-            let read = self
-                .cursor
-                .as_mut()
-                .expect("source reader has a cursor")
-                .read_chunk(buffer)
-                .await?;
-            if read.bytes_read > read.buffer.as_ref().len() || (read.bytes_read == 0 && !read.eof) {
-                return Err(invalid("JSON source returned an invalid read"));
-            }
-            let read_end = self
-                .position
-                .checked_add(read.bytes_read as u64)
-                .ok_or_else(|| invalid("JSON source position overflow"))?;
-            if let SourceBytes::Source(source) = &self.source
-                && source
-                    .len()
-                    .is_some_and(|len| read_end > len || (read.eof && read_end != len))
-            {
-                return Err(invalid("JSON source length disagrees with its bytes"));
-            }
-            self.buffer = Some(read.buffer);
-            self.at = 0;
-            self.used = read.bytes_read;
-            self.eof = read.eof;
-        }
-        Ok((self.at < self.used).then(|| {
-            self.buffer
                 .as_ref()
-                .expect("JSON read allocation is present")
-                .as_ref()[self.at]
-        }))
-    }
-    async fn take(&mut self) -> io::Result<Option<u8>> {
-        let value = self.peek().await?;
-        if value.is_some() {
-            self.position = self
-                .position
-                .checked_add(1)
-                .ok_or_else(|| invalid("JSON source position overflow"))?;
-            self.at += 1;
+                .map_or(&[], |buffer| &buffer.as_ref()[..self.used]),
         }
-        Ok(value)
     }
-    async fn byte(&mut self) -> io::Result<u8> {
-        self.take()
-            .await?
-            .ok_or_else(|| syntax("truncated JSON source"))
+    fn remaining(&self) -> &[u8] {
+        &self.loaded()[self.at..]
+    }
+    fn position(&self) -> u64 {
+        self.chunk_start + self.at as u64
+    }
+    fn advance(&mut self, count: usize) {
+        self.at += count;
+    }
+    fn peek(&self) -> Option<u8> {
+        self.remaining().first().copied()
+    }
+    async fn refill(&mut self) -> io::Result<bool> {
+        debug_assert!(self.remaining().is_empty());
+        if self.eof {
+            return Ok(false);
+        }
+        let start = self.position();
+        let Some(cursor) = &mut self.cursor else {
+            return Ok(false);
+        };
+        let mut buffer = self
+            .buffer
+            .take()
+            .ok_or_else(|| invalid("JSON reader lost its allocation"))?;
+        // A failed or cancelled read settles the allocation without returning it.
+        self.chunk_start = start;
+        self.at = 0;
+        self.used = 0;
+        buffer.limit(READ_BYTES);
+        let read = cursor.read_chunk(buffer).await?;
+        if read.bytes_read > read.buffer.as_ref().len() || (read.bytes_read == 0 && !read.eof) {
+            return Err(invalid("JSON source returned an invalid read"));
+        }
+        let read_end = start
+            .checked_add(read.bytes_read as u64)
+            .ok_or_else(|| invalid("JSON source position overflow"))?;
+        if let SourceBytes::Source(source) = &self.source
+            && source
+                .len()
+                .is_some_and(|len| read_end > len || (read.eof && read_end != len))
+        {
+            return Err(invalid("JSON source length disagrees with its bytes"));
+        }
+        self.buffer = Some(read.buffer);
+        self.used = read.bytes_read;
+        self.eof = read.eof;
+        Ok(self.used != 0)
     }
     async fn expect(&mut self, expected: u8) -> io::Result<()> {
-        if self.byte().await? != expected {
-            return Err(syntax("unexpected JSON token"));
-        }
-        Ok(())
+        self.literal(&[expected]).await
     }
     async fn whitespace(&mut self) -> io::Result<()> {
-        while self
-            .peek()
-            .await?
-            .is_some_and(|byte| matches!(byte, b' ' | b'\n' | b'\r' | b'\t'))
-        {
-            self.take().await?;
+        loop {
+            let bytes = self.remaining();
+            if let Some(count) = bytes
+                .iter()
+                .position(|byte| !matches!(byte, b' ' | b'\n' | b'\r' | b'\t'))
+            {
+                self.advance(count);
+                return Ok(());
+            }
+            self.advance(bytes.len());
+            if !self.refill().await? {
+                return Ok(());
+            }
         }
-        Ok(())
     }
     async fn end(&mut self) -> io::Result<()> {
         self.whitespace().await?;
-        if self.peek().await?.is_some() {
+        if self.peek().is_some() {
             return Err(syntax("trailing JSON content"));
-        }
-        if let SourceBytes::Source(source) = &self.source
-            && source.len().is_some_and(|len| len != self.position)
-        {
-            return Err(invalid("JSON source length disagrees with its bytes"));
         }
         Ok(())
     }
     fn range(&self, start: u64, end: u64) -> io::Result<JsonSource> {
-        if start > end || end > self.position {
+        if start > end || end > self.position() {
             return Err(invalid("JSON source range is invalid"));
         }
         Ok(JsonSource::new(self.source.slice(start..end)?))
     }
-    async fn hex(&mut self) -> io::Result<u16> {
-        let mut value = 0u16;
-        for _ in 0..4 {
-            let digit = match self.byte().await? {
-                byte @ b'0'..=b'9' => byte - b'0',
-                byte @ b'a'..=b'f' => byte - b'a' + 10,
-                byte @ b'A'..=b'F' => byte - b'A' + 10,
-                _ => return Err(syntax("invalid JSON unicode escape")),
-            };
-            value = value * 16 + u16::from(digit);
+    async fn read_exact(&mut self, mut out: &mut [u8]) -> io::Result<()> {
+        while !out.is_empty() {
+            if self.remaining().is_empty() && !self.refill().await? {
+                return Err(syntax("truncated JSON source"));
+            }
+            let count = self.remaining().len().min(out.len());
+            out[..count].copy_from_slice(&self.remaining()[..count]);
+            out = &mut out[count..];
+            self.advance(count);
         }
-        Ok(value)
+        Ok(())
     }
-    async fn string_char(&mut self) -> io::Result<Option<char>> {
-        let byte = self.byte().await?;
-        match byte {
-            b'"' => Ok(None),
-            b'\\' => Ok(Some(match self.byte().await? {
-                b'"' => '"',
-                b'\\' => '\\',
-                b'/' => '/',
-                b'b' => '\u{8}',
-                b'f' => '\u{c}',
-                b'n' => '\n',
-                b'r' => '\r',
-                b't' => '\t',
-                b'u' => {
-                    let first = self.hex().await?;
-                    let code = if (0xd800..=0xdbff).contains(&first) {
-                        self.expect(b'\\').await?;
-                        self.expect(b'u').await?;
-                        let second = self.hex().await?;
-                        if !(0xdc00..=0xdfff).contains(&second) {
-                            return Err(syntax("invalid JSON surrogate pair"));
-                        }
-                        0x10000 + (u32::from(first) - 0xd800) * 0x400 + u32::from(second) - 0xdc00
-                    } else {
-                        u32::from(first)
-                    };
-                    char::from_u32(code).ok_or_else(|| syntax("invalid JSON unicode scalar"))?
-                }
-                _ => return Err(syntax("invalid JSON escape")),
-            })),
-            0..=0x1f => Err(syntax("unescaped JSON control character")),
-            0x20..=0x7f => Ok(Some(char::from(byte))),
-            _ => self.utf8_char(byte).await.map(Some),
+    async fn split_escape(&mut self) -> io::Result<char> {
+        let mut bytes = [0; 12];
+        self.read_exact(&mut bytes[..2]).await?;
+        if bytes[1] == b'u' {
+            self.read_exact(&mut bytes[2..6]).await?;
+            if decode_escape(&bytes[..6])?.is_none() {
+                self.read_exact(&mut bytes[6..]).await?;
+            }
         }
+        Ok(decode_escape(&bytes)?.expect("complete JSON escape").0)
     }
-    async fn utf8_char(&mut self, first: u8) -> io::Result<char> {
-        if first.is_ascii() {
-            return Ok(char::from(first));
-        }
+    async fn split_utf8<'a>(&mut self, first: u8, out: &'a mut [u8; 4]) -> io::Result<&'a str> {
         let len = match first {
             0xc2..=0xdf => 2,
             0xe0..=0xef => 3,
             0xf0..=0xf4 => 4,
-            _ => return Err(syntax("invalid text UTF-8")),
+            _ => unreachable!("only an incomplete UTF-8 scalar reaches refill"),
         };
-        let mut bytes = [0u8; 4];
-        bytes[0] = first;
-        for destination in bytes.iter_mut().take(len).skip(1) {
-            *destination = self.byte().await?;
-        }
-        let text = std::str::from_utf8(&bytes[..len]).map_err(|error| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                JsonSyntaxError {
-                    reason: "invalid JSON UTF-8",
-                    cause: Some(Box::new(error)),
-                },
-            )
-        })?;
-        Ok(text
-            .chars()
-            .next()
-            .expect("a decoded UTF-8 scalar is nonempty"))
+        self.read_exact(&mut out[..len]).await?;
+        validate_utf8(&out[..len])
     }
     async fn string(&mut self) -> io::Result<()> {
         self.string_with(|_| {}).await
     }
-    async fn string_with(&mut self, mut character: impl FnMut(char)) -> io::Result<()> {
+    async fn string_with(&mut self, mut text: impl FnMut(&str)) -> io::Result<()> {
         self.expect(b'"').await?;
-        while let Some(value) = self.string_char().await? {
-            character(value);
+        let mut scalar = [0; 4];
+        loop {
+            let bytes = self.remaining();
+            match text_piece(bytes, TextEncoding::JsonString)? {
+                TextPiece::Run(run) => {
+                    text(run);
+                    self.advance(run.len());
+                }
+                TextPiece::Escape(character, count) => {
+                    text(character.encode_utf8(&mut scalar));
+                    self.advance(count);
+                }
+                TextPiece::Close => {
+                    self.advance(1);
+                    return Ok(());
+                }
+                TextPiece::Refill if bytes.is_empty() => {
+                    if !self.refill().await? {
+                        return Err(syntax("truncated JSON source"));
+                    }
+                }
+                TextPiece::Refill if bytes[0] == b'\\' => {
+                    text(self.split_escape().await?.encode_utf8(&mut scalar));
+                }
+                TextPiece::Refill => {
+                    text(self.split_utf8(bytes[0], &mut scalar).await?);
+                }
+            }
         }
+    }
+    fn number_prefix(
+        &mut self,
+        count: usize,
+        validator: &mut Option<&mut number::NumberValidator>,
+    ) -> io::Result<()> {
+        if let Some(validator) = validator {
+            for &byte in &self.remaining()[..count] {
+                validator.push(byte).map_err(number_syntax)?;
+            }
+        }
+        self.advance(count);
         Ok(())
-    }
-    async fn number_take(
-        &mut self,
-        validator: &mut Option<&mut number::NumberValidator>,
-    ) -> io::Result<Option<u8>> {
-        let byte = self.take().await?;
-        if let (Some(validator), Some(byte)) = (validator.as_mut(), byte) {
-            validator.push(byte).map_err(number_syntax)?;
-        }
-        Ok(byte)
-    }
-    async fn number_byte(
-        &mut self,
-        validator: &mut Option<&mut number::NumberValidator>,
-    ) -> io::Result<u8> {
-        self.number_take(validator)
-            .await?
-            .ok_or_else(|| syntax("truncated JSON number"))
     }
     async fn digits(
         &mut self,
         validator: &mut Option<&mut number::NumberValidator>,
-    ) -> io::Result<usize> {
-        let mut digits = 0usize;
-        while self.peek().await?.is_some_and(|byte| byte.is_ascii_digit()) {
-            self.number_take(validator).await?;
-            digits = digits.saturating_add(1);
+    ) -> io::Result<bool> {
+        let mut has_digits = false;
+        loop {
+            let bytes = self.remaining();
+            let count = bytes
+                .iter()
+                .position(|byte| !byte.is_ascii_digit())
+                .unwrap_or(bytes.len());
+            let has_delimiter = count < bytes.len();
+            has_digits |= count != 0;
+            self.number_prefix(count, validator)?;
+            if has_delimiter || !self.refill().await? {
+                return Ok(has_digits);
+            }
         }
-        Ok(digits)
     }
     async fn number(&mut self) -> io::Result<()> {
         if self.legacy_value {
@@ -423,53 +546,67 @@ impl Reader {
         &mut self,
         mut validator: Option<&mut number::NumberValidator>,
     ) -> io::Result<()> {
-        if self.peek().await? == Some(b'-') {
-            self.number_take(&mut validator).await?;
+        if self.peek() == Some(b'-') {
+            self.number_prefix(1, &mut validator)?;
+            if self.remaining().is_empty() {
+                self.refill().await?;
+            }
         }
-        match self.number_byte(&mut validator).await? {
-            b'0' => {}
-            b'1'..=b'9' => {
+        match self.peek() {
+            Some(b'0') => self.number_prefix(1, &mut validator)?,
+            Some(b'1'..=b'9') => {
                 self.digits(&mut validator).await?;
             }
-            _ => return Err(syntax("invalid JSON number")),
+            Some(_) => return Err(syntax("invalid JSON number")),
+            None => return Err(syntax("truncated JSON number")),
         }
-        if self.peek().await? == Some(b'.') {
-            self.number_take(&mut validator).await?;
-            if self.digits(&mut validator).await? == 0 {
+        if self.remaining().is_empty() {
+            self.refill().await?;
+        }
+        if self.peek() == Some(b'.') {
+            self.number_prefix(1, &mut validator)?;
+            if !self.digits(&mut validator).await? {
                 return Err(syntax("invalid JSON fraction"));
             }
         }
-        if matches!(self.peek().await?, Some(b'e' | b'E')) {
-            self.number_take(&mut validator).await?;
-            if matches!(self.peek().await?, Some(b'+' | b'-')) {
-                self.number_take(&mut validator).await?;
+        if matches!(self.peek(), Some(b'e' | b'E')) {
+            self.number_prefix(1, &mut validator)?;
+            if self.remaining().is_empty() {
+                self.refill().await?;
             }
-            if self.digits(&mut validator).await? == 0 {
+            if matches!(self.peek(), Some(b'+' | b'-')) {
+                self.number_prefix(1, &mut validator)?;
+            }
+            if !self.digits(&mut validator).await? {
                 return Err(syntax("invalid JSON exponent"));
             }
         }
         Ok(())
     }
-    async fn literal(&mut self, bytes: &[u8]) -> io::Result<()> {
-        for byte in bytes {
-            self.expect(*byte).await?;
+    async fn literal(&mut self, mut expected: &[u8]) -> io::Result<()> {
+        while !expected.is_empty() {
+            if self.remaining().is_empty() && !self.refill().await? {
+                return Err(syntax("truncated JSON source"));
+            }
+            let count = expected.len().min(self.remaining().len());
+            if self.remaining()[..count] != expected[..count] {
+                return Err(syntax("unexpected JSON token"));
+            }
+            self.advance(count);
+            expected = &expected[count..];
         }
         Ok(())
     }
     async fn begin_value(&mut self) -> io::Result<(JsonKind, Option<u8>)> {
         self.whitespace().await?;
         Ok(
-            match self
-                .peek()
-                .await?
-                .ok_or_else(|| syntax("missing JSON value"))?
-            {
+            match self.peek().ok_or_else(|| syntax("missing JSON value"))? {
                 b'{' => {
-                    self.take().await?;
+                    self.advance(1);
                     (JsonKind::Object, Some(0))
                 }
                 b'[' => {
-                    self.take().await?;
+                    self.advance(1);
                     (JsonKind::Array, Some(5))
                 }
                 b'"' => {
@@ -498,7 +635,7 @@ impl Reader {
     }
     async fn scan_value(&mut self) -> io::Result<(u64, u64, JsonKind, JsonCounts)> {
         self.whitespace().await?;
-        let start = self.position;
+        let start = self.position();
         let (kind, first) = self.begin_value().await?;
         let mut counts = JsonCounts::default();
         counts.value(kind)?;
@@ -517,8 +654,8 @@ impl Reader {
                 let mut child = None;
                 match state {
                     0 | 1 => {
-                        if state == 0 && self.peek().await? == Some(b'}') {
-                            self.take().await?;
+                        if state == 0 && self.peek() == Some(b'}') {
+                            self.advance(1);
                             depth -= 1;
                             continue;
                         }
@@ -534,14 +671,17 @@ impl Reader {
                         counts.value(kind)?;
                         child = next;
                     }
-                    4 => match self.byte().await? {
-                        b'}' => depth -= 1,
-                        b',' => stack.as_mut()[depth - 1] = 1,
-                        _ => return Err(syntax("invalid JSON object separator")),
-                    },
+                    4 => {
+                        match self.peek() {
+                            Some(b'}') => depth -= 1,
+                            Some(b',') => stack.as_mut()[depth - 1] = 1,
+                            _ => return Err(syntax("invalid JSON object separator")),
+                        }
+                        self.advance(1);
+                    }
                     5 | 6 => {
-                        if state == 5 && self.peek().await? == Some(b']') {
-                            self.take().await?;
+                        if state == 5 && self.peek() == Some(b']') {
+                            self.advance(1);
                             depth -= 1;
                             continue;
                         }
@@ -554,11 +694,14 @@ impl Reader {
                         counts.value(kind)?;
                         child = next;
                     }
-                    7 => match self.byte().await? {
-                        b']' => depth -= 1,
-                        b',' => stack.as_mut()[depth - 1] = 6,
-                        _ => return Err(syntax("invalid JSON array separator")),
-                    },
+                    7 => {
+                        match self.peek() {
+                            Some(b']') => depth -= 1,
+                            Some(b',') => stack.as_mut()[depth - 1] = 6,
+                            _ => return Err(syntax("invalid JSON array separator")),
+                        }
+                        self.advance(1);
+                    }
                     _ => unreachable!("JSON scanner nesting state is internal"),
                 }
                 if let Some(child) = child {
@@ -581,7 +724,7 @@ impl Reader {
                 }
             }
         }
-        Ok((start, self.position, kind, counts))
+        Ok((start, self.position(), kind, counts))
     }
     async fn value_span(&mut self) -> io::Result<(u64, u64, JsonKind)> {
         let (start, end, kind, _) = self.scan_value().await?;
@@ -601,7 +744,7 @@ impl Reader {
 pub async fn kind(source: &JsonSource, budget: Arc<dyn SourceBudget>) -> io::Result<JsonKind> {
     let mut reader = Reader::new(source.bytes.clone(), budget).await?;
     reader.whitespace().await?;
-    match reader.peek().await? {
+    match reader.peek() {
         Some(b'{') => Ok(JsonKind::Object),
         Some(b'[') => Ok(JsonKind::Array),
         Some(b'"') => Ok(JsonKind::String),
@@ -658,7 +801,11 @@ pub async fn usize_value(source: &JsonSource, budget: Arc<dyn SourceBudget>) -> 
     let mut reader = Reader::new(source.bytes.clone(), budget).await?;
     reader.whitespace().await?;
     let mut digits = String::new();
-    while let Some(byte) = reader.peek().await? {
+    loop {
+        if reader.remaining().is_empty() {
+            reader.refill().await?;
+        }
+        let Some(byte) = reader.peek() else { break };
         if !byte.is_ascii_digit() {
             break;
         }
@@ -666,7 +813,7 @@ pub async fn usize_value(source: &JsonSource, budget: Arc<dyn SourceBudget>) -> 
             return Err(invalid("JSON integer exceeds usize range"));
         }
         digits.push(byte as char);
-        reader.take().await?;
+        reader.advance(1);
     }
     if digits.is_empty() || (digits.len() > 1 && digits.starts_with('0')) {
         return Err(invalid("JSON value is not an unsigned integer"));
@@ -727,12 +874,11 @@ impl ObjectCursor {
         let mut key_bytes = 0u64;
         let mut candidates = count;
         let spans = self
-            .next_spans_with_key(|character| {
+            .next_spans_with_key(|text| {
                 if candidates == 0 {
                     return;
                 }
-                let mut bytes = [0; 4];
-                let encoded = character.encode_utf8(&mut bytes).as_bytes();
+                let encoded = text.as_bytes();
                 for (matched, name) in matches.as_mut().iter_mut().zip(names.clone()) {
                     if *matched != 0 {
                         *matched = u8::from(
@@ -783,14 +929,14 @@ impl ObjectCursor {
     }
     async fn next_spans_with_key(
         &mut self,
-        character: impl FnMut(char),
+        text: impl FnMut(&str),
     ) -> io::Result<Option<JsonFieldSpans>> {
         if self.done {
             return Ok(None);
         }
         self.reader.whitespace().await?;
-        if self.reader.peek().await? == Some(b'}') {
-            self.reader.take().await?;
+        if self.reader.peek() == Some(b'}') {
+            self.reader.advance(1);
             self.reader.end().await?;
             self.done = true;
             return Ok(None);
@@ -800,9 +946,9 @@ impl ObjectCursor {
             self.reader.whitespace().await?;
         }
         self.first = false;
-        let key_start = self.reader.position;
-        self.reader.string_with(character).await?;
-        let key_end = self.reader.position;
+        let key_start = self.reader.position();
+        self.reader.string_with(text).await?;
+        let key_end = self.reader.position();
         self.reader.whitespace().await?;
         self.reader.expect(b':').await?;
         let (start, end, kind) = self.reader.value_span().await?;
@@ -847,8 +993,8 @@ impl ArrayCursor {
             return Ok(None);
         }
         self.reader.whitespace().await?;
-        if self.reader.peek().await? == Some(b']') {
-            self.reader.take().await?;
+        if self.reader.peek() == Some(b']') {
+            self.reader.advance(1);
             self.reader.end().await?;
             self.done = true;
             return Ok(None);
@@ -876,11 +1022,11 @@ pub async fn fields(
     let mut output = vec![None; names.len()];
     let mut cursor = ObjectCursor::open(source.clone(), budget).await?;
     while let Some((field, selected)) = cursor.next_named_spans(names.iter().copied()).await? {
-        let value = JsonValue {
-            source: source.slice(field.value_range)?,
-            kind: field.kind,
-        };
         if let Some(selected) = selected {
+            let value = JsonValue {
+                source: source.slice(field.value_range)?,
+                kind: field.kind,
+            };
             for (slot, name) in output.iter_mut().zip(names) {
                 if *name == names[selected] {
                     *slot = Some(value.clone());
@@ -918,36 +1064,21 @@ pub async fn text_eq(
     expected: &str,
     budget: Arc<dyn SourceBudget>,
 ) -> io::Result<bool> {
-    let mut reader = Reader::new(source.bytes.clone(), budget).await?;
-    let mut equal = true;
-    match source.encoding {
-        TextEncoding::Utf8 => {
-            let mut bytes = expected.bytes();
-            while let Some(byte) = reader.take().await? {
-                if bytes.next() != Some(byte) {
-                    return Ok(false);
-                }
-            }
-            equal &= bytes.next().is_none();
-        }
-        TextEncoding::JsonString => {
-            reader.expect(b'"').await?;
-            let mut characters = expected.chars();
-            while let Some(character) = reader.string_char().await? {
-                if characters.next() != Some(character) {
-                    return Ok(false);
-                }
-            }
-            equal &= characters.next().is_none();
-        }
+    let mut reader = TextReader::new(source, budget).await?;
+    let mut expected = expected.as_bytes();
+    while let Some(text) = reader.next().await? {
+        let Some(rest) = expected.strip_prefix(text) else {
+            return Ok(false);
+        };
+        expected = rest;
     }
-    reader.end().await?;
-    Ok(equal)
+    Ok(expected.is_empty())
 }
 
 struct TextReader {
     reader: Reader,
     encoding: TextEncoding,
+    scalar: [u8; 4],
 }
 impl TextReader {
     async fn new(source: &TextSource, budget: Arc<dyn SourceBudget>) -> io::Result<Self> {
@@ -958,20 +1089,50 @@ impl TextReader {
         Ok(Self {
             reader,
             encoding: source.encoding,
+            scalar: [0; 4],
         })
     }
-    async fn character(&mut self) -> io::Result<Option<char>> {
-        let character = match self.encoding {
-            TextEncoding::Utf8 => match self.reader.take().await? {
-                Some(first) => Some(self.reader.utf8_char(first).await?),
-                None => None,
-            },
-            TextEncoding::JsonString => self.reader.string_char().await?,
-        };
-        if character.is_none() {
-            self.reader.end().await?;
+    async fn next(&mut self) -> io::Result<Option<&[u8]>> {
+        loop {
+            let bytes = self.reader.remaining();
+            match text_piece(bytes, self.encoding)? {
+                TextPiece::Run(run) => {
+                    let len = run.len();
+                    self.reader.advance(len);
+                    return Ok(Some(
+                        &self.reader.loaded()[self.reader.at - len..self.reader.at],
+                    ));
+                }
+                TextPiece::Escape(character, count) => {
+                    self.reader.advance(count);
+                    return Ok(Some(character.encode_utf8(&mut self.scalar).as_bytes()));
+                }
+                TextPiece::Close => {
+                    self.reader.advance(1);
+                    self.reader.end().await?;
+                    return Ok(None);
+                }
+                TextPiece::Refill if bytes.is_empty() => {
+                    if !self.reader.refill().await? {
+                        return if self.encoding == TextEncoding::Utf8 {
+                            Ok(None)
+                        } else {
+                            Err(syntax("truncated JSON source"))
+                        };
+                    }
+                }
+                TextPiece::Refill
+                    if self.encoding == TextEncoding::JsonString && bytes[0] == b'\\' =>
+                {
+                    let character = self.reader.split_escape().await?;
+                    return Ok(Some(character.encode_utf8(&mut self.scalar).as_bytes()));
+                }
+                TextPiece::Refill => {
+                    let text = self.reader.split_utf8(bytes[0], &mut self.scalar).await?;
+                    return Ok(Some(text.as_bytes()));
+                }
+            }
         }
-        Ok(character)
     }
 }
 
@@ -983,9 +1144,8 @@ pub async fn text_digest(
     use sha2::{Digest, Sha256};
     let mut reader = TextReader::new(source, budget).await?;
     let mut digest = Sha256::new();
-    let mut bytes = [0; 4];
-    while let Some(character) = reader.character().await? {
-        digest.update(character.encode_utf8(&mut bytes).as_bytes());
+    while let Some(text) = reader.next().await? {
+        digest.update(text);
     }
     Ok(digest.finalize().into())
 }
@@ -1007,21 +1167,31 @@ pub async fn text_source_cmp(
 ) -> io::Result<Ordering> {
     let mut left = TextReader::new(left, budget.clone()).await?;
     let mut right = TextReader::new(right, budget).await?;
+    let (mut left_bytes, mut right_bytes) = (&[][..], &[][..]);
     loop {
-        let left = left.character().await?;
-        let right = right.character().await?;
-        match left.cmp(&right) {
-            Ordering::Equal if left.is_none() => return Ok(Ordering::Equal),
-            Ordering::Equal => {}
-            order => return Ok(order),
+        if left_bytes.is_empty() {
+            left_bytes = left.next().await?.unwrap_or_default();
         }
+        if right_bytes.is_empty() {
+            right_bytes = right.next().await?.unwrap_or_default();
+        }
+        let count = left_bytes.len().min(right_bytes.len());
+        if count == 0 {
+            return Ok(left_bytes.len().cmp(&right_bytes.len()));
+        }
+        let order = left_bytes[..count].cmp(&right_bytes[..count]);
+        if order != Ordering::Equal {
+            return Ok(order);
+        }
+        left_bytes = &left_bytes[count..];
+        right_bytes = &right_bytes[count..];
     }
 }
 
 pub async fn bool_value(source: &JsonSource, budget: Arc<dyn SourceBudget>) -> io::Result<bool> {
     let mut reader = Reader::new(source.bytes.clone(), budget).await?;
     reader.whitespace().await?;
-    let value = match reader.peek().await? {
+    let value = match reader.peek() {
         Some(b't') => {
             reader.literal(b"true").await?;
             true
@@ -1040,16 +1210,25 @@ pub async fn u64_value(source: &JsonSource, budget: Arc<dyn SourceBudget>) -> io
     let mut reader = Reader::new(source.bytes.clone(), budget).await?;
     reader.whitespace().await?;
     let mut value = 0u64;
-    let first = reader.byte().await?;
+    let first = reader
+        .peek()
+        .ok_or_else(|| syntax("truncated JSON source"))?;
+    reader.advance(1);
     if !first.is_ascii_digit() {
         return Err(invalid("JSON value is not an unsigned integer"));
     }
     value += u64::from(first - b'0');
-    while let Some(byte @ b'0'..=b'9') = reader.peek().await? {
+    loop {
+        if reader.remaining().is_empty() {
+            reader.refill().await?;
+        }
+        let Some(byte @ b'0'..=b'9') = reader.peek() else {
+            break;
+        };
         if first == b'0' {
             return Err(syntax("JSON integer has a leading zero"));
         }
-        reader.take().await?;
+        reader.advance(1);
         value = value
             .checked_mul(10)
             .and_then(|value| value.checked_add(u64::from(byte - b'0')))

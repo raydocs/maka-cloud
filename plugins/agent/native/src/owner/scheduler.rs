@@ -262,9 +262,6 @@ impl Scheduler {
             .filter(|active| active.worker == session)
             .map(|active| active.profile)
     }
-    pub fn execution_changed(&self) {
-        self.wake.notify_one();
-    }
     pub async fn finish(&self) -> Result<(), String> {
         self.storage.finish().await
     }

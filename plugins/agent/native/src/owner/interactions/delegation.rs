@@ -452,9 +452,10 @@ async fn child_answered(
     request: &str,
 ) -> Result<(), &'static str> {
     let mut commits = store
-        .subscribe()
+        .subscribe_session(session)
         .map_err(|_| "agent_interaction_store_closed")?;
     loop {
+        commits.borrow_and_update();
         let record = store
             .read(session, request)
             .await

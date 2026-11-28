@@ -1663,6 +1663,45 @@ pub(super) fn view_at(
     view_through(c, history, run, cut.through_sequence, observe)
 }
 
+pub(super) fn preview_evidence(
+    c: &Connection,
+    preview: &PreviewEvidence,
+) -> Result<Vec<HistoryItem>, StoreError> {
+    let (_, ns_id) = check_cut(c, &preview.namespace, &preview.cut)?;
+    let Some(ns_id) = ns_id else {
+        return Ok(Vec::new());
+    };
+    let sequences = c
+        .prepare_cached(
+            "SELECT sequence FROM agent_session_history INDEXED BY agent_session_history_run
+             WHERE run=?1 AND step=?2 AND kind IN ('model_observed','model_closed','model_interrupted')
+               AND namespace_id=?3 AND attempt=?4 AND sequence<=?5
+             UNION ALL
+             SELECT sequence FROM agent_session_history INDEXED BY agent_session_history_run
+             WHERE run=?1 AND step IS NULL AND kind IN ('stop_requested','run_terminated','risk_adjudicated')
+               AND namespace_id=?3 AND sequence<=?5",
+        )?
+        .query_map(
+            params![
+                preview.run.to_string(),
+                preview.step.to_string(),
+                ns_id,
+                preview.attempt.to_string(),
+                bind_u64(preview.cut.through_sequence)?,
+            ],
+            |row| read_u64(row, 0),
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    if sequences.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(
+        window_items(c, &preview.namespace, &preview.cut, &sequences)?
+            .into_values()
+            .collect(),
+    )
+}
+
 pub(super) fn recovery_failure_at(
     c: &Connection,
     history: &HistoryNamespace,

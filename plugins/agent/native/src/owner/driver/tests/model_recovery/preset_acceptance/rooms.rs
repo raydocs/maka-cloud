@@ -46,6 +46,54 @@ async fn reopen(rig: &mut Rig, boot: &Boot) -> TestResult<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn room_watch_tracks_member_metadata_after_roster_changes() -> TestResult<()> {
+    let mut rig = Rig::new()?;
+    let provider = Provider::start().await?;
+    let outcome = AssertUnwindSafe(tokio::time::timeout(Duration::from_secs(30), async {
+        let base = rig.directory.path().to_path_buf();
+        let boot = bootstrap(&base, provider.server.base_url(), false).await?;
+        attach(&mut rig, &boot).await?;
+        let client = rig.client.as_ref().unwrap();
+        let model = model_options(client, &provider.server.base_url(), false, json!({})).await?;
+        let room = create_room(client, &base).await?;
+        let member = create(client, &base, &model, None).await?;
+        let mut watch = client.call("agent", "watch".into(), json!({"sessionId":room,"after":0}), Attachments::new()).await?;
+        watch.start().await?;
+        assert!(matches!(watch.receive().await?, Reply::Subscribed));
+        let Reply::Item { value: initial } = watch.pull().await? else {
+            return Err("missing initial Room watermark".into());
+        };
+        assert_eq!(initial["kind"], "room");
+        let added = call(client, "agent", "roomManage", json!({
+            "sessionId":room,"action":{"kind":"add_members","memberSessionIds":[member["id"]]}
+        })).await?;
+        assert_eq!(added["kind"], "members_added", "{added}");
+        let Reply::Item { value: roster } = watch.pull().await? else {
+            return Err("missing roster watermark".into());
+        };
+        assert_ne!(initial["revision"], roster["revision"]);
+
+        let changed = call(client, "agent", "metadata", json!({
+            "sessionId":member["id"],"expectedRevision":member["revision"],"title":"Renamed member","labels":[]
+        })).await?;
+        assert_eq!(changed["kind"], "committed", "{changed}");
+        let Reply::Item { value: renamed } = watch.pull().await? else {
+            return Err("missing member metadata watermark".into());
+        };
+        assert_eq!(renamed["through"], initial["through"]);
+        assert_ne!(renamed["revision"], roster["revision"]);
+        watch.cancel().await?;
+        Ok::<_, Box<dyn Error + Send + Sync>>(())
+    })).catch_unwind().await;
+    assert_eq!(rig.finish().await, Vec::<String>::new());
+    match outcome {
+        Ok(result) => result??,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn room_interrupted_send_delivers_each_recipient_once_after_reopen() -> TestResult<()> {
     use base64::Engine as _;
     use maka_capabilities::call::immutable_bytes;

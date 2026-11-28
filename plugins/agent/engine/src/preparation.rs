@@ -90,14 +90,15 @@ impl PromptBuilder {
             + crate::history::preparation::RequestPreparation::metadata_bytes();
         let staged = tokio::select! {biased;_=cancellation.cancelled()=>return Err(RunError::Cancelled),staged=resources.reserve_staging(metadata)=>staged?};
         let preparation = crate::history::preparation::RequestPreparation::new(staged);
-        let arena = crate::history::capture_arena::CaptureArena::new(io, None).await?;
+        use crate::history::capture_arena::CaptureArena;
+        let resident = CaptureArena::reserve_prefix(&preparation, &resources)?;
+        let arena = CaptureArena::new(io, resident).await?;
         let builder = crate::history::canonical_prompt::Builder::new(
             arena.clone(),
             resources.clone(),
             preparation.clone(),
             cancellation.clone(),
-        )
-        .await?;
+        )?;
         Ok(Self {
             builder,
             arena,
@@ -356,6 +357,7 @@ mod snapshot;
 pub use crate::history::canonical_prompt::Layout as FrozenPromptLayout;
 pub use snapshot::{
     ContentSource, FrozenPrompt, restore_prompt, restore_prompt_from, snapshot_prompt,
+    verify_prompt_content,
 };
 mod media_source;
 pub use media_source::MediaSource;

@@ -69,7 +69,7 @@ fn sample_child_procs(pid: u32) -> usize {
         .count()
 }
 
-async fn seed_codemode_connection(
+pub(super) async fn seed_codemode_connection(
     root: &std::path::Path,
     base_url: &str,
     language: &str,

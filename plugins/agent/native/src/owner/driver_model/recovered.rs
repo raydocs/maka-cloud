@@ -63,15 +63,14 @@ impl DriverModel {
         let mut cells = BTreeMap::<CellId, CellView>::new();
         let mut recovered = BTreeMap::new();
         let mut after = 0;
-        'history: loop {
-            let page = reader.history(view.run, after, 256).await?;
+        loop {
+            let page = self.replay_history(reader, view, after).await?;
             if page.is_empty() {
                 break;
             }
             let restricted = if view.run != self.execution.run_id {
                 let facts = page
                     .iter()
-                    .take_while(|f| f.revision <= view.revision)
                     .filter(|f| {
                         matches!(
                             f.fact,
@@ -99,9 +98,6 @@ impl DriverModel {
                 Default::default()
             };
             for fact in page {
-                if fact.revision > view.revision {
-                    break 'history;
-                }
                 after = fact.revision;
                 match &fact.fact {
                     Fact::ModelObserved {
@@ -232,17 +228,14 @@ impl DriverModel {
                 if let Fact::ModelAttemptPrepared { attempt, step } = &fact.fact {
                     original.attempt_steps.insert(*attempt, *step);
                 }
-                if let Fact::StepPrepared { step, .. } = fact.fact {
-                    let request = reader.request(view.run, step).await?;
-                    original
-                        .step_purposes
-                        .insert(step, request.accounting.purpose);
-                    if request.accounting.purpose != ModelPurpose::Main {
+                if let Fact::StepPrepared { step, .. } = &fact.fact {
+                    let replay = self.replay_step(reader, view.run, *step).await?;
+                    original.step_purposes.insert(*step, replay.purpose);
+                    if replay.purpose != ModelPurpose::Main {
                         continue;
                     }
-                    let frozen = self.frozen_input(reader, view.run, &request).await?;
                     if fact.revision <= covered_through {
-                        for reference in &request.steering {
+                        for reference in &replay.steering {
                             let source: maka_agent_facts::message::RootSourceMessage =
                                 reader.decode(view.run, reference).await?;
                             original
@@ -250,16 +243,19 @@ impl DriverModel {
                                 .insert((view.run, source.message.message_id));
                         }
                         original.notifications.extend(
-                            frozen
+                            replay
                                 .notifications
                                 .iter()
                                 .map(|notice| (view.run, notice.id)),
                         );
                     }
-                    for knowledge in frozen.recovered_cells {
+                    for knowledge in replay.recovered_cells {
                         // A consumed observation never acquires later child knowledge.
                         recovered.remove(&knowledge.cell);
-                        original.cells.entry(knowledge.cell).or_insert(knowledge);
+                        original
+                            .cells
+                            .entry(knowledge.cell)
+                            .or_insert_with(|| knowledge.clone());
                     }
                 }
             }

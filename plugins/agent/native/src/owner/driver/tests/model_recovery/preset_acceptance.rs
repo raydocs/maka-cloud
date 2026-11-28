@@ -580,6 +580,75 @@ async fn code_mode_turn_pages_only_image_results_and_keeps_its_latest_four() -> 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn long_direct_run_keeps_each_settled_tool_result_in_the_provider_prefix() -> TestResult<()> {
+    const ROUNDS: usize = 64;
+    let mut rig = Rig::new()?;
+    let mut provider = Provider::start().await?;
+    let base = rig.directory.path().to_path_buf();
+    let boot = bootstrap_with(&base, provider.server.base_url(), |config| {
+        config["tools"] = json!([{
+            "name":"Read","description":"Read local file","target":{"kind":"import","name":"files"},
+            "method":"read","nestable":true,"result":"image","confirmation":"preapproved"
+        }]);
+    })
+    .await?;
+    std::fs::write(base.join("workspace/marker.txt"), "durable replay marker")?;
+    attach(&mut rig, &boot).await?;
+    let client = rig.client.as_ref().unwrap();
+    let model = model(client, &boot.base_url, false).await?;
+    let session = create(client, &base, &model, None).await?;
+    let id = session["id"].as_str().unwrap();
+    let sent = call(
+        client,
+        "agent",
+        "send",
+        json!({"sessionId":id,"message":"Read the fixture repeatedly."}),
+    )
+    .await?;
+    let mut previous = Vec::new();
+    for round in 0..=ROUNDS {
+        let (request, reply) = provider.next().await?;
+        let messages = request["messages"]
+            .as_array()
+            .ok_or("missing model messages")?;
+        assert!(
+            messages.starts_with(&previous),
+            "round {round} changed its prefix"
+        );
+        let results: Vec<_> = messages
+            .iter()
+            .filter(|message| message["role"] == "tool")
+            .collect();
+        assert_eq!(results.len(), round);
+        if let Some(last) = results.last() {
+            assert_eq!(last["tool_call_id"], format!("read-{round}"));
+            assert!(
+                last["content"]
+                    .as_str()
+                    .is_some_and(|value| value.contains("durable replay marker"))
+            );
+        }
+        previous.clone_from(messages);
+        if round == ROUNDS {
+            reply.reply_text("Finished reading.");
+        } else {
+            reply.send_plan(
+                TurnPlan::new()
+                    .push_tool_call(
+                        format!("read-{}", round + 1),
+                        "Read",
+                        json!({"path":"marker.txt"}),
+                    )
+                    .finish(FinishReason::ToolCalls),
+            );
+        }
+    }
+    quiescent_message(client, id, &sent["messageId"]).await?;
+    assert!(rig.finish().await.is_empty());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ordinary_and_preset_tools_share_direct_execution_and_permission_denials() -> TestResult<()>
 {
     tool_matrix(false).await
@@ -1476,6 +1545,13 @@ async fn preset_role_and_request_survive_physical_rate_limit_retry() -> TestResu
         let id = session["id"].as_str().unwrap();
         let sent = call(client,"agent","send",json!({"sessionId":id,"message":"Retry this task."})).await?;
         let (first,reply) = provider.next().await?;
+        let owner = rig.captured.lock().unwrap().clone().unwrap();
+        let source = owner.durable.session_history(owner.run_owner(), id.into());
+        let cut = source.capture().await?;
+        let run = source.latest(&cut).await?.ok_or("provider request has no durable Run")?.run;
+        let active = source.view_at(&cut, run).await?;
+        let attempt = active.current_attempt.ok_or("provider request has no durable attempt")?;
+        assert!(active.attempts[&attempt].admission.is_some());
         // Change the live preset while the accepted request is still in flight.
         assert_eq!(call(client,"agent","updatePreset",json!({"id":preset["id"],"expectedRevision":1,"instruction":"changed-after-admission"})).await?["kind"],"saved");
         reply.send_plan(TurnPlan::http_error(HttpErrorSpec::plain(429, "rate limited").with_header("retry-after", "0")));
@@ -1485,8 +1561,7 @@ async fn preset_role_and_request_survive_physical_rate_limit_retry() -> TestResu
         assert_eq!(text.matches("physical-retry-role-marker").count(),1);
         assert!(!text.contains("changed-after-admission"));
         reply.reply_text("Retried.");
-        let run = quiescent_message(client,id,&sent["messageId"]).await?;
-        let owner = rig.captured.lock().unwrap().clone().unwrap();
+        assert_eq!(quiescent_message(client,id,&sent["messageId"]).await?, run);
         let history = facts(&owner.durable,run).await?;
         assert_eq!(history.iter().filter(|f|f["fact"]["kind"]=="step_prepared").count(),1,"retry rebuilt the logical request");
         let attempts: Vec<_> = history.iter().filter(|f|f["fact"]["kind"]=="model_attempt_prepared").collect();

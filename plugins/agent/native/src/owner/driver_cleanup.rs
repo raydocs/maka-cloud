@@ -245,7 +245,7 @@ impl RetainedScope {
         }
         let retained = self.clone();
         let observer = tokio::spawn(async move {
-            let mut notices = match owner.durable.subscribe() {
+            let mut notices = match owner.store.subscribe_session(&session) {
                 Ok(notices) => Some(notices),
                 Err(error) => {
                     tracing::error!(%error, "original SQL cleanup observation unavailable");

@@ -256,6 +256,7 @@ impl Owner {
                 workers: TaskTracker::new(),
                 original_cleanup: Default::default(),
                 conversation: Default::default(),
+                replay_cache: Default::default(),
                 preview,
             });
             original_model

@@ -199,15 +199,23 @@ impl EventLog {
             _ => {}
         }
         let raw = serde_json::to_string(&outcome)?;
-        self.connection.run(move |connection| {
-            let tx = Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
-            let result = tx.execute("UPDATE host_effects SET outcome = ?, payload = ? WHERE id = ? AND outcome IS NULL", rusqlite::params![raw, payload, id.to_string()])?;
-            if result != 1 {
-                return Err(StoreError::EventConflict);
-            }
-            tx.commit().map_err(StoreError::CommitUnknown)?;
-            Ok(())
-        }).await
+        let commits = self.commits.notice();
+        self.connection
+            .run(move |connection| {
+                let tx = Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
+                let session: Option<String> = tx.query_row(
+                "UPDATE host_effects SET outcome = ?, payload = ? WHERE id = ? AND outcome IS NULL
+                 RETURNING json_extract(request, '$.boundary.boundary.sessionId')",
+                rusqlite::params![raw, payload, id.to_string()],
+                |row| row.get(0),
+            ).optional()?.ok_or(StoreError::EventConflict)?;
+                tx.commit().map_err(StoreError::CommitUnknown)?;
+                if let Some(session) = session {
+                    commits.for_sessions([session.as_str()]).metadata();
+                }
+                Ok(())
+            })
+            .await
     }
 
     pub async fn host_effect(

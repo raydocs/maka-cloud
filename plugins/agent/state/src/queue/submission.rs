@@ -96,7 +96,13 @@ impl Statement for WithdrawMessage {
                 return Ok(Prepared {
                     value: WithdrawalResult::Cancelled,
                     changed,
-                    notification: Notification::METADATA.with_sessions([self.session]),
+                    notification: if changed {
+                        Notification::METADATA
+                            .with_sessions([self.session])
+                            .with_topic(maka_event_log::CommitTopic::Queue)
+                    } else {
+                        Notification::NONE
+                    },
                 });
             }
             _ => {
