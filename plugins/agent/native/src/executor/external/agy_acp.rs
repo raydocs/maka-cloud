@@ -27,8 +27,15 @@ use maka_external_agent::AcpV1Projection;
 use runtime::Pipe;
 use runtime::string;
 use serde_json::json;
+use std::borrow::Cow;
 
 const HOST_SERVER: &str = "maka";
+const HOST_GUIDANCE: &str = "Use Maka MCP tools (mcp_maka_* or mcp_maka_exec) to read, write, \
+and edit workspace files, run commands, coordinate sessions and Rooms, ask the user questions \
+(AskUserQuestion), and manage automation. Pass maka:// resource URIs directly to Maka's Read tool. \
+Avoid Antigravity's built-in file, terminal, and interactive question tools. You can use the \
+built-in search_web for web searches. Do not spawn subagents or leave background processes or \
+tasks running. Maka shuts down this agy process tree at the end of each turn.";
 
 #[expect(
     clippy::too_many_arguments,
@@ -163,8 +170,9 @@ struct Protocol<'a> {
 
 impl Protocol<'_> {
     async fn converse(mut self, io: &mut Pipe) -> Result<Outcome, Error> {
-        let setup = self.prepare(io).await;
-        let (session, mut blocks, model, system_prompt_append) = match setup {
+        let instructions = turn_instructions(self.request["instructions"].as_str());
+        let setup = self.prepare(io, &instructions).await;
+        let (session, blocks, model, system_prompt_append) = match setup {
             Ok(setup) => setup,
             Err(
                 error @ (Error::Cancelled
@@ -176,19 +184,16 @@ impl Protocol<'_> {
             Err(error) => return runtime::preparation_failure(error),
         };
 
-        let instructions = (!system_prompt_append)
-            .then(|| {
-                self.journal
-                    .instruction_update(self.request["instructions"].as_str())
-            })
+        let instruction_update = (!system_prompt_append)
+            .then(|| self.journal.instruction_update(Some(&instructions)))
             .flatten();
-        if let Some(update) = &instructions {
-            blocks.insert(
-                0,
-                json!({"type":"text","text":runtime::instruction_message(&update.text)}),
-            );
-        }
-        let prompt = json!({"sessionId":session,"prompt":blocks});
+        let prompt = prompt_params(
+            &session,
+            blocks,
+            instruction_update
+                .as_ref()
+                .map(|update| update.text.as_str()),
+        );
         io.turn_started();
         let clock = crate::model_time::ModelTime::new();
         let prompt_id = io
@@ -216,7 +221,7 @@ impl Protocol<'_> {
             .await
             .map_err(unconfirmed)?;
         if matches!(outcome, Outcome::Completed { .. })
-            && let Some(update) = instructions
+            && let Some(update) = instruction_update
         {
             self.journal.confirm_instructions(update).await?;
         }
@@ -230,6 +235,7 @@ impl Protocol<'_> {
     async fn prepare(
         &mut self,
         io: &mut Pipe,
+        instructions: &str,
     ) -> Result<(String, Vec<Value>, Option<String>, bool), Error> {
         let initialized = io.request("initialize", initialize_params()).await?;
         if initialized["protocolVersion"] != 1
@@ -242,13 +248,7 @@ impl Protocol<'_> {
         }
         let system_prompt_append = supports_system_prompt_append(&initialized);
         let system_prompt = system_prompt_append
-            .then(|| {
-                system_prompt_text(
-                    self.request["instructions"].as_str(),
-                    self.journal.has_delivered_instructions(),
-                )
-            })
-            .flatten();
+            .then(|| system_prompt_text(instructions, self.journal.has_delivered_instructions()));
         let (method, params) = open_params(
             self.cwd,
             &self.bridge.url,
@@ -281,12 +281,18 @@ fn supports_system_prompt_append(initialized: &Value) -> bool {
         == Some(&Value::Bool(true))
 }
 
-fn system_prompt_text(instructions: Option<&str>, had_user_block: bool) -> Option<String> {
-    let instructions = instructions.filter(|text| !text.trim().is_empty());
+fn turn_instructions(instructions: Option<&str>) -> Cow<'static, str> {
+    match instructions.filter(|text| !text.trim().is_empty()) {
+        Some(text) => format!("{HOST_GUIDANCE}\n\n{text}").into(),
+        None => HOST_GUIDANCE.into(),
+    }
+}
+
+fn system_prompt_text(instructions: &str, had_user_block: bool) -> Cow<'_, str> {
     if had_user_block {
-        Some(journal::instruction_text(instructions))
+        journal::instruction_text(Some(instructions)).into()
     } else {
-        instructions.map(str::to_owned)
+        instructions.into()
     }
 }
 
@@ -298,7 +304,7 @@ fn open_params(
     system_prompt: Option<&str>,
 ) -> (&'static str, Value) {
     let mut antigravity = json!({"eagerMcpServers":[HOST_SERVER]});
-    if let Some(instructions) = system_prompt.filter(|text| !text.trim().is_empty()) {
+    if let Some(instructions) = system_prompt {
         antigravity["systemPrompt"] = json!({"append": instructions});
     }
     let mut params = json!({
@@ -316,6 +322,16 @@ fn open_params(
         "session/new"
     };
     (method, params)
+}
+
+fn prompt_params(session: &str, mut blocks: Vec<Value>, instruction_update: Option<&str>) -> Value {
+    if let Some(text) = instruction_update {
+        blocks.insert(
+            0,
+            json!({"type":"text","text":runtime::instruction_message(text)}),
+        );
+    }
+    json!({"sessionId":session,"prompt":blocks})
 }
 
 fn initialize_params() -> Value {
@@ -895,7 +911,7 @@ mod tests {
     }
 
     #[test]
-    fn open_params_attaches_system_prompt_append_only_when_advertised_and_non_empty() {
+    fn system_prompt_append_includes_host_guidance_on_new_and_resumed_sessions() {
         assert!(supports_system_prompt_append(&json!({
             "agentCapabilities": { "_meta": { "antigravity": { "systemPrompt": { "append": true } } } }
         })));
@@ -903,45 +919,68 @@ mod tests {
             "agentCapabilities": { "mcpCapabilities": { "http": true } }
         })));
 
-        let (method, params) = open_params(
-            "/ws",
-            "http://127.0.0.1:1/mcp",
-            "tok",
-            None,
-            Some("Be concise"),
-        );
-        assert_eq!(method, "session/new");
-        assert_eq!(
-            params.pointer("/_meta/antigravity/systemPrompt/append"),
-            Some(&json!("Be concise"))
-        );
+        for (native_session, expected_method, had_user_block) in [
+            (None, "session/new", false),
+            (Some("s1"), "session/resume", true),
+        ] {
+            for user in [None, Some(""), Some(" \t"), Some("Be concise.")] {
+                let instructions = turn_instructions(user);
+                let append = system_prompt_text(&instructions, had_user_block);
+                let (method, params) = open_params(
+                    "/ws",
+                    "http://127.0.0.1:1/mcp",
+                    "tok",
+                    native_session,
+                    Some(&append),
+                );
+                assert_eq!(method, expected_method);
+                assert_eq!(params["sessionId"].as_str(), native_session);
+                assert_eq!(params["cwd"], "/ws");
+                let text = params["_meta"]["antigravity"]["systemPrompt"]["append"]
+                    .as_str()
+                    .unwrap();
+                assert_eq!(
+                    text.contains("replace all earlier Maka instruction blocks"),
+                    had_user_block
+                );
+                assert!(text.contains("mcp_maka_exec"));
+                assert!(
+                    text.contains("Maka shuts down this agy process tree at the end of each turn.")
+                );
+                assert_eq!(
+                    text.ends_with("\n\nBe concise."),
+                    user == Some("Be concise.")
+                );
+            }
+        }
+    }
 
-        let (method, params) = open_params(
-            "/ws",
-            "http://127.0.0.1:1/mcp",
-            "tok",
-            Some("s1"),
-            Some("Updated"),
-        );
-        assert_eq!(method, "session/resume");
-        assert_eq!(params["sessionId"], "s1");
-        assert_eq!(
-            params.pointer("/_meta/antigravity/systemPrompt/append"),
-            Some(&json!("Updated"))
-        );
+    #[test]
+    fn fallback_prompt_includes_host_guidance_before_the_task() {
+        let (_, opened) = open_params("/ws", "http://127.0.0.1:1/mcp", "tok", None, None);
+        assert_eq!(opened.pointer("/_meta/antigravity/systemPrompt"), None);
 
-        let (_, blank) = open_params("/ws", "http://127.0.0.1:1/mcp", "tok", None, Some("   "));
-        assert_eq!(blank.pointer("/_meta/antigravity/systemPrompt"), None);
-
-        assert_eq!(
-            system_prompt_text(Some("Fresh"), false).as_deref(),
-            Some("Fresh")
-        );
-        assert_eq!(system_prompt_text(Some("   "), false), None);
-        let superseded = system_prompt_text(Some("Revised"), true).unwrap();
-        assert!(superseded.contains("replace all earlier Maka instruction blocks"));
-        assert!(superseded.contains("Revised"));
-        let cleared = system_prompt_text(None, true).unwrap();
-        assert!(cleared.contains("previous Maka instruction blocks are now cleared"));
+        let task = json!({"type":"text","text":"Run the tests"});
+        for user in [None, Some(""), Some(" \t"), Some("Be concise.")] {
+            let instructions = turn_instructions(user);
+            let update = journal::instruction_text(Some(&instructions));
+            let prompt = prompt_params("s1", vec![task.clone()], Some(&update));
+            let [block, user_block] = prompt["prompt"].as_array().unwrap().as_slice() else {
+                panic!("expected an instructions block followed by the task");
+            };
+            assert_eq!(block["type"], "text");
+            let text = block["text"].as_str().unwrap();
+            assert!(text.starts_with("<maka_system_instructions>\n"));
+            assert!(text.contains("replace all earlier Maka instruction blocks"));
+            assert!(text.contains("mcp_maka_exec"));
+            assert!(
+                text.contains("Maka shuts down this agy process tree at the end of each turn.")
+            );
+            assert_eq!(
+                text.contains("\n\nBe concise.\n"),
+                user == Some("Be concise.")
+            );
+            assert_eq!(user_block, &task);
+        }
     }
 }

@@ -18,53 +18,6 @@
  */
 
 use super::*;
-use std::{
-    fs,
-    io::{self, Write},
-    path::Path,
-};
-
-pub(super) const HOST_AGENT: &str = "maka";
-const PROFILE: &str = "---
-name: maka
-description: Antigravity agent for Maka conversations
-mainAgent: true
-subagent: false
-tools: [search_web]
----
-Use Maka MCP tools for workspace operations, session/Room coordination (`maka://session/<id>`), and automation. Pass `maka://` resource URIs directly to Maka's `Read` tool (via `mcp_maka_exec` or direct MCP tools) or use `Session*` tools.
-";
-
-pub(super) async fn host_agent_directory() -> Result<PathBuf, Error> {
-    let home = std::env::home_dir()
-        .ok_or_else(|| Error::Invalid("Cannot locate the account home for Antigravity".into()))?;
-    tokio::task::spawn_blocking(move || prepare_profile(&home))
-        .await
-        .map_err(|error| Error::Provider(format!("Antigravity agent setup task failed: {error}")))?
-        .map_err(|error| {
-            Error::Provider(format!(
-                "Cannot prepare the Maka Antigravity agent: {error}"
-            ))
-        })
-}
-
-fn prepare_profile(home: &Path) -> io::Result<PathBuf> {
-    let root = home.join(".maka/external-agents/antigravity/agent");
-    let agents = root.join(".agents/agents");
-    let profile = agents.join("maka.md");
-
-    match fs::read(&profile) {
-        Ok(current) if current == PROFILE.as_bytes() => return Ok(root),
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-    }
-    fs::create_dir_all(&agents)?;
-    let mut staging = tempfile::NamedTempFile::new_in(&agents)?;
-    staging.write_all(PROFILE.as_bytes())?;
-    staging.persist(&profile)?;
-    Ok(root)
-}
 
 pub(super) async fn models(
     config: &runtime::ResolvedCommand<'_>,
@@ -409,33 +362,6 @@ mod tests {
             ]
         );
         assert!(parse_models(b"same\tOne\nsame\tTwo\n").is_err());
-    }
-
-    #[test]
-    fn antigravity_uses_one_static_agent_directory_in_maka() -> io::Result<()> {
-        let home = tempfile::tempdir()?;
-        let home = home.path();
-        let user_agents = home.join(".gemini/config/agents");
-        fs::create_dir_all(&user_agents)?;
-        fs::write(user_agents.join("mine.md"), "my own agent")?;
-
-        let root = home.join(".maka/external-agents/antigravity/agent");
-        assert_eq!(prepare_profile(home)?, root);
-        let profile = root.join(".agents/agents/maka.md");
-        let definition = fs::read_to_string(&profile)?;
-        assert!(definition.starts_with("---\nname: maka\n"));
-        assert_eq!(
-            definition.lines().find(|line| line.starts_with("tools:")),
-            Some("tools: [search_web]")
-        );
-        assert_eq!(prepare_profile(home)?, root);
-        assert_eq!(fs::read_to_string(profile)?, definition);
-        assert_eq!(
-            fs::read_to_string(user_agents.join("mine.md"))?,
-            "my own agent"
-        );
-        assert_eq!(fs::read_dir(user_agents)?.count(), 1);
-        Ok(())
     }
 
     #[test]

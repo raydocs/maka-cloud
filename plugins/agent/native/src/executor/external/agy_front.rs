@@ -253,11 +253,8 @@ pub async fn serve_front() -> io::Result<()> {
     let mut host_out = tokio::io::stdout();
 
     let spawn = async {
-        let profile = agy::host_agent_directory()
-            .await
-            .map_err(io::Error::other)?;
         let temp = tempfile::Builder::new().prefix("maka-agy-").tempdir()?;
-        let mut cmd = maka_process::Command::new(launch.executable, &profile);
+        let mut cmd = maka_process::Command::new(launch.executable, temp.path());
         for arg in launch.args {
             cmd.arg(arg);
         }
@@ -271,11 +268,7 @@ pub async fn serve_front() -> io::Result<()> {
             "acp",
             "--process-per-session",
             "--dangerously-skip-permissions",
-            "--agent",
-            agy::HOST_AGENT,
-            "--add-dir",
-        ])
-        .arg(&profile);
+        ]);
         let spawned = maka_process::pipe::spawn(cmd)
             .await
             .map_err(io::Error::other)?;

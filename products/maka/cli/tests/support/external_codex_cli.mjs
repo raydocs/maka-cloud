@@ -18,30 +18,23 @@
  */
 
 import net from 'node:net';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { readFile, writeFile } from 'node:fs/promises';
-import { join, normalize } from 'node:path';
+import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { randomUUID } from 'node:crypto';
 
 const args = process.argv.slice(2);
-const managedAgent = join(process.env.HOME, '.maka', 'external-agents', 'antigravity', 'agent');
 const antigravity =
-  args.length === 7 &&
-  args.slice(0, 6).join(' ') ===
-    'acp --process-per-session --dangerously-skip-permissions --agent maka --add-dir' &&
-  normalize(args[6]) === managedAgent;
+  args.length === 3 &&
+  args.join(' ') === 'acp --process-per-session --dangerously-skip-permissions';
 if (!antigravity && args.join(' ') !== 'app-server --listen stdio://')
-  throw Error(
-    `Unexpected external agent invocation: ${JSON.stringify(args)} (profile ${managedAgent})`,
-  );
-if (antigravity) {
-  const profile = await readFile(join(managedAgent, '.agents', 'agents', 'maka.md'), 'utf8');
-  if (!profile.startsWith('---\nname: maka\n')) throw Error('Missing Maka agent definition');
-}
+  throw Error(`Unexpected external agent invocation: ${JSON.stringify(args)}`);
 // Model agy's shared front: the provider owns a worker and cwd for each session.
 if (antigravity && !process.env.FAKE_ACP_WORKER) {
+  if (realpathSync(process.cwd()) !== realpathSync(process.env.TMPDIR))
+    throw Error('Expected the agy front to start in its temporary directory');
   const sessions = new Map();
   const send = (frame) => process.stdout.write(JSON.stringify(frame) + '\n');
   for await (const line of createInterface({ input: process.stdin })) {

@@ -2056,16 +2056,6 @@ async fn antigravity_can_continue_after_host_restarts_during_a_prompt() {
                 rig.configure(&mut anchor, &bootstrap, "antigravity"),
             )
             .await?;
-            let global_agents = rig.sandbox.home.join(".gemini/config/agents");
-            let managed_profile = rig
-                .sandbox
-                .home
-                .join(".maka/external-agents/antigravity/agent/.agents/agents/maka.md");
-            assert!(
-                !tokio::fs::try_exists(&managed_profile)
-                    .await
-                    .map_err(|error| error.to_string())?
-            );
             bootstrap.close().await?;
             rig.clients.pop();
             let sdk = connect_sdk(&mut rig, &anchor).await?;
@@ -2126,8 +2116,12 @@ async fn antigravity_can_continue_after_host_restarts_during_a_prompt() {
             )
             .await?;
             assert_eq!(after["prefix"], before["prefix"]);
+            let maka_home = rig.sandbox.home.join(".maka");
+            tokio::fs::create_dir_all(&maka_home)
+                .await
+                .map_err(|e| e.to_string())?;
             tokio::fs::write(
-                rig.sandbox.home.join(".maka/AGENTS.md"),
+                maka_home.join("AGENTS.md"),
                 "ACP resumed instruction revision",
             )
             .await
@@ -2169,11 +2163,17 @@ async fn antigravity_can_continue_after_host_restarts_during_a_prompt() {
                     .iter()
                     .find(|row| row["method"] == method)
                     .unwrap();
+                assert_eq!(
+                    Path::new(open["params"]["cwd"].as_str().unwrap())
+                        .canonicalize()
+                        .unwrap(),
+                    rig.sandbox.workspace.canonicalize().unwrap()
+                );
                 let instructions = open
                     .pointer("/params/_meta/antigravity/systemPrompt/append")
                     .and_then(Value::as_str)
                     .unwrap();
-                assert!(!instructions.trim().is_empty());
+                assert!(instructions.contains("mcp_maka_exec"));
                 assert_eq!(
                     instructions.contains("ACP resumed instruction revision"),
                     revised
@@ -2279,11 +2279,6 @@ async fn antigravity_can_continue_after_host_restarts_during_a_prompt() {
                 Ok(())
             })
             .await?;
-            assert!(
-                !tokio::fs::try_exists(&global_agents)
-                    .await
-                    .map_err(|error| error.to_string())?
-            );
             recovery.close().await?;
             rig.clients.pop();
             phase("quit reopened Host", rig.hosts[1].quit(&mut reopened)).await?;
@@ -3473,12 +3468,9 @@ async fn antigravity_falls_back_to_user_block_and_supersedes_after_upgrade() {
         else {
             panic!("expected legacy [instructions, user] prompt blocks");
         };
-        assert!(
-            instructions_block["text"]
-                .as_str()
-                .unwrap()
-                .starts_with("<maka_system_instructions>")
-        );
+        let fallback = instructions_block["text"].as_str().unwrap();
+        assert!(fallback.starts_with("<maka_system_instructions>"));
+        assert!(fallback.contains("mcp_maka_exec"));
         assert!(
             user_block["text"]
                 .as_str()
@@ -3535,6 +3527,7 @@ async fn antigravity_falls_back_to_user_block_and_supersedes_after_upgrade() {
             .and_then(Value::as_str)
             .unwrap();
         assert!(append.contains("replace all earlier Maka instruction blocks"));
+        assert!(append.contains("mcp_maka_exec"));
         assert!(append.contains("Upgraded instruction set"));
         let [upgraded_user] = upgraded_wire.task_prompt()["params"]["prompt"]
             .as_array()
